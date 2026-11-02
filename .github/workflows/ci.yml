@@ -45,4 +45,6 @@ jobs:
           grep -q 'RECEIVED "-----BEGIN FAKE DEMO KEY-----' demo.txt
           grep -q 'collector:  nothing received' demo.txt
           grep -q 'mcpcage blocked tools/list' demo.txt
+          grep -q 'high-severity signs of hidden instructions' demo.txt
+          grep -q 'NOT CAGED' demo.txt
           grep -q 'audit logs intact' demo.txt

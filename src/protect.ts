@@ -195,7 +195,7 @@ const NAME_WIDTH = 12;
 const COMMAND_WIDTH = 64;
 const NO_COMMAND = "(no command)";
 
-/** One block per configuration file, user files before project files, the files not found, then a summary. */
+/** One block per configuration file, user files before project files, one line for the files not found, then a summary. */
 export function renderReport(report: ProtectReport, options: { home: string }): string {
   const lines: string[] = [];
   const absent: string[] = [];
@@ -207,7 +207,7 @@ export function renderReport(report: ProtectReport, options: { home: string }): 
   for (const file of report.files) {
     const header = `${file.clientName}  ${shownFile(file, options.home)}`;
     if (!file.exists) {
-      absent.push(`  ${header}`);
+      absent.push(file.clientName);
       continue;
     }
     if (file.error !== undefined) {
@@ -226,7 +226,10 @@ export function renderReport(report: ProtectReport, options: { home: string }): 
       block(`${header} (${printable(section.label)})`, inSection);
     }
   }
-  if (absent.length > 0) lines.push("Not found", ...absent);
+  // Most clients are not installed on a given machine: their paths would bury the files that matter.
+  if (absent.length > 0) {
+    lines.push(`Not found: ${absent.length} other configuration file${absent.length === 1 ? "" : "s"} (${[...new Set(absent)].join(", ")})`);
+  }
   lines.push("", "Summary", ...summary(report));
   return lines.join("\n");
 }

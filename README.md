@@ -10,6 +10,10 @@ Every `npx` MCP server in that file now starts through mcpcage: inside a contain
 a read-only filesystem and no access to your home directory, behind a proxy that blocks it if its
 tool definitions change after you approved them. Nothing else about your setup changes.
 
+![mcpcage demo: a stolen key stopped, a rug pull blocked and explained, exposed servers found](docs/demo.gif)
+
+The recording is reproducible: `npm run demo:gif` records it again from [demo/demo.tape](demo/demo.tape).
+
 ## Why
 
 Most MCP servers are npm or PyPI packages that your client starts with `npx` or `uvx`. They run as
@@ -200,6 +204,7 @@ npm ci
 npm test               # unit and integration tests, no Docker needed
 npm run test:docker    # the cage against a real Docker daemon
 node demo/run-demo.mjs # both attack scenes
+npm run demo:gif       # record docs/demo.gif with VHS (needs Docker)
 ```
 
 mcpcage has no runtime dependencies. Releases are published to npm with provenance, with a
