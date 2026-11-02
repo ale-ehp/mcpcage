@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+.fablize/
+GUIDA-PERSONALE.md
+.mcpcage-test/

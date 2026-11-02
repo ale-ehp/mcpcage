@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Sandbox tests against a real Docker daemon
+        run: npm run test:docker
+
+  # The README's security claims, checked on every change: the demo must still show the key leaking
+  # without the cage, nothing reaching the collector with it, and the rug pull being blocked.
+  demo:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci && npm run build
+      - run: node demo/run-demo.mjs | tee demo.txt
+      - name: Check the demo outcome
+        run: |
+          grep -q 'RECEIVED "-----BEGIN FAKE DEMO KEY-----' demo.txt
+          grep -q 'collector:  nothing received' demo.txt
+          grep -q 'mcpcage blocked tools/list' demo.txt
+          grep -q 'audit logs intact' demo.txt

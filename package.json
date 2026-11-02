@@ -1,0 +1,39 @@
+{
+  "name": "mcpcage",
+  "version": "0.1.0",
+  "description": "Run any MCP server in a cage: tool definitions pinned, calls audited, the server sandboxed in a hardened container.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "mcpcage": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "runtime"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && vitest run --exclude 'test/**/*.docker.test.ts'",
+    "test:docker": "npm run build && vitest run test/*.docker.test.ts"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "sandbox",
+    "docker",
+    "security",
+    "ai-agents",
+    "supply-chain"
+  ],
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@types/node": "22.20.5",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5",
+    "zod": "4.6.7"
+  }
+}

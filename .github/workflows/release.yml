@@ -1,0 +1,39 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the package and SBOM to the GitHub release
+      id-token: write # Sigstore keyless signing for npm provenance and the build attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm test
+      - run: npm sbom --sbom-format cyclonedx --omit dev > mcpcage.cdx.json
+      - run: npm pack
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: mcpcage-*.tgz
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public mcpcage-*.tgz
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: GitHub release with the package and its SBOM
+        run: gh release create "$GITHUB_REF_NAME" mcpcage-*.tgz mcpcage.cdx.json --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
