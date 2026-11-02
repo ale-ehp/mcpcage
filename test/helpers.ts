@@ -45,3 +45,19 @@ export function mcpcage(home: string, ...args: string[]) {
   const result = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", env: { ...process.env, MCPCAGE_HOME: home } });
   return { code: result.status, stdout: result.stdout, stderr: result.stderr };
 }
+
+/**
+ * The environment of a user whose home directory is `home`, with mcpcage's data in `cage`. Variables
+ * that would point the CLI at this machine's real client configurations are left out.
+ */
+export function fakeUserEnv(home: string, cage: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of ["COPILOT_HOME", "APPDATA", "USERPROFILE", "XDG_CONFIG_HOME"]) delete env[name];
+  return { ...env, HOME: home, MCPCAGE_HOME: cage, ...extra };
+}
+
+/** Runs the CLI with exactly this environment (see fakeUserEnv). */
+export function mcpcageWithEnv(env: NodeJS.ProcessEnv, ...args: string[]) {
+  const result = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", env });
+  return { code: result.status, stdout: result.stdout, stderr: result.stderr };
+}

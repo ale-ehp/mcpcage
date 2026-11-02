@@ -1,14 +1,24 @@
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
+import { parseLaunch } from "./launch.js";
 
-/** One MCP server entry, as Claude Desktop, Claude Code, Cursor and VS Code store it. */
-interface ServerEntry {
+/** One MCP server entry, as Claude Desktop, Claude Code, Cursor, VS Code, Copilot and Windsurf store it. */
+export interface ServerEntry {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
   url?: string;
+  serverUrl?: string;
   type?: string;
+  headers?: Record<string, string>;
   [field: string]: unknown;
 }
+
+/** What starts a server, which decides whether mcpcage can cage it. */
+export type ServerType = "npx" | "uvx" | "docker" | "remote" | "mcpcage" | "other";
+
+const REMOTE_TYPES = new Set(["http", "sse", "ws", "streamable-http"]);
 
 export interface WrapOutcome {
   file: string;
@@ -19,24 +29,70 @@ export interface WrapOutcome {
   backup?: string;
 }
 
-/**
- * Rewrites every npx-launched stdio server so the client starts it through `mcpcage run`.
- * Environment variables the entry passes become explicit `--env NAME` flags, because nothing
- * from the host reaches the container unless it is named.
- */
+/** Rewrites every npx-launched stdio server so the client starts it through `mcpcage run`. */
 export function wrapConfig(file: string, options: { dryRun: boolean; command?: string }): WrapOutcome {
-  const mcpcage = options.command ?? "mcpcage";
+  const command = options.command ?? "mcpcage";
   return transform(file, options.dryRun, (name, entry, skip) => {
-    if (entry.url !== undefined || (entry.type !== undefined && entry.type !== "stdio")) return skip(name, "remote server: nothing runs locally to cage");
-    if (!entry.command) return skip(name, "no command");
-    if (isWrapped(entry)) return skip(name, "already wrapped");
-    if (!/(^|[/\\])npx(\.cmd)?$/.test(entry.command)) {
-      const hint = /(^|[/\\])docker$/.test(entry.command) ? "already containerized; `mcpcage run --image` can add pinning and audit" : "only npx servers can be caged in this version";
-      return skip(name, `${entry.command}: ${hint}`);
-    }
-    const envFlags = Object.keys(entry.env ?? {}).flatMap((variable) => ["--env", variable]);
-    return { ...entry, command: mcpcage, args: ["run", ...envFlags, "--", entry.command, ...(entry.args ?? [])] };
+    const wrapped = wrapEntry(entry, { command });
+    return "skip" in wrapped ? skip(name, wrapped.skip) : wrapped.entry;
   });
+}
+
+/**
+ * One entry rewritten to start through `mcpcage run`, or why it cannot be. Environment variables
+ * become explicit `--env NAME` flags, because nothing from the host reaches the container unless it
+ * is named. A path the server is given and that exists here becomes a writable mount at the same
+ * path, because the server is expected to work there: a filesystem server pointed at ~/notes would
+ * otherwise find nothing inside the cage. Every other path, and the network, stay closed.
+ * A `~/` argument becomes the absolute path that is mounted: inside the cage HOME is /tmp, so a
+ * server that expands `~` itself would look in /tmp.
+ */
+export function wrapEntry(entry: ServerEntry, options: { command: string }): { entry: ServerEntry } | { skip: string } {
+  const type = serverType(entry);
+  if (type === "remote") return { skip: "remote server: nothing runs locally to cage" };
+  if (!entry.command) return { skip: "no command" };
+  if (type === "mcpcage") return { skip: "already wrapped" };
+  if (type !== "npx") {
+    const hint = type === "docker" ? "already containerized; `mcpcage run --image` can add pinning and audit" : "only npx servers can be caged in this version";
+    return { skip: `${entry.command}: ${hint}` };
+  }
+  const args = entry.args ?? [];
+  let serverArgs: string[];
+  try {
+    serverArgs = parseLaunch([entry.command, ...args]).args;
+  } catch (error) {
+    // `mcpcage run` would refuse this command line at every start: better to leave the entry as it is.
+    return { skip: (error as Error).message };
+  }
+  // The server's own arguments end the list, after npx's flags and the package, which is never mounted.
+  const npxPart = args.slice(0, args.length - serverArgs.length);
+  const paths = serverArgs.map((arg) => hostPath(arg));
+  const envFlags = Object.keys(entry.env ?? {}).flatMap((variable) => ["--env", variable]);
+  const mountFlags = [...new Set(paths.filter((path): path is string => path !== undefined))].flatMap((path) => ["--mount", `${path}:rw`]);
+  const server = serverArgs.map((arg, index) => paths[index] ?? arg);
+  return { entry: { ...entry, command: options.command, args: ["run", ...envFlags, ...mountFlags, "--", entry.command, ...npxPart, ...server] } };
+}
+
+/** The absolute path an argument names on this machine, when it exists here: `/x` as written, `~/x` expanded. */
+export function hostPath(arg: unknown): string | undefined {
+  if (typeof arg !== "string") return undefined; // configuration files are not type-checked
+  const path = arg.startsWith("~/") ? join(homedir(), arg.slice(2)) : arg;
+  return isAbsolute(path) && existsSync(path) ? path : undefined;
+}
+
+/**
+ * `remote` for servers reached over the network (nothing runs locally), `mcpcage` for entries that
+ * already start through `mcpcage run`, otherwise the program that starts the server.
+ */
+export function serverType(entry: ServerEntry): ServerType {
+  const type = typeof entry.type === "string" ? entry.type.toLowerCase() : undefined;
+  if (entry.url != null || entry.serverUrl != null || (type !== undefined && REMOTE_TYPES.has(type))) return "remote";
+  if (isWrapped(entry)) return "mcpcage";
+  const program = typeof entry.command === "string" ? (entry.command.split(/[/\\]/).pop() ?? "") : "";
+  if (/^npx(\.cmd)?$/.test(program)) return "npx";
+  if (/^uvx(\.exe)?$/.test(program)) return "uvx";
+  if (/^docker(\.exe)?$/.test(program)) return "docker";
+  return "other";
 }
 
 /** Restores the original commands that `wrapConfig` replaced. */
@@ -52,7 +108,8 @@ export function unwrapConfig(file: string, options: { dryRun: boolean }): WrapOu
 }
 
 export function isWrapped(entry: ServerEntry): boolean {
-  return entry.command !== undefined && /(^|[/\\])mcpcage$/.test(entry.command) && entry.args?.[0] === "run";
+  // `where mcpcage` gives mcpcage.cmd on Windows.
+  return typeof entry.command === "string" && /(^|[/\\])mcpcage(\.cmd|\.exe)?$/.test(entry.command) && entry.args?.[0] === "run";
 }
 
 type Rewrite = (

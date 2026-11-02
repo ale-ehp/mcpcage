@@ -1,13 +1,19 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
-import { unwrapConfig, wrapConfig, type WrapOutcome } from "./config.js";
+import { discoverConfigs } from "./clients.js";
+import { unwrapConfig, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
+import { listTools } from "./inspect.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
 import { cageHome, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, readJson } from "./pinstore.js";
+import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
@@ -22,6 +28,7 @@ Usage:
   mcpcage prepare [options] -- npx -y <package> [args]   build and pin the sandbox image without starting it
   mcpcage wrap <config.json> [--dry-run] [--no-build]    route a client's npx servers through mcpcage
   mcpcage unwrap <config.json> [--dry-run]               restore the original commands
+  mcpcage protect [--inspect] [--fix] [options]          find every MCP configuration and show what is exposed
   mcpcage diff <server-id>                               show tool changes waiting for approval
   mcpcage approve <server-id> [--yes]                    trust the reviewed tool definitions
   mcpcage list                                           servers, pinned tools, pending changes
@@ -39,6 +46,15 @@ Run options:
   --keep-image-user     with --image: keep the image's own user instead of 65532 (nonroot)
   --rebuild             re-resolve the package or image instead of reusing the pinned one
   --no-sandbox          run on the host: pinning and audit only, no isolation (not recommended)
+
+Protect options:
+  --project <dir>       also check this project's .mcp.json, .cursor/ and .vscode/ (default: current directory)
+  --inspect             start each npx server in the cage and look for hidden instructions in its tools
+  --offline             do not ask the npm registry; use what was looked up before
+  --fix                 route every npx server through mcpcage, after showing the plan (backups are kept)
+  --yes                 with --fix: change the files without asking
+  --no-build            with --fix: do not build the sandbox images now
+  --command <path>      the mcpcage command written into configurations (default: mcpcage's full path)
 `;
 
 async function main(argv: string[]): Promise<number> {
@@ -51,6 +67,8 @@ async function main(argv: string[]): Promise<number> {
     case "wrap":
     case "unwrap":
       return wrap(command, rest);
+    case "protect":
+      return protect(rest);
     case "diff":
       return diff(rest);
     case "approve":
@@ -192,26 +210,118 @@ async function wrap(command: "wrap" | "unwrap", argv: string[]): Promise<number>
         ? wrapConfig(file, { dryRun: values["dry-run"], command: values.command })
         : unwrapConfig(file, { dryRun: values["dry-run"] });
     report(outcome, command, values["dry-run"]);
-    if (command === "wrap" && !values["dry-run"] && !values["no-build"]) {
-      // Build now, so the client's first start does not wait for an image build and time out.
-      for (const change of outcome.changed) {
-        const args = change.after.args ?? [];
-        const spec = parseLaunch(args.slice(args.indexOf("--") + 1));
-        if (spec.kind !== "npm") continue;
-        try {
-          const prepared = prepareSandbox({
-            serverId: serverIdFor(spec), spec, mounts: [], env: [], allowNet: false, memory: "512m", cpus: "1",
-            keepImageUser: false, rebuild: false, log: (message) => console.error(message),
-          });
-          console.log(`  built ${change.name}: ${prepared.record.packageName}@${prepared.record.version} -> ${prepared.record.image}`);
-        } catch (error) {
-          status = 1;
-          console.error(`  could not build ${change.name}: ${(error as Error).message}`);
-        }
-      }
+    if (command === "wrap" && !values["dry-run"] && !values["no-build"]) status = Math.max(status, buildImages(outcome.changed));
+  }
+  return status;
+}
+
+/** Builds the images now, so the client's first start does not wait for an image build and time out. */
+function buildImages(changes: Array<{ name: string; after: ServerEntry }>): number {
+  let status = 0;
+  for (const change of changes) {
+    const args = change.after.args ?? [];
+    const spec = parseLaunch(args.slice(args.indexOf("--") + 1));
+    if (spec.kind !== "npm") continue;
+    try {
+      const prepared = prepareSandbox({
+        serverId: serverIdFor(spec), spec, mounts: [], env: [], allowNet: false, memory: "512m", cpus: "1",
+        keepImageUser: false, rebuild: false, log: (message) => console.error(message),
+      });
+      console.log(`  built ${change.name}: ${prepared.record.packageName}@${prepared.record.version} -> ${prepared.record.image}`);
+    } catch (error) {
+      status = 1;
+      console.error(`  could not build ${change.name}: ${(error as Error).message}`);
     }
   }
   return status;
+}
+
+/**
+ * Finds every MCP configuration of this machine and of the project, says what each server is exposed
+ * to and, with --fix, routes the npx servers through mcpcage. Without --fix it writes nothing outside
+ * mcpcage's own directory.
+ */
+async function protect(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      project: { type: "string" },
+      inspect: { type: "boolean", default: false },
+      offline: { type: "boolean", default: false },
+      fix: { type: "boolean", default: false },
+      yes: { type: "boolean", default: false },
+      "no-build": { type: "boolean", default: false },
+      command: { type: "string" },
+    },
+    strict: true,
+  });
+  const home = homedir();
+  const locations = discoverConfigs({ platform: process.platform, home, env: process.env, project: resolve(values.project ?? process.cwd()) });
+  const report = await scanConfigs({
+    locations, home, offline: values.offline, cacheDir: join(cageHome(), "cache"), inspect: values.inspect ? inspectInCage : undefined,
+  });
+  console.log(renderReport(report, { home }));
+  const uncaged = report.servers.filter(isUncaged).length;
+  if (!values.fix) return uncaged > 0 ? 1 : 0;
+
+  const command = values.command ?? installedCommand();
+  const claudeCodeRunning = claudeCodeIsRunning();
+  console.log("\nPlan");
+  const planned: string[] = [];
+  const logPlan = (line: string) => {
+    planned.push(line);
+    console.log(line);
+  };
+  const plan = fixConfigs({ report, command, claudeCodeRunning, dryRun: true, home, log: logPlan });
+  const servers = plan.files.reduce((total, file) => total + file.changed.length, 0);
+  const files = plan.files.filter((file) => file.changed.length > 0).length;
+  if (servers === 0) {
+    console.log("  nothing that mcpcage can change by itself.");
+    return uncaged > 0 ? 1 : 0;
+  }
+  if (!values.yes) {
+    if (!process.stdin.isTTY) throw new Error("refusing to change configuration files without a terminal; review the plan and pass --yes");
+    const prompt = createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await prompt.question(`\nCage ${servers} server${servers === 1 ? "" : "s"} in ${files} file${files === 1 ? "" : "s"}? Type "yes": `);
+    prompt.close();
+    if (answer.trim() !== "yes") {
+      console.log("Nothing changed.");
+      return 1;
+    }
+  }
+  console.log("");
+  // The files are read again now; what the plan already said (files left unchanged and why) is not repeated.
+  const logNew = (line: string) => {
+    if (!planned.includes(line)) console.log(line);
+  };
+  const outcome = fixConfigs({ report, command, claudeCodeRunning, dryRun: false, home, log: logNew });
+  const changed = outcome.files.flatMap((file) => file.changed);
+  const status = changed.length < uncaged ? 1 : 0;
+  // A failed build is reported and leaves the configuration caged: the image is built at the next start.
+  return values["no-build"] ? status : Math.max(status, buildImages(changed));
+}
+
+/** `--inspect`: the server starts in its cage (no network, its paths read-only) only to list its tools. */
+const inspectInCage: Inspector = async (launch) => {
+  const prepared = prepareSandbox({ ...inspectionSandbox(launch), log: (message) => console.error(message) });
+  return listTools(prepared.command, prepared.args, process.env, 30_000);
+};
+
+/** Desktop apps start servers with a minimal PATH, so configurations get mcpcage's full path when it is found. */
+function installedCommand(): string {
+  const windows = process.platform === "win32";
+  const found = spawnSync(windows ? "where" : "which", ["mcpcage"], { encoding: "utf8" });
+  const paths = found.status === 0 ? found.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : [];
+  const path = (windows ? paths.find((candidate) => /\.(cmd|exe)$/i.test(candidate)) : undefined) ?? paths[0];
+  return path !== undefined && isAbsolute(path) ? path : "mcpcage";
+}
+
+/** Claude Code rewrites ~/.claude.json while it runs, so a change made meanwhile could be lost or lose its state. */
+function claudeCodeIsRunning(): boolean {
+  if (process.env.CLAUDECODE !== undefined) return true;
+  if (process.platform !== "darwin" && process.platform !== "linux") return false;
+  const listed = spawnSync("ps", ["-axo", "comm="], { encoding: "utf8" });
+  return listed.status === 0 && listed.stdout.split("\n").some((line) => basename(line.trim()) === "claude");
 }
 
 function report(outcome: WrapOutcome, command: string, dryRun: boolean): void {
