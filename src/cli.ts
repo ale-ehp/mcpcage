@@ -6,11 +6,11 @@ import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
 import { unwrapConfig, wrapConfig, type WrapOutcome } from "./config.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
-import { describeViolations } from "./manifest.js";
 import { cageHome, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, readJson } from "./pinstore.js";
 import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, type ServerRecord } from "./sandbox.js";
+import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
 
 const VERSION = "0.1.0";
 
@@ -232,7 +232,7 @@ function diff(argv: string[]): number {
     return 0;
   }
   console.log(`${serverId}: tool definitions seen ${pending.seenAt} differ from the approved ones:\n`);
-  console.log(describeViolations(pending.violations));
+  console.log(describeViolationsWithFindings(pending.violations));
   return 1;
 }
 
@@ -245,7 +245,10 @@ async function approve(argv: string[]): Promise<number> {
     console.log(`${serverId}: nothing to approve.`);
     return 0;
   }
-  console.log(describeViolations(pending.violations));
+  console.log(describeViolationsWithFindings(pending.violations));
+  // Said before the question and before --yes takes effect: this is the last moment to look.
+  const { high } = countSuspicious(pending.violations);
+  if (high > 0) console.log(`\nWARNING: ${highSeveritySigns(high)}. Approve only if you have read the full definitions.`);
   if (!values.yes) {
     if (!process.stdin.isTTY) throw new Error("refusing to approve without a terminal; review the diff and pass --yes");
     const prompt = createInterface({ input: process.stdin, output: process.stdout });

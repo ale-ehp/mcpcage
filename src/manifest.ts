@@ -64,17 +64,18 @@ export function isToolList(value: unknown): value is ToolDefinition[] {
 
 /** Human-readable explanation of what changed, for the terminal and for `mcpcage diff`. */
 export function describeViolations(violations: Violation[]): string {
-  const lines: string[] = [];
-  for (const violation of violations) {
-    if (violation.kind === "new-tool") {
-      lines.push(`+ new tool "${violation.name}" was not in the approved manifest`);
-      lines.push(...indent(fieldsOf(violation.after)));
-      continue;
-    }
-    lines.push(`~ tool "${violation.name}" changed since it was approved`);
-    for (const change of jsonChanges(violation.before, violation.after)) lines.push(`    ${change}`);
+  return violations.flatMap((violation) => describeViolation(violation)).join("\n");
+}
+
+/** The lines for one violation, so callers can add their own lines under each tool. */
+export function describeViolation(violation: Violation): string[] {
+  if (violation.kind === "new-tool") {
+    return [`+ new tool "${violation.name}" was not in the approved manifest`, ...indent(fieldsOf(violation.after))];
   }
-  return lines.join("\n");
+  return [
+    `~ tool "${violation.name}" changed since it was approved`,
+    ...jsonChanges(violation.before, violation.after).map((change) => `    ${change}`),
+  ];
 }
 
 function fieldsOf(tool: ToolDefinition): string[] {

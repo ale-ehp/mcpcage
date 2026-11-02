@@ -3,8 +3,9 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { AuditLog } from "./audit.js";
 import { canonicalJson, sha256 } from "./canonical.js";
-import { checkTools, describeViolations, isToolList, pinTools, type Pin, type ToolDefinition } from "./manifest.js";
+import { checkTools, isToolList, pinTools, type Pin, type ToolDefinition } from "./manifest.js";
 import { loadPin, savePending, savePin } from "./pinstore.js";
+import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
 
 /** JSON-RPC error code mcpcage uses when it refuses a message (implementation-defined range). */
 export const BLOCKED = -32001;
@@ -139,9 +140,10 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       const tools: ToolDefinition[] = message.result.tools;
       if (!pin && strict) {
         locked = true;
-        savePending(serverId, tools, tools.map((tool) => ({ kind: "new-tool" as const, name: tool.name, after: tool })));
-        audit.write("list-blocked", { reason: "not-approved", tools: tools.map((tool) => tool.name) });
-        log(`mcpcage: ${serverId} has no approved tools and --strict is on. Review with \`mcpcage diff ${serverId}\`, then \`mcpcage approve ${serverId}\`.`);
+        const unapproved = tools.map((tool) => ({ kind: "new-tool" as const, name: tool.name, after: tool }));
+        savePending(serverId, tools, unapproved);
+        audit.write("list-blocked", { reason: "not-approved", tools: tools.map((tool) => tool.name), suspicious: countSuspicious(unapproved) });
+        log(`mcpcage: ${serverId} has no approved tools and --strict is on.\n${describeViolationsWithFindings(unapproved)}\nReview with \`mcpcage diff ${serverId}\`, then \`mcpcage approve ${serverId}\`.`);
         changed = true;
         return blocked(message.id, `mcpcage blocked tools/list: server "${serverId}" has not been approved (--strict).`);
       }
@@ -163,13 +165,17 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       }
       locked = true;
       savePending(serverId, tools, violations);
+      const suspicious = countSuspicious(violations);
       audit.write("list-blocked", {
         reason: "manifest-changed",
         violations: violations.map((violation) => ({ kind: violation.kind, tool: violation.name })),
+        suspicious,
       });
-      log(`mcpcage: blocked ${serverId}: its tool definitions changed since they were approved.\n${describeViolations(violations)}\nReview with \`mcpcage diff ${serverId}\`; approve with \`mcpcage approve ${serverId}\`.`);
+      log(`mcpcage: blocked ${serverId}: its tool definitions changed since they were approved.\n${describeViolationsWithFindings(violations)}\nReview with \`mcpcage diff ${serverId}\`; approve with \`mcpcage approve ${serverId}\`.`);
       changed = true;
-      return blocked(message.id, `mcpcage blocked tools/list: tool definitions of "${serverId}" changed since they were approved (rug-pull protection). Run \`mcpcage diff ${serverId}\`.`);
+      // The client may show only this message, so it carries the count of the worst signs too.
+      const signs = suspicious.high > 0 ? ` ${highSeveritySigns(suspicious.high)};` : "";
+      return blocked(message.id, `mcpcage blocked tools/list: tool definitions of "${serverId}" changed since they were approved (rug-pull protection).${signs} Run \`mcpcage diff ${serverId}\`.`);
     });
     if (!changed) toClient(line);
     else toClient(out.length === 1 ? out[0]! : (out as unknown as Message));
