@@ -103,7 +103,7 @@ describe("rug-pull protection", () => {
     const session = await connectFake(home, "poisoned");
     await expect(session.client.listTools()).rejects.toMatchObject({
       code: BLOCKED,
-      message: expect.stringContaining("3 high-severity signs of hidden instructions; Run `mcpcage diff notes`"),
+      message: expect.stringContaining("3 high-severity signs of hidden instructions. Run `mcpcage diff notes`"),
     });
     await blockLogged(session);
     await session.close();

@@ -18,7 +18,7 @@ why:        your HOME is not mounted in the cage, and the cage has no network (-
 v1.0.0 lists 2 tools (add_note, list_notes); mcpcage pins them on first use.
 
 --- The author ships v1.0.1: same code, but add_note's description now carries a hidden instruction
-client:     MCP error -32001: mcpcage blocked tools/list: tool definitions of "demo-notes" changed since they were approved (rug-pull protection). 3 high-severity signs of hidden instructions; Run `mcpcage diff demo-notes`.
+client:     MCP error -32001: mcpcage blocked tools/list: tool definitions of "demo-notes" changed since they were approved (rug-pull protection). 3 high-severity signs of hidden instructions. Run `mcpcage diff demo-notes`.
 
 $ mcpcage diff demo-notes
 demo-notes: tool definitions seen <time> differ from the approved ones:

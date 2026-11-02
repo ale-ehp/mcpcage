@@ -8,7 +8,7 @@ describe("cli", () => {
   it("prints help and version", () => {
     const home = freshHome();
     expect(mcpcage(home, "--help").stdout).toContain("mcpcage run [options] -- npx -y <package>");
-    expect(mcpcage(home, "--version").stdout.trim()).toBe("0.1.0");
+    expect(mcpcage(home, "--version").stdout.trim()).toBe("0.2.0");
     expect(mcpcage(home, "nonsense").code).toBe(2);
   });
 

@@ -18,7 +18,7 @@ import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 const HELP = `mcpcage ${VERSION}: run any MCP server in a cage.
 

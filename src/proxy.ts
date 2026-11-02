@@ -174,7 +174,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       log(`mcpcage: blocked ${serverId}: its tool definitions changed since they were approved.\n${describeViolationsWithFindings(violations)}\nReview with \`mcpcage diff ${serverId}\`; approve with \`mcpcage approve ${serverId}\`.`);
       changed = true;
       // The client may show only this message, so it carries the count of the worst signs too.
-      const signs = suspicious.high > 0 ? ` ${highSeveritySigns(suspicious.high)};` : "";
+      const signs = suspicious.high > 0 ? ` ${highSeveritySigns(suspicious.high)}.` : "";
       return blocked(message.id, `mcpcage blocked tools/list: tool definitions of "${serverId}" changed since they were approved (rug-pull protection).${signs} Run \`mcpcage diff ${serverId}\`.`);
     });
     if (!changed) toClient(line);
