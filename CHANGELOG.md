@@ -3,6 +3,15 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-11-03
+
+### Fixed
+
+- When the server fails to start (for example a `docker run` that the daemon refuses), mcpcage now
+  exits at once with the server's exit code and says on stderr how many client requests were left
+  unanswered. Before, it stayed silent until the client gave up, so the client reported a timeout
+  instead of the real error.
+
 ## [0.2.0] - 2026-11-03
 
 ### Added
