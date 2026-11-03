@@ -1,7 +1,8 @@
+import { spawn } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { connectFake, freshHome, mcpcage } from "./helpers.js";
+import { cli, connectFake, freshHome, mcpcage } from "./helpers.js";
 
 const BLOCKED = -32001;
 
@@ -205,4 +206,33 @@ describe("audit log", () => {
     expect(verify.code).toBe(1);
     expect(verify.stdout).toMatch(/BROKEN .*line 3/);
   });
+});
+
+describe("server failure", () => {
+  it("exits with the server's code as soon as the server dies, without waiting for the client", async () => {
+    const home = freshHome();
+    // A server that cannot start, like a `docker run` the daemon refuses. The client's stdin stays
+    // open, as a real client keeps it while it waits for its first answer.
+    const proxy = spawn(process.execPath, [cli, "run", "--no-sandbox", "--id", "notes", "--", process.execPath, "-e", "process.exit(125)"], {
+      env: { ...process.env, MCPCAGE_HOME: home },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stderr = "";
+    proxy.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    const exited = new Promise<number | null>((resolve) => proxy.once("exit", (code) => resolve(code)));
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`mcpcage did not exit within 5 s, although its server exits at once and only the client's stdin was still open. Its stderr:\n${stderr}`)), 5000);
+    });
+    try {
+      expect(await Promise.race([exited, timedOut])).toBe(125);
+    } finally {
+      clearTimeout(timer);
+      proxy.kill();
+    }
+    expect(auditEntries(home).at(-1)).toMatchObject({ event: "stop", code: 125 });
+    // The 5 s limit above has to fire before vitest's own, which is also 5 s by default.
+  }, 15_000);
 });

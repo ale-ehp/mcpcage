@@ -181,14 +181,23 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     else toClient(out.length === 1 ? out[0]! : (out as unknown as Message));
   });
 
+  // Once the server is gone, the client interface is closed too. Reading the client's stdin would keep
+  // this process alive, and a client that sees neither an answer nor an exit waits for its own timeout
+  // and reports that, instead of the server's error printed above.
   return new Promise((resolve) => {
     child.on("error", (error) => {
       audit.write("spawn-error", { message: error.message });
       log(`mcpcage: could not start ${options.command}: ${error.message}`);
+      clientLines.close();
       resolve(127);
     });
     child.on("exit", (code, signal) => {
       audit.write("stop", { code, signal });
+      if (fromClient.size > 0) {
+        const requests = `${fromClient.size} request${fromClient.size === 1 ? "" : "s"}`;
+        log(`mcpcage: the server exited (${code !== null ? `code ${code}` : `signal ${signal}`}) with ${requests} unanswered; see the lines above`);
+      }
+      clientLines.close();
       resolve(code ?? 1);
     });
   });
