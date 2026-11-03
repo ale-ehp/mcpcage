@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Reports what a server can reach from where it runs. Under mcpcage every answer should be "no".
-import { existsSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,13 +10,17 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-function canWrite(path) {
+// Whether a new file can be created in `dir`. The name is random and an existing file is never
+// written through, so nothing placed there in advance can catch the write; the file is removed after.
+function canWrite(dir) {
+  const file = join(dir, `probe-${randomBytes(8).toString("hex")}`);
   try {
-    writeFileSync(path, "probe");
-    return true;
+    writeFileSync(file, "probe", { flag: "wx" });
   } catch (error) {
     return error.code;
   }
+  rmSync(file, { force: true });
+  return true;
 }
 
 async function network() {
@@ -36,8 +41,8 @@ server.registerTool("probe", { description: "Report the user, filesystem, networ
     home: homedir(),
     args: process.argv.slice(2),
     env: Object.keys(process.env).sort(),
-    writeOwnCode: canWrite(join(here, "probe-write-test")),
-    writeTmp: canWrite("/tmp/probe-write-test"),
+    writeOwnCode: canWrite(here),
+    writeTmp: canWrite("/tmp"),
     hostUsersDirVisible: existsSync("/Users"),
     postinstallRan: existsSync(join(here, "postinstall-ran")),
     network: await network(),
