@@ -75,7 +75,7 @@ $ mcpcage diff demo-notes
 $ mcpcage protect
 Claude Desktop  ~/Library/Application Support/Claude/claude_desktop_config.json
   filesystem    npx -y @modelcontextprotocol/server-filesystem /Users/you          NOT CAGED
-                access: /Users/you (your whole home directory)
+                access: /Users/you: your whole home directory
   github        npx -y @modelcontextprotocol/server-github                        NOT CAGED
                 secret in clear text: GITHUB_PERSONAL_ACCESS_TOKEN
 ```
@@ -129,8 +129,12 @@ or put `mcpcage run` in front of a server command yourself:
 
 `wrap` and `protect --fix` add that `--mount` for you: every path a server is given as an argument
 and that exists on your machine is mounted read-write at the same path, and `~/` is expanded,
-because inside the cage HOME is `/tmp`. Images are built right away, so the client's first start
-does not wait for a build.
+because inside the cage HOME is `/tmp`. The exception is a path that would undo the cage: the whole
+disk, your home directory, or a directory with credentials or system files (`~/.ssh`, `~/.aws`,
+`~/.config/gcloud`, `/etc`, the Docker socket, mcpcage's own `~/.mcpcage`...). A server given one
+is left as it is, uncaged, and the reason is printed; `mcpcage run` refuses such a `--mount` unless
+you add `--allow-sensitive-mount`. Images are built right away, so the client's first start does
+not wait for a build.
 
 ## How it works
 
@@ -195,11 +199,14 @@ For each server the report says which client and file it comes from, how it star
 `docker`, remote, something else), whether it already runs through mcpcage, whether its package
 declares install scripts (`npm view`, cached for a week; `--offline` uses the cache only), whether
 the configuration holds a secret in clear text (named, never shown, masked in command lines too)
-and whether an argument opens the whole home directory or the whole disk. `--inspect` starts each
-npx server inside the cage, with its path arguments mounted read-only and no network, lists its
-tools and runs the rules above on them. `--fix` prints the plan, asks for the word `yes` (or takes
-`--yes`), rewrites only the server entries of each file in the file's own style, keeps a backup
-(`<file>.mcpcage.bak`) and replaces the file atomically.
+and whether an argument opens the whole disk, the whole home directory or a directory with
+credentials. `--inspect` starts each npx server inside the cage, with its path arguments mounted
+read-only and no network, lists its tools and runs the rules above on them. It mounts the sensitive
+paths too, only for that listing: in that time a server could copy what it reads there into its
+tool descriptions or its error output, and the report prints parts of both. `--fix` prints the
+plan, asks for the word `yes` (or takes `--yes`), rewrites only the server entries of each file in
+the file's own style, leaves a server that needs a sensitive path as it is (with the reason), keeps
+a backup (`<file>.mcpcage.bak`) and replaces the file atomically.
 
 **The cage.** Each server runs with:
 
@@ -246,8 +253,10 @@ mcpcage audit show <server-id> [--lines N]             print the latest audit en
 mcpcage doctor                                         check Docker and the local setup
 ```
 
-Run options: `--mount <path>[:rw]`, `--env <NAME[=value]>`, `--allow-net`, `--strict`, `--id`,
-`--memory`, `--cpus`, `--keep-image-user` (with `--image`), `--rebuild`, `--no-sandbox`.
+Run options: `--mount <path>[:rw]`, `--allow-sensitive-mount` (without it, a `--mount` of the whole
+disk, your home directory or a directory with credentials is refused), `--env <NAME[=value]>`,
+`--allow-net`, `--strict`, `--id`, `--memory`, `--cpus`, `--keep-image-user` (with `--image`),
+`--rebuild`, `--no-sandbox`.
 
 Protect options: `--project <dir>` (default: the current directory), `--inspect`, `--offline`,
 `--fix`, `--yes`, `--no-build`, `--command <path>`. Without `--fix` the exit code is 1 when at

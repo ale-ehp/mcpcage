@@ -1,14 +1,15 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { connectFake, freshHome, mcpcage, root } from "./helpers.js";
+import { connectFake, fakeUserEnv, freshHome, mcpcage, mcpcageWithEnv, root } from "./helpers.js";
 
 describe("cli", () => {
   it("prints help and version", () => {
     const home = freshHome();
     const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
     expect(mcpcage(home, "--help").stdout).toContain("mcpcage run [options] -- npx -y <package>");
+    expect(mcpcage(home, "--help").stdout).toContain("\n  --allow-sensitive-mount\n");
     expect(mcpcage(home, "--version").stdout.trim()).toBe(version);
     expect(mcpcage(home, "nonsense").code).toBe(2);
   });
@@ -60,6 +61,27 @@ describe("cli", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("caged memory: mcpcage run -- npx -y @modelcontextprotocol/server-memory");
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(original);
+  });
+
+  it("refuses to mount a directory with credentials unless --allow-sensitive-mount is given", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
+    const home = join(top, "home");
+    const cage = join(top, "cage");
+    const keys = join(home, ".ssh");
+    mkdirSync(keys, { recursive: true });
+    // No docker on the PATH: a run that got past the check would stop there, never before it.
+    const env = fakeUserEnv(home, cage, { PATH: join(top, "no-docker-here") });
+    const server = ["--", "npx", "-y", "something"];
+
+    const refused = mcpcageWithEnv(env, "run", "--mount", keys, ...server);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toBe(`mcpcage: --mount ${keys}: your SSH keys in ~/.ssh. Pass --allow-sensitive-mount if you really want this.\n`);
+    expect(existsSync(cage)).toBe(false); // refused before anything else, the audit log included
+    expect(mcpcageWithEnv(env, "prepare", "--mount", `${keys}:rw`, ...server).stderr).toContain("Pass --allow-sensitive-mount");
+
+    const allowed = mcpcageWithEnv(env, "run", "--allow-sensitive-mount", "--mount", keys, ...server);
+    expect(allowed.stderr).not.toContain("Pass --allow-sensitive-mount");
+    expect(allowed.stderr).toContain("Docker is required"); // past the check, stopped where Docker is needed
   });
 
   it("refuses host commands unless --no-sandbox is explicit", () => {

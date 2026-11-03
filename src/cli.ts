@@ -16,7 +16,7 @@ import { cageHome, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, readJson } from "./pinstore.js";
 import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
-import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, type ServerRecord } from "./sandbox.js";
+import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
 
 // Read from the package's own package.json, one level above dist/, so a release never reports a stale number.
@@ -40,6 +40,8 @@ Usage:
 
 Run options:
   --mount <path>[:rw]   bind a host path at the same path, read-only unless :rw (repeatable)
+  --allow-sensitive-mount
+                        let --mount reach the whole disk, your home directory or a directory with credentials
   --env <NAME[=value]>  pass one environment variable into the container (repeatable)
   --allow-net           give the server network access (default: none)
   --strict              refuse servers whose tools were never approved (default: trust on first use)
@@ -105,6 +107,7 @@ function parseRun(argv: string[]) {
     args: own,
     options: {
       mount: { type: "string", multiple: true, default: [] },
+      "allow-sensitive-mount": { type: "boolean", default: false },
       env: { type: "string", multiple: true, default: [] },
       "allow-net": { type: "boolean", default: false },
       strict: { type: "boolean", default: false },
@@ -118,8 +121,14 @@ function parseRun(argv: string[]) {
     },
     strict: true,
   });
+  // Checked before anything else, the audit log included: a mount of the whole disk, the home
+  // directory or a directory with credentials would undo the cage it belongs to (see sensitive.ts).
+  const sensitive = values.mount.flatMap((mount) => sensitiveMount(mount) ?? []);
+  if (sensitive[0] !== undefined && !values["allow-sensitive-mount"]) {
+    throw new Error(`--mount ${sensitive[0].path}: ${sensitive[0].reason}. Pass --allow-sensitive-mount if you really want this.`);
+  }
   const spec = parseLaunch(server, values.image);
-  return { values, server, spec, serverId: values.id ?? serverIdFor(spec) };
+  return { values, server, spec, serverId: values.id ?? serverIdFor(spec), sensitive };
 }
 
 /** Builds and pins the sandbox image without starting the server (wrap does this for every server). */
@@ -137,7 +146,7 @@ async function prepare(argv: string[]): Promise<number> {
 }
 
 async function run(argv: string[]): Promise<number> {
-  const { values, server, spec, serverId } = parseRun(argv);
+  const { values, server, spec, serverId, sensitive } = parseRun(argv);
   const log = (message: string) => process.stderr.write(`${message}\n`);
   const sessionId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}`;
   const auditLog = new AuditLog(serverId, sessionId);
@@ -169,6 +178,7 @@ async function run(argv: string[]): Promise<number> {
     command = prepared.command;
     args = prepared.args;
     if (values["allow-net"]) log(`mcpcage: WARNING ${serverId} has network access (--allow-net).`);
+    for (const mount of sensitive) log(`mcpcage: WARNING --mount ${mount.path} gives ${serverId} ${mount.reason} (--allow-sensitive-mount).`);
     auditLog.write("sandbox", {
       mode: "docker",
       image: prepared.record.image,

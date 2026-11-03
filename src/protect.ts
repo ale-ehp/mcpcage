@@ -8,7 +8,9 @@ import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
 import type { ToolDefinition } from "./manifest.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
+import { cageHome } from "./paths.js";
 import { parseMount, type SandboxOptions } from "./sandbox.js";
+import { sensitivePath } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
 
 /*
@@ -35,7 +37,7 @@ export interface ServerReport {
   protectedByMcpcage: boolean;
   /** Names of the env variables, headers and arguments whose value looks like a secret. */
   secrets: string[];
-  /** Arguments and --mount paths, as written, that expose the whole home directory or the whole disk. */
+  /** Arguments and --mount paths, as written, that open the whole disk, the whole home directory or a directory with credentials. */
   broadAccess: string[];
   installScripts?: InstallScripts;
   inspection?: { tools: number; findings: Finding[]; error?: string };
@@ -242,7 +244,7 @@ export function renderReport(report: ProtectReport, options: { home: string }): 
 function serverLines(server: ServerReport, home: string): string[] {
   const indent = " ".repeat(NAME_WIDTH + 4);
   const details: string[] = [];
-  for (const path of server.broadAccess) details.push(`access: ${printable(path)} (${broadAccessKind(path, home) ?? "a broad path"})`);
+  for (const path of server.broadAccess) details.push(`access: ${printable(path)}: ${broadAccessKind(path, home) ?? "a broad path"}`);
   if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(printable).join(", ")}`);
   if (server.installScripts) details.push(installLine(server.installScripts));
   const findings: string[] = [];
@@ -306,7 +308,7 @@ function summary(report: ProtectReport): string[] {
     `  ${many(servers.length, "server", "servers")} in ${many(present, "configuration file", "configuration files")} (${many(report.files.length, "file", "files")} checked, ${report.files.length - present} absent).`,
     uncaged > 0 ? `${run.padEnd(68)}-> mcpcage protect --fix` : run,
     `  ${many(count((server) => server.secrets.length > 0), "keeps", "keep")} a secret in clear text in a configuration file.`,
-    `  ${count((server) => server.broadAccess.length > 0)} can reach your whole home directory or more.`,
+    `  ${count((server) => server.broadAccess.length > 0)} can reach your whole home directory, the disk or a directory with credentials.`,
     `  ${many(scripts, "uses", "use")} a package with install scripts.`,
   ];
   if (servers.some((server) => server.inspection)) {
@@ -431,9 +433,10 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
 }
 
 /**
- * A backup of the bytes that were read, then the new text through a temporary file in the same
- * directory and a rename, so a client never reads half a file. The file keeps its permissions, and
- * a symlinked configuration (dotfiles) keeps its link: the file it points to is the one replaced.
+ * A backup of the bytes that were read, under a name no other file has, then the new text through a
+ * temporary file in the same directory and a rename, so a client never reads half a file. The file
+ * keeps its permissions, and a symlinked configuration (dotfiles) keeps its link: the file it points
+ * to is the one replaced.
  */
 function replaceFile(file: string, original: Buffer, text: string): string {
   const target = realpathSync(file);
@@ -586,9 +589,8 @@ function maskUrl(text: string): { shown: string; hidden: string[] } {
 
 // Where ~, $HOME and %USERPROFILE% stand for the home directory.
 const HOME_PREFIX = /^(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%)(?=$|[\\/])/i;
-const ALL_HOMES = new Set(["/Users", "/home", "c:\\users"]);
 
-/** Paths that open the whole home directory or more: the --mount values of a wrapped entry count too. */
+/** Paths that open the whole home directory or more, or a directory with credentials: the --mount values of a wrapped entry count too. */
 function broadPaths(args: string[], home: string): string[] {
   const candidates: string[] = [];
   for (let index = 0; index < args.length; index++) {
@@ -609,18 +611,14 @@ function broadPaths(args: string[], home: string): string[] {
   return found;
 }
 
-/** Plain words for a path that opens the whole home directory or more; undefined for a narrower one. */
+/**
+ * Plain words for a path that opens the whole disk, the whole home directory or more, or a directory
+ * with credentials, as sensitive.ts decides for every mount; undefined for an ordinary one. A home
+ * directory written like C:\Users\me means Windows paths.
+ */
 export function broadAccessKind(path: string, home: string): string | undefined {
-  const target = normalizePath(expandHome(path, home));
-  const own = normalizePath(home);
-  if (target === undefined || own === undefined) return undefined;
-  if (target === "/" || /^[a-z]:\\$/.test(target)) return "the whole disk";
-  if (target === own) return "your whole home directory";
-  if (ALL_HOMES.has(target) || own.startsWith(target.endsWith("\\") ? target : `${target}${target.includes("\\") ? "\\" : "/"}`)) {
-    return "your whole home directory and more";
-  }
-  if (target === "/root") return "the home directory of the root user";
-  return undefined;
+  const platform = /^[A-Za-z]:/.test(home) ? "win32" : process.platform === "win32" ? "linux" : process.platform;
+  return sensitivePath(expandHome(path, home), { home, platform, cage: cageHome() });
 }
 
 function expandHome(path: string, home: string): string {

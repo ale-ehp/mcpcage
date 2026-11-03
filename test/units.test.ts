@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { unwrapConfig, wrapConfig } from "../src/config.js";
 import { parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint } from "../src/manifest.js";
@@ -123,6 +123,29 @@ describe("client configuration", () => {
     expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.github).toEqual({
       command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_TOKEN: "x" },
     });
+  });
+
+  it("never replaces a backup: the next one is named after the time, then given a random suffix", () => {
+    // The clock stands still, so the second and the third rewrite ask for the same name with the time.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-03T12:00:00.000Z"));
+    try {
+      const file = write({ mcpServers: { memory: { command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"] } } });
+      const versions: string[] = [];
+      const backups: string[] = [];
+      for (const rewrite of [wrapConfig, unwrapConfig, wrapConfig]) {
+        versions.push(readFileSync(file, "utf8"));
+        backups.push(rewrite(file, { dryRun: false }).backup!);
+      }
+      expect(backups[0]).toBe(`${file}.mcpcage.bak`);
+      expect(backups[1]).toBe(`${file}.mcpcage.2026-11-03T12-00-00-000Z.bak`);
+      expect(backups[2]!.startsWith(`${file}.mcpcage.2026-11-03T12-00-00-000Z-`)).toBe(true);
+      expect(backups[2]).toMatch(/-[0-9a-f]{8}\.bak$/);
+      // Each backup holds the file as it was before its own rewrite.
+      expect(backups.map((backup) => readFileSync(backup, "utf8"))).toEqual(versions);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("handles VS Code's `servers` key and never writes on a dry run", () => {

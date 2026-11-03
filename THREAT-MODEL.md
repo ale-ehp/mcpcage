@@ -44,10 +44,18 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 
 - **Container escapes.** mcpcage relies on Docker and the kernel. A kernel or runtime vulnerability
   can break the isolation. gVisor or microVM runtimes are on the roadmap for stronger isolation.
-- **What you mount or allow.** A server given `--mount ~/.ssh` or `--allow-net` can use them.
+- **What you mount or allow.** A server can use what it is given: a `--mount`, `--allow-net`.
   Mounts are read-only unless `:rw` is written explicitly. `wrap` and `protect --fix` mount the
-  paths a server is configured with read-write, because the server is expected to work there; the
-  report flags a path that is the whole home directory or the whole disk.
+  paths a server is configured with read-write, because the server is expected to work there, but
+  never the whole disk, the home directory or a directory with credentials or system files
+  (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `/etc`, the Docker socket, mcpcage's own
+  `~/.mcpcage`...): a server that needs one is left uncaged, with the reason, and the report names
+  the path. `mcpcage run` refuses such a `--mount` unless `--allow-sensitive-mount` is given; with
+  it, the server can use that path like any other.
+- **Sensitive paths during `protect --inspect`.** To list a server's tools, `--inspect` mounts its
+  path arguments read-only, without network, the sensitive ones included. In that time a server
+  could copy what it reads there into its tool descriptions or its error output, and the report
+  prints parts of both.
 - **Misuse of granted capabilities.** A filesystem server with a writable mount can still
   overwrite files in that mount when asked to; mcpcage records the call but does not judge it.
 - **Prompt injection through tool results.** Data a tool returns can still steer the model. The

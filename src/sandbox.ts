@@ -8,6 +8,7 @@ import { sha256 } from "./canonical.js";
 import type { LaunchSpec } from "./launch.js";
 import { cageHome, serverDir } from "./paths.js";
 import { readJson, writeJson } from "./pinstore.js";
+import { sensitivePath } from "./sensitive.js";
 
 /**
  * Base images, pinned by digest so a build today and a build next month start from the same bytes.
@@ -105,6 +106,25 @@ export function runArgs(options: Pick<SandboxOptions, "serverId" | "spec" | "mou
 
 /** `--mount ~/notes` mounts read-only at the same path; `--mount ~/out:rw` makes it writable. */
 export function parseMount(value: string): Mount {
+  const { path, readOnly } = mountPath(value);
+  if (!existsSync(path)) throw new Error(`--mount: ${path} does not exist`);
+  if (path.includes(",")) throw new Error(`--mount: paths containing commas are not supported (${path})`);
+  return { source: path, target: path, readOnly };
+}
+
+/**
+ * The path a --mount value names and what it would open, when it is the whole disk, the home
+ * directory or a directory with credentials (see sensitive.ts); undefined for an ordinary path.
+ * `run` refuses such a value unless --allow-sensitive-mount is given.
+ */
+export function sensitiveMount(value: string): { path: string; reason: string } | undefined {
+  const { path } = mountPath(value);
+  const reason = sensitivePath(path, { home: homedir(), platform: process.platform, cage: cageHome() });
+  return reason === undefined ? undefined : { path, reason };
+}
+
+/** The absolute path of a --mount value (`~/` expanded, relative to the current directory otherwise) and its mode. */
+function mountPath(value: string): { path: string; readOnly: boolean } {
   let path = value;
   let readOnly = true;
   if (path.endsWith(":rw")) {
@@ -115,9 +135,7 @@ export function parseMount(value: string): Mount {
   }
   if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
   if (!isAbsolute(path)) path = resolve(path);
-  if (!existsSync(path)) throw new Error(`--mount: ${path} does not exist`);
-  if (path.includes(",")) throw new Error(`--mount: paths containing commas are not supported (${path})`);
-  return { source: path, target: path, readOnly };
+  return { path, readOnly };
 }
 
 function prepareNpmImage(options: SandboxOptions): ServerRecord {

@@ -38,7 +38,7 @@ The fake HOME now has a Claude Desktop and a Cursor configuration, as a develope
 $ mcpcage protect
 Claude Desktop  ~/Library/Application Support/Claude/claude_desktop_config.json
   filesystem    npx -y @modelcontextprotocol/server-filesystem /tmp/mcpcage-demo-XXXX/home  NOT CAGED
-                access: /tmp/mcpcage-demo-XXXX/home (your whole home directory)
+                access: /tmp/mcpcage-demo-XXXX/home: your whole home directory
                 install scripts: none (prepare runs only for git installs)
   github        npx -y @modelcontextprotocol/server-github                        NOT CAGED
                 secret in clear text: GITHUB_PERSONAL_ACCESS_TOKEN
@@ -52,7 +52,7 @@ Summary
   3 servers in 2 configuration files (14 files checked, 12 absent).
   2 run on your machine with your permissions and no cage.          -> mcpcage protect --fix
   1 keeps a secret in clear text in a configuration file.
-  1 can reach your whole home directory or more.
+  1 can reach your whole home directory, the disk or a directory with credentials.
   0 use a package with install scripts.
   0 are remote, already containerized, or started by another command: mcpcage cannot cage them yet.
   1 already runs through mcpcage.

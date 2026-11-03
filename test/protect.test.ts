@@ -300,7 +300,7 @@ describe("wrapping one entry", () => {
 });
 
 describe("what a server can reach", () => {
-  it("names the whole home directory and the whole disk, however they are written", () => {
+  it("names the whole home directory, the whole disk and the directories with credentials, however they are written", () => {
     const home = "/Users/me";
     for (const path of ["/Users/me", "/Users/me/", "~", "~/", "$HOME", "${HOME}", "/Users/me/projects/.."]) expect(broadAccessKind(path, home)).toBe("your whole home directory");
     expect(broadAccessKind("/", home)).toBe("the whole disk");
@@ -313,6 +313,10 @@ describe("what a server can reach", () => {
     expect(broadAccessKind("C:\\Users", "C:\\Users\\me")).toBe("your whole home directory and more");
     expect(broadAccessKind("%USERPROFILE%", "C:\\Users\\me")).toBe("your whole home directory");
     expect(broadAccessKind("c:/users/ME/", "C:\\Users\\me")).toBe("your whole home directory");
+    // The words sensitive.ts gives every mount, credential directories included.
+    expect(broadAccessKind("~/.ssh", home)).toBe("your SSH keys in ~/.ssh");
+    expect(broadAccessKind("$HOME/.aws/credentials", home)).toBe("your AWS credentials in ~/.aws");
+    expect(broadAccessKind("%USERPROFILE%\\.ssh", "C:\\Users\\me")).toBe("your SSH keys in ~\\.ssh");
   });
 
   it("reports secrets by name only, masks them in command lines and never takes placeholders for secrets", async () => {
@@ -482,7 +486,7 @@ describe("mcpcage protect", () => {
     const line = (name: string) => lines.find((text) => text.startsWith(`  ${name} `)) ?? "";
     expect(out).toContain(`Claude Desktop  ${tilde(files.desktop, home)}\n`);
     expect(line("filesystem")).toMatch(new RegExp(`^  filesystem {4}npx -y @modelcontextprotocol/server-filesystem ${home} +NOT CAGED$`));
-    expect(out).toContain(`                access: ${home} (your whole home directory)\n`);
+    expect(out).toContain(`                access: ${home}: your whole home directory\n`);
     expect(line("github")).toMatch(/^  github {8}npx -y @modelcontextprotocol\/server-github {24}NOT CAGED$/);
     expect(out).toContain("                secret in clear text: GITHUB_TOKEN\n");
     expect(out).toContain("                install scripts: unknown (offline, not in cache)\n");
@@ -515,7 +519,7 @@ describe("mcpcage protect", () => {
         "  12 servers in 7 configuration files (14 files checked, 7 absent).",
         "  8 run on your machine with your permissions and no cage.          -> mcpcage protect --fix",
         "  1 keeps a secret in clear text in a configuration file.",
-        "  1 can reach your whole home directory or more.",
+        "  1 can reach your whole home directory, the disk or a directory with credentials.",
         "  0 use a package with install scripts.",
         "  3 are remote, already containerized, or started by another command: mcpcage cannot cage them yet.",
         "  1 already runs through mcpcage.",
@@ -526,25 +530,41 @@ describe("mcpcage protect", () => {
   it("--fix cages the npx servers it can rewrite, keeps backups, and leaves commented and busy files alone", () => {
     const machine = fakeMachine();
     const { home, project, data, files } = machine;
+    // A server given the SSH keys, next to Cursor's filesystem server, which --fix does cage.
+    mkdirSync(join(home, ".ssh"));
+    const keys = { command: "npx", args: ["-y", "@acme/keys-mcp", "~/.ssh"] };
+    writeJsonFile(files.cursor, { mcpServers: { ...JSON.parse(readFileSync(files.cursor, "utf8")).mcpServers, keys } });
     const original = Object.fromEntries(Object.entries(files).map(([name, file]) => [name, readFileSync(file)])) as Record<keyof typeof files, Buffer>;
 
     const result = mcpcageWithEnv(machine.env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", "/opt/mcpcage");
     expect(`${result.stdout}${result.stderr}`).not.toContain(TOKEN);
-    expect(result.stdout).toContain(`\nPlan\n  cage filesystem in ${tilde(files.desktop, home)}\n  cage github in ${tilde(files.desktop, home)}\n`);
-    expect(result.stdout).toContain(`  caged filesystem in ${tilde(files.desktop, home)}\n`);
+    // The report names what each of the two would open, and counts them.
+    expect(result.stdout).toContain(`                access: ${home}: your whole home directory\n`);
+    expect(result.stdout).toContain("                access: ~/.ssh: your SSH keys in ~/.ssh\n");
+    expect(result.stdout).toContain("  2 can reach your whole home directory, the disk or a directory with credentials.\n");
+    // A writable mount of the home directory or of ~/.ssh would undo the cage: both stay as they are, and the plan says why, once.
+    expect(result.stdout).toContain(
+      `\nPlan\n  not changed: filesystem in ${tilde(files.desktop, home)}: needs ${home}, which mcpcage will not mount: your whole home directory\n  cage github in ${tilde(files.desktop, home)}\n`,
+    );
+    expect(result.stdout).toContain(
+      `  not changed: keys in ${tilde(files.cursor, home)}: needs ${join(home, ".ssh")}, which mcpcage will not mount: your SSH keys in ~/.ssh\n  cage files in ${tilde(files.cursor, home)}\n`,
+    );
+    expect(result.stdout.match(/which mcpcage will not mount/g)).toHaveLength(2);
+    expect(result.stdout).toContain(`  caged github in ${tilde(files.desktop, home)}\n`);
+    expect(result.stdout).not.toContain("caged filesystem");
 
     const desktop = JSON.parse(readFileSync(files.desktop, "utf8"));
     expect(desktop).toEqual({
       mcpServers: {
-        filesystem: { command: "/opt/mcpcage", args: ["run", "--mount", `${home}:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", home] },
+        filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", home] },
         github: { command: "/opt/mcpcage", args: ["run", "--env", "GITHUB_TOKEN", "--", "npx", "-y", "@modelcontextprotocol/server-github"], env: { GITHUB_TOKEN: TOKEN } },
         remote: { type: "http", url: "https://mcp.example.com/mcp" },
       },
       globalShortcut: "Alt+Space",
     });
-    expect(JSON.parse(readFileSync(files.cursor, "utf8")).mcpServers.files).toEqual({
-      command: "/opt/mcpcage",
-      args: ["run", "--mount", `${data}:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", data],
+    expect(JSON.parse(readFileSync(files.cursor, "utf8")).mcpServers).toEqual({
+      files: { command: "/opt/mcpcage", args: ["run", "--mount", `${data}:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", data] },
+      keys,
     });
     expect(JSON.parse(readFileSync(files.mcpJson, "utf8")).mcpServers["project-tool"]).toEqual({
       command: "/opt/mcpcage",
@@ -569,7 +589,7 @@ describe("mcpcage protect", () => {
     );
     // Each reason is printed once, with the plan.
     expect(result.stdout.match(/Claude Code is running/g)).toHaveLength(1);
-    expect(result.code).toBe(1); // three npx servers are still outside the cage
+    expect(result.code).toBe(1); // five npx servers are still outside the cage
 
     const again = mcpcageWithEnv(machine.env, "protect", "--project", project, "--offline");
     const statuses = Object.fromEntries(
@@ -578,9 +598,11 @@ describe("mcpcage protect", () => {
         return match ? [[match[1], match[2]]] : [];
       }),
     );
-    expect(statuses).toEqual({ filesystem: "caged", github: "caged", notes: "caged", "proj-npx": "NOT CAGED", "project-tool": "caged", files: "caged", memory: "NOT CAGED", "vs-proj": "NOT CAGED", "devin-tool": "caged" });
-    expect(again.stdout).toContain("  3 run on your machine with your permissions and no cage.");
-    expect(again.stdout).toContain("  6 already run through mcpcage.");
+    expect(statuses).toEqual({
+      filesystem: "NOT CAGED", github: "caged", notes: "caged", "proj-npx": "NOT CAGED", "project-tool": "caged", files: "caged", keys: "NOT CAGED", memory: "NOT CAGED", "vs-proj": "NOT CAGED", "devin-tool": "caged",
+    });
+    expect(again.stdout).toContain("  5 run on your machine with your permissions and no cage.");
+    expect(again.stdout).toContain("  5 already run through mcpcage.");
     expect(again.code).toBe(1);
   });
 
@@ -596,6 +618,42 @@ describe("mcpcage protect", () => {
     expect(result.stdout).toBe(`${file} (mcpServers) [dry run]\n  caged shared: mcpcage run --env ACME_TOKEN -- npx -y @acme/shared-mcp\n`);
     expect(readFileSync(file)).toEqual(original);
     expect(existsSync(`${file}.mcpcage.bak`)).toBe(false);
+  });
+
+  it("wrap leaves a server given the whole disk as it is, says why, and cages the others as before", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-wrap-root-"));
+    const home = join(top, "home");
+    const cage = join(top, "cage");
+    const notes = join(top, "notes");
+    for (const dir of [home, cage, notes]) mkdirSync(dir, { recursive: true });
+    const file = join(top, "mcp.json");
+    const servers = {
+      root: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/"] },
+      notes: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", notes] },
+    };
+    writeJsonFile(file, { mcpServers: servers });
+    const original = readFileSync(file);
+    const env = fakeUserEnv(home, cage);
+
+    const dry = mcpcageWithEnv(env, "wrap", "--dry-run", file);
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(dry.stdout).toBe(
+      [
+        `${file} (mcpServers) [dry run]`,
+        `  caged notes: mcpcage run --mount ${notes}:rw -- npx -y @modelcontextprotocol/server-filesystem ${notes}`,
+        "  skipped root: needs /, which mcpcage will not mount: the whole disk",
+        "",
+      ].join("\n"),
+    );
+    expect(readFileSync(file)).toEqual(original);
+
+    const wrapped = mcpcageWithEnv(env, "wrap", "--no-build", file);
+    expect(wrapped.code, wrapped.stderr).toBe(0);
+    expect(wrapped.stdout).toContain("  skipped root: needs /, which mcpcage will not mount: the whole disk\n");
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers).toEqual({
+      root: servers.root,
+      notes: { command: "mcpcage", args: ["run", "--mount", `${notes}:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", notes] },
+    });
   });
 
   it("counts `mcpcage run --no-sandbox` as not caged, and --fix asks to remove --no-sandbox by hand", () => {
@@ -689,6 +747,36 @@ describe("mcpcage protect", () => {
     expect(readdirSync(home).filter((name) => name.endsWith(".tmp"))).toEqual([]);
     expect(logged).toEqual(["  caged user-npx in ~/.claude.json", `  caged proj-npx in ~/.claude.json (project ${project})`, "  backup: ~/.claude.json.mcpcage.bak"]);
     expect(logged.join("\n")).not.toContain("acme_live_0123456789");
+  });
+});
+
+describe("backups", () => {
+  it("--fix never replaces an earlier backup: it takes the next free name", async () => {
+    // The clock stands still, so the name with the time is taken too, and a random suffix is added.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-03T12:00:00.000Z"));
+    try {
+      const top = mkdtempSync(join(tmpdir(), "mcpcage-backups-"));
+      const home = join(top, "home");
+      const project = join(top, "work");
+      for (const dir of [home, project]) mkdirSync(dir, { recursive: true });
+      const file = locationsFor(home, project)("cursor", "user");
+      writeJsonFile(file, { mcpServers: { memory: { command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"] } } });
+      const original = readFileSync(file, "utf8");
+      const earlier = [`${file}.mcpcage.bak`, `${file}.mcpcage.2026-11-03T12-00-00-000Z.bak`];
+      for (const backup of earlier) writeFileSync(backup, "an earlier backup\n");
+
+      const report = await scanConfigs({ locations: discoverConfigs({ platform: process.platform, home, env: {}, project }), home, offline: true, cacheDir: join(top, "cache"), npmRunner: noNpm });
+      const outcome = fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: false, dryRun: false, log: () => undefined, home });
+      const backup = outcome.files[0]!.backup!;
+      expect(backup.startsWith(`${file}.mcpcage.2026-11-03T12-00-00-000Z-`)).toBe(true);
+      expect(backup).toMatch(/-[0-9a-f]{8}\.bak$/);
+      expect(readFileSync(backup, "utf8")).toBe(original);
+      for (const name of earlier) expect(readFileSync(name, "utf8")).toBe("an earlier backup\n");
+      expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.memory.command).toBe("/opt/mcpcage");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -3,6 +3,8 @@ import { constants, copyFileSync, existsSync, readFileSync, writeFileSync } from
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parseLaunch } from "./launch.js";
+import { cageHome } from "./paths.js";
+import { sensitivePath } from "./sensitive.js";
 
 /** One MCP server entry, as Claude Desktop, Claude Code, Cursor, VS Code, Copilot, Windsurf and Devin store it. */
 export interface ServerEntry {
@@ -46,7 +48,9 @@ export function wrapConfig(file: string, options: { dryRun: boolean; command?: s
  * path, because the server is expected to work there: a filesystem server pointed at ~/notes would
  * otherwise find nothing inside the cage. Every other path, and the network, stay closed.
  * A `~/` argument becomes the absolute path that is mounted: inside the cage HOME is /tmp, so a
- * server that expands `~` itself would look in /tmp.
+ * server that expands `~` itself would look in /tmp. A server given the whole disk, the home
+ * directory or a directory with credentials (see sensitive.ts) is not caged at all: that mount would
+ * undo the cage, so the entry stays as it is and the reason is given.
  */
 export function wrapEntry(entry: ServerEntry, options: { command: string }): { entry: ServerEntry } | { skip: string } {
   const type = serverType(entry);
@@ -68,6 +72,10 @@ export function wrapEntry(entry: ServerEntry, options: { command: string }): { e
   // The server's own arguments end the list, after npx's flags and the package, which is never mounted.
   const npxPart = args.slice(0, args.length - serverArgs.length);
   const paths = serverArgs.map((arg) => hostPath(arg));
+  for (const path of paths) {
+    const reason = path === undefined ? undefined : sensitivePath(path, { home: homedir(), platform: process.platform, cage: cageHome() });
+    if (reason !== undefined) return { skip: `needs ${path}, which mcpcage will not mount: ${reason}` };
+  }
   const envFlags = Object.keys(entry.env ?? {}).flatMap((variable) => ["--env", variable]);
   const mountFlags = [...new Set(paths.filter((path): path is string => path !== undefined))].flatMap((path) => ["--mount", `${path}:rw`]);
   const server = serverArgs.map((arg, index) => paths[index] ?? arg);
