@@ -3,6 +3,64 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-04
+
+Hardening. Every change below came out of trying to break mcpcage: hostile servers against the
+proxy, abuse inside the cage, mounts that undo it, and a first CodeQL scan.
+
+### Added
+
+- `mcpcage run --allow-sensitive-mount` and `--allow-server-requests`, each printing a warning when
+  used.
+- The proxy reads every `tools/call` result with the hidden-instruction rules that make sense on free
+  text, records the signs in the audit log (`result-signs`) and prints the high-severity ones. Results
+  always pass unchanged.
+- Docker tests that abuse the cage: writes outside the mounts, a file run from `/tmp`, a fork bomb,
+  a memory bomb, the environment, the capabilities, the absence of a Docker socket, DNS and TCP
+  without and with `--allow-net`.
+- CodeQL on every change and every Monday; secret scanning with push protection and Dependabot
+  security updates on the repository.
+
+### Changed
+
+- `mcpcage wrap` and `protect --fix` no longer cage a server that needs the whole disk, the home
+  directory or its parents, the system configuration, a Docker socket, a directory with credentials
+  (`.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, gcloud, `.azure`, `.npmrc`, `.netrc`,
+  `.git-credentials`, `.password-store`, the keychains, Colima's and OrbStack's sockets,
+  `.claude.json`) or mcpcage's own pins and audit logs: the entry is left as it is, with the reason.
+  `run --mount` refuses such a path unless `--allow-sensitive-mount` is given; `protect` names it.
+  A server that 0.3.0 caged with such a mount is refused at its next start, with a message that says
+  what to do.
+- The proxy reads the server's output with a bounded splitter: a line over 16 MiB is dropped and
+  counted (`oversize-line`), output that is not JSON-RPC is dropped (`stdout-noise`), a response to
+  an id the client is not waiting for is dropped (`unsolicited-response`), and an id must come back
+  with the type the client sent.
+- Requests from the server to the client: `ping` and `roots/list` pass; `sampling/createMessage`,
+  `elicitation/create` and any other method are refused with error -32001 unless
+  `--allow-server-requests` is given (`server-request-blocked`).
+- A `tools/list` with more than 10,000 tools, or with a definition nested more than 256 levels
+  deep, is refused whole: the client gets an error, nothing is pinned, the session is locked.
+  `diff` and `approve` refuse such a pending file; `protect --inspect` reports such a server as
+  refused and reads servers with the same limits.
+- The hidden-instruction rules read a text in windows of 1 MiB, at most 100 matches per rule per
+  window, and at most 20,000 strings or 32 Mi characters per definition or result; a `scan-budget`
+  sign stands for the rest.
+- The cage gets no swap: `--memory-swap` equals `--memory`. Before, Docker allowed as much swap
+  again on a host that has some, and the limit doubled.
+
+### Fixed
+
+- The proxy crashed with EPIPE when the server exited while the client was still writing, when the
+  client went away while the proxy wrote to it, or when the log pipe closed. It now ends cleanly
+  with the server's exit code.
+- A client that reads slower than the server writes no longer lets the server's output pile up in
+  memory, and answers to a server that does not read its input are capped.
+- The hidden-instruction rules could crash or stall on texts of millions of characters or strings
+  and on definitions nested thousands of levels deep.
+- Backups of configuration files are created with an exclusive write, `wrap` reads the file instead
+  of checking for it first, and the demo's probe server writes a file with a random name (the three
+  findings of the first CodeQL scan).
+
 ## [0.3.0] - 2026-11-03
 
 ### Added
