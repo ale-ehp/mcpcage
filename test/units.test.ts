@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { unwrapConfig, wrapConfig } from "../src/config.js";
 import { parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
-import { checkTools, jsonChanges, pinTools, toolFingerprint } from "../src/manifest.js";
+import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep } from "../src/manifest.js";
 import { dockerfile, parseMount, runArgs } from "../src/sandbox.js";
 
 describe("launch parsing", () => {
@@ -56,6 +56,24 @@ describe("manifest pinning", () => {
     expect(checkTools(pin, [tool])).toEqual([]);
     const violations = checkTools(pin, [{ ...tool, annotations: { readOnlyHint: false } }, { name: "exec", description: "Run a command." }]);
     expect(violations.map((violation) => [violation.kind, violation.name])).toEqual([["changed-tool", "add"], ["new-tool", "exec"]]);
+  });
+
+  it("finds a definition nested more than 256 levels deep, at any depth, without recursion", () => {
+    const objects = (levels: number) => {
+      let value: object = {};
+      for (let level = 1; level < levels; level++) value = { inner: value };
+      return value;
+    };
+    const arrays = (levels: number) => {
+      let value: unknown[] = [];
+      for (let level = 1; level < levels; level++) value = [value];
+      return value;
+    };
+    // The definition itself is the first level, so 255 more make the 256 allowed.
+    expect(tooDeep([tool, { name: "edge", inputSchema: objects(255) }, { name: "list", inputSchema: arrays(255) }])).toBeUndefined();
+    expect(tooDeep([tool, { name: "over", inputSchema: objects(256) }])?.name).toBe("over");
+    expect(tooDeep([tool, { name: "listed", inputSchema: arrays(256) }])?.name).toBe("listed");
+    expect(tooDeep([{ name: "far", inputSchema: objects(100_000) }])?.name).toBe("far");
   });
 
   it("describes changes by path", () => {

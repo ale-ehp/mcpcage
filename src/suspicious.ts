@@ -4,7 +4,8 @@ import { describeViolation, type ToolDefinition, type Violation } from "./manife
 /*
  * Explains why a tool definition looks dangerous, with fixed rules: no model, no network, no
  * dependencies, so the same definition always gets the same explanation. A finding is a sign for
- * the person reviewing a change, not a verdict: the block itself comes from pinning.
+ * the person reviewing a change, not a verdict: the block itself comes from pinning. The rules
+ * that make sense on free text also read the results of tool calls, which nothing blocks.
  */
 
 export type Severity = "high" | "medium" | "low";
@@ -21,8 +22,11 @@ export interface Finding {
   message: string;
 }
 
-/** A rule matches with a regex (each match becomes a quoted snippet) or computes its snippets itself. */
-type Rule = { id: string; severity: Severity; message: string } & ({ pattern: RegExp } | { test: (text: string) => string[] });
+/**
+ * A rule matches with a regex (each match becomes a quoted snippet) or computes its snippets itself,
+ * one at a time, so a scan that has seen enough can stop (see scanWindows).
+ */
+type Rule = { id: string; severity: Severity; message: string } & ({ pattern: RegExp } | { test: (text: string) => Iterable<string> });
 
 /** Joins alternatives into one case-insensitive global regex, so each rule stays one entry of the table. */
 function anyOf(...patterns: Array<RegExp | string>): RegExp {
@@ -164,67 +168,196 @@ function hiddenTags(text: string): string[] {
 const PATH_CHAR = /[^\s'"`<>()[\]{}|,;]/;
 
 /** Widens each match to the path around it, so "~/.ssh/id_rsa" is reported once and in full. */
-function pathsAround(marker: RegExp): (text: string) => string[] {
-  return (text) =>
-    [...text.matchAll(marker)].map((match) => {
+function pathsAround(marker: RegExp): (text: string) => Iterable<string> {
+  return function* (text) {
+    for (const match of text.matchAll(marker)) {
       let start = match.index;
       let end = start + match[0].length;
       // Bounded, so a megabyte without spaces cannot make the scan quadratic.
       while (start > 0 && match.index - start < 60 && PATH_CHAR.test(text[start - 1]!)) start--;
       while (end < text.length && end - match.index < 120 && PATH_CHAR.test(text[end]!)) end++;
-      return quote(text.slice(start, end).replace(/[.:!?]+$/, ""));
-    });
+      yield quote(text.slice(start, end).replace(/[.:!?]+$/, ""));
+    }
+  };
 }
 
 /** Base64 outside links and data URIs: long, with digits and both cases, which prose and paths rarely have. */
-function base64Blobs(text: string): string[] {
+function* base64Blobs(text: string): Generator<string> {
   const outsideLinks = text.replace(LINK, " ").replace(DATA_URI, " ");
-  return [...outsideLinks.matchAll(/[A-Za-z0-9+/]{40,}={0,2}/g)]
-    .map((match) => match[0])
-    .filter((run) => /\d\D*\d/.test(run) && /[A-Z]/.test(run) && /[a-z]/.test(run))
-    .map((run) => quote(run));
+  for (const [run] of outsideLinks.matchAll(/[A-Za-z0-9+/]{40,}={0,2}/g)) {
+    if (/\d\D*\d/.test(run) && /[A-Z]/.test(run) && /[a-z]/.test(run)) yield quote(run);
+  }
 }
 
 /** Tag characters mirror ASCII (U+E0041 is an invisible "A"), so the hidden text can be shown. */
-function tagText(text: string): string[] {
-  return [...text.matchAll(TAGS)].map((match) => {
+function* tagText(text: string): Generator<string> {
+  for (const match of text.matchAll(TAGS)) {
     let decoded = "";
     for (const char of match[0]) {
       const code = char.codePointAt(0)! - 0xe0000;
       // U+E0001 starts a language tag and U+E007F cancels one: markers, not text.
       if (code !== 0x01 && code !== 0x7f) decoded += String.fromCharCode(code);
     }
-    return decoded ? `hidden text: ${quote(decoded)}` : quote(match[0]);
-  });
+    yield decoded ? `hidden text: ${quote(decoded)}` : quote(match[0]);
+  }
 }
 
 /** Blank runs are described rather than quoted: forty quoted spaces show nothing. */
-function blankRuns(text: string): string[] {
-  return [...text.matchAll(/\s{40,}|(?:[^\S\n]*\n){8,}/g)].map((match) => {
+function* blankRuns(text: string): Generator<string> {
+  for (const [run] of text.matchAll(/\s{40,}|(?:[^\S\n]*\n){8,}/g)) {
     let breaks = 0;
-    for (const char of match[0]) if (char === "\n") breaks++;
-    return breaks >= 8 ? `${breaks} line breaks in a row` : `${match[0].length} blank characters in a row`;
-  });
+    for (const char of run) if (char === "\n") breaks++;
+    yield breaks >= 8 ? `${breaks} line breaks in a row` : `${run.length} blank characters in a row`;
+  }
 }
 
 /** Runs every rule on one string. */
 export function scanText(text: string, field = "text"): Finding[] {
+  return scanWindows(text, field, RULES);
+}
+
+// A tool description or a tool result can be a line of 16 MiB, and on that much hostile text the
+// rules overflow the regular expression stack (from about 5 million characters in one run), take
+// seconds (a match at every character) or run out of memory (millions of snippets). So a text is
+// read a window at a time, with an overlap that keeps a sign on a boundary whole, and each rule stops
+// after enough matches in a window: the matches it skips are more of a sign it already reported. A
+// text of up to WINDOW + OVERLAP characters is one window, read whole.
+const WINDOW = 1024 * 1024;
+const OVERLAP = 1024;
+const MATCHES_PER_WINDOW = 100;
+
+/** Runs `rules` on one string, a window at a time. */
+function scanWindows(text: string, field: string, rules: Rule[]): Finding[] {
   const findings: Finding[] = [];
-  for (const rule of RULES) {
-    const snippets = "pattern" in rule ? [...text.matchAll(rule.pattern)].map((match) => quote(match[0])) : rule.test(text);
-    for (const snippet of snippets) findings.push({ rule: rule.id, severity: rule.severity, field, snippet, message: rule.message });
+  for (let start = 0; start < text.length; start += WINDOW) {
+    const end = start + WINDOW + OVERLAP;
+    findings.push(...scan(text.slice(start, end), field, rules, MATCHES_PER_WINDOW));
+    if (end >= text.length) break;
   }
   return tidy(findings);
 }
 
-/** Runs every rule on every string of a definition: names, descriptions, schemas, annotations. */
+/** Runs `rules` on one window, each rule stopping after `limit` matches. */
+function scan(text: string, field: string, rules: Rule[], limit: number): Finding[] {
+  const findings: Finding[] = [];
+  for (const rule of rules) {
+    let matches = 0;
+    for (const snippet of snippets(rule, text)) {
+      if (++matches > limit) break;
+      findings.push({ rule: rule.id, severity: rule.severity, field, snippet, message: rule.message });
+    }
+  }
+  return tidy(findings);
+}
+
+/** What one rule finds, one snippet at a time, so a scan can stop early. */
+function* snippets(rule: Rule, text: string): Generator<string> {
+  if ("test" in rule) yield* rule.test(text);
+  else for (const match of text.matchAll(rule.pattern)) yield quote(match[0]);
+}
+
+// A definition or a result can also hold a great many short strings: an enum of 3 million one-letter
+// values is a line of 12 MiB, and at a few microseconds a string, reading it took 15 seconds. The
+// scan stops at these limits, and one finding takes the place of what it did not read.
+/** The most strings the scan reads in one definition or one result. */
+const MAX_STRINGS = 20_000;
+/** The most characters the scan reads in one definition or one result, all its strings together. */
+const MAX_CHARS = 32 * 1024 * 1024;
+
+const OVER_BUDGET = `more than ${MAX_STRINGS.toLocaleString("en-US")} strings or ${MAX_CHARS / 1024 / 1024} Mi characters: too much to read`;
+const DEFINITION_OVER_BUDGET: Omit<Finding, "snippet"> = { rule: "scan-budget", severity: "high", field: "definition", message: `${OVER_BUDGET}, treat it as hidden` };
+const RESULT_OVER_BUDGET: Omit<Finding, "snippet"> = { rule: "scan-budget", severity: "medium", field: "result", message: `${OVER_BUDGET}, so the rest was not checked` };
+
+/**
+ * Scans the texts in turn while they fit in MAX_STRINGS and MAX_CHARS. The first one that does not is
+ * not read, nor anything after it: `overflow` takes their place and says where reading stopped.
+ */
+function scanWithinBudget(texts: Iterable<[string, string]>, scan: (text: string, field: string) => Finding[], overflow: Omit<Finding, "snippet">): Finding[] {
+  const findings: Finding[] = [];
+  let count = 0;
+  let chars = 0;
+  for (const [field, text] of texts) {
+    count += 1;
+    chars += text.length;
+    if (count > MAX_STRINGS || chars > MAX_CHARS) {
+      findings.push({ ...overflow, snippet: `stopped before ${quote(field)}` });
+      break;
+    }
+    for (const finding of scan(text, field)) findings.push(finding);
+  }
+  return findings;
+}
+
+/** Runs every rule on every string of a definition (names, descriptions, schemas, annotations), within the budget. */
 export function scanTool(tool: ToolDefinition): Finding[] {
-  return tidy(strings(tool).flatMap(([field, text]) => scanText(text, field)));
+  return tidy(scanWithinBudget(strings(tool), scanText, DEFINITION_OVER_BUDGET));
 }
 
 /** What a changed definition carries, plus how much it grew since it was approved. */
 export function scanChange(before: ToolDefinition | undefined, after: ToolDefinition): Finding[] {
   return tidy([...scanTool(after), ...(before ? lengthGrowth(before, after) : [])]);
+}
+
+/**
+ * A tool's result is data: a file, a page, a mailbox, a log. These rules match what such data is
+ * normally made of, so on results they would mark almost every call and bury the real signs: web
+ * and email addresses, IP addresses, data URIs and base64 blobs, HTML comments, .env files (most
+ * projects keep one, and listings, .gitignore files and READMEs name it) and long blank stretches.
+ * They are signs in a definition because a description has no reason to carry them. length-growth
+ * is not used either: it measures a definition against the approved one, and a result has no
+ * earlier version.
+ */
+const DATA_RULES = new Set(["html-comment", "env-file", "url", "ip-address", "data-uri", "base64-blob", "email-address", "padding"]);
+const RESULT_RULES = RULES.filter((rule) => !DATA_RULES.has(rule.id));
+
+/** Runs the rules that make sense on free text on one text of a tool's result. */
+export function scanResultText(text: string, field = "text"): Finding[] {
+  // A byte order mark opens many files and hides nothing.
+  return scanWindows(text.startsWith("\uFEFF") ? text.slice(1) : text, field, RESULT_RULES);
+}
+
+/**
+ * The texts of an answer to tools/call that reach the model, by JSON path: the text items of the
+ * content (an isError result carries its error message there), the text of embedded resources,
+ * structuredContent serialized, and the message of a JSON-RPC error. An empty text is left out:
+ * there is nothing to scan.
+ */
+export function resultTexts(response: { result?: unknown; error?: unknown }): Array<[string, string]> {
+  const result = (response.result ?? {}) as { content?: unknown; structuredContent?: unknown };
+  const error = (response.error ?? {}) as { message?: unknown };
+  const texts: Array<[string, string]> = [];
+  for (const [index, item] of (Array.isArray(result.content) ? result.content : []).entries()) {
+    const { type, text, resource } = (item ?? {}) as { type?: unknown; text?: unknown; resource?: { text?: unknown } };
+    if (type === "text" && typeof text === "string") texts.push([`content[${index}].text`, text]);
+    else if (type === "resource" && typeof resource?.text === "string") texts.push([`content[${index}].resource.text`, resource.text]);
+  }
+  if (result.structuredContent !== undefined) texts.push(["structuredContent", JSON.stringify(result.structuredContent)]);
+  if (typeof error.message === "string") texts.push(["error.message", error.message]);
+  return texts.filter(([, text]) => text !== "");
+}
+
+/**
+ * The signs of hidden instructions in an answer to tools/call. structuredContent usually comes back
+ * as text too, so a sign found in both is one sign.
+ */
+export function scanResult(response: { result?: unknown; error?: unknown }): Finding[] {
+  const unique = new Map<string, Finding>();
+  for (const finding of tidy(scanWithinBudget(resultTexts(response), scanResultText, RESULT_OVER_BUDGET))) {
+    const key = JSON.stringify([finding.rule, finding.snippet]);
+    if (!unique.has(key)) unique.set(key, finding);
+  }
+  return [...unique.values()];
+}
+
+/**
+ * One line about the high-severity signs in a tool's result, naming at most three the way the block
+ * message names them; undefined when there is none.
+ */
+export function describeResultSigns(tool: string, findings: Finding[]): string | undefined {
+  const high = findings.filter((finding) => finding.severity === "high");
+  if (high.length === 0) return undefined;
+  const named = high.slice(0, 3).map((finding) => `${finding.rule}: ${finding.snippet}`);
+  return `the result of ${quote(tool)} carries ${highSeveritySigns(high.length)} (${named.join(", ")})`;
 }
 
 export function highestSeverity(findings: Finding[]): Severity | undefined {
@@ -260,8 +393,13 @@ export function describeViolationsWithFindings(violations: Violation[]): string 
 
 /** Counts per severity over a blocked listing, for the audit log and the approval warning. */
 export function countSuspicious(violations: Violation[]): Record<Severity, number> {
+  return countFindings(violations.flatMap((violation) => scanViolation(violation)));
+}
+
+/** Counts per severity, for the audit log. */
+export function countFindings(findings: Finding[]): Record<Severity, number> {
   const counts = { high: 0, medium: 0, low: 0 };
-  for (const finding of violations.flatMap((violation) => scanViolation(violation))) counts[finding.severity]++;
+  for (const finding of findings) counts[finding.severity]++;
   return counts;
 }
 
@@ -292,14 +430,43 @@ function tidy(findings: Finding[]): Finding[] {
 // $schema, $id and $ref legitimately hold URLs; reporting them would bury the real signs.
 const SCHEMA_KEYS = new Set(["$schema", "$id", "$ref"]);
 
-/** Every string of a definition with its JSON path, without `_meta`, which the model never sees. */
-function strings(value: unknown, path = ""): Array<[string, string]> {
-  if (typeof value === "string") return [[path, value]];
-  if (Array.isArray(value)) return value.flatMap((item, index) => strings(item, `${path}[${index}]`));
-  if (value === null || typeof value !== "object") return [];
-  return Object.entries(value).flatMap(([key, inner]) =>
-    (path === "" && key === "_meta") || SCHEMA_KEYS.has(key) ? [] : strings(inner, path ? `${path}.${key}` : key),
-  );
+/**
+ * Every string of a definition with its JSON path, without `_meta`, which the model never sees. One
+ * at a time and with a stack instead of recursion, so a scan can stop early and no depth exhausts it.
+ */
+function* strings(value: unknown): Generator<[string, string]> {
+  const stack: Array<Iterator<[string, unknown]>> = [[["", value] as [string, unknown]].values()];
+  while (stack.length > 0) {
+    const next = stack[stack.length - 1]!.next();
+    if (next.done) {
+      stack.pop();
+      continue;
+    }
+    const [path, inner] = next.value;
+    if (typeof inner === "string") yield [path, inner];
+    else if (inner !== null && typeof inner === "object") stack.push(children(path, inner));
+  }
+}
+
+/** The values inside an array or an object with their paths, leaving out `_meta` at the top and the schema keys. */
+function* children(path: string, value: object): Generator<[string, unknown]> {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) yield [`${path}[${index}]`, item];
+    return;
+  }
+  for (const [key, inner] of Object.entries(value)) {
+    if (!((path === "" && key === "_meta") || SCHEMA_KEYS.has(key))) yield [path ? `${path}.${key}` : key, inner];
+  }
+}
+
+/** The first `count` items, without walking the rest. */
+function* first<T>(items: Iterable<T>, count: number): Generator<T> {
+  if (count <= 0) return;
+  let left = count;
+  for (const item of items) {
+    yield item;
+    if (--left === 0) return;
+  }
 }
 
 /**
@@ -307,9 +474,10 @@ function strings(value: unknown, path = ""): Array<[string, string]> {
  * and so is a whole definition that doubled and gained 500 when no single string explains it.
  */
 function lengthGrowth(before: ToolDefinition, after: ToolDefinition): Finding[] {
-  const previous = new Map(strings(before));
+  // Within the scan's budget: past it, scanTool has already said the definition is too much to read.
+  const previous = new Map(first(strings(before), MAX_STRINGS));
   const findings: Finding[] = [];
-  for (const [field, text] of strings(after)) {
+  for (const [field, text] of first(strings(after), MAX_STRINGS)) {
     const old = previous.get(field);
     if (old !== undefined && grew(old.length, text.length, 100)) findings.push(growth(field, old.length, text.length));
   }

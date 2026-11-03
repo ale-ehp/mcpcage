@@ -4,9 +4,9 @@ import type { Readable, Writable } from "node:stream";
 import { AuditLog } from "./audit.js";
 import { canonicalJson, sha256 } from "./canonical.js";
 import { LineSplitter, MAX_LINE_BYTES } from "./lines.js";
-import { checkTools, isToolList, pinTools, type Pin, type ToolDefinition } from "./manifest.js";
+import { checkTools, isToolList, MAX_DEPTH, MAX_TOOLS, pinTools, tooDeep, type Pin, type ToolDefinition } from "./manifest.js";
 import { loadPin, savePending, savePin } from "./pinstore.js";
-import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
+import { countFindings, countSuspicious, describeResultSigns, describeViolationsWithFindings, highSeveritySigns, scanResult } from "./suspicious.js";
 
 /** JSON-RPC error code mcpcage uses when it refuses a message (implementation-defined range). */
 export const BLOCKED = -32001;
@@ -56,13 +56,16 @@ type Message = { jsonrpc?: string; id?: Id | null; method?: string; params?: any
  *     MAX_LINE_BYTES and responses to requests the client is not waiting for are dropped;
  *  4. a request from the server reaches the client only if it is a ping or roots/list, unless
  *     allowServerRequests is set; sampling, elicitation and unknown methods get an error instead.
- * Every decision, call and result is recorded in the hash-chained audit log.
+ * A tool's result always passes unchanged, but the signs of hidden instructions in its text are
+ * recorded and the high-severity ones printed. Every decision, call and result is recorded in the
+ * hash-chained audit log.
  */
 export function runProxy(options: ProxyOptions): Promise<number> {
   const { serverId, audit, log, strict, allowServerRequests } = options;
   let pin: Pin | undefined = loadPin(serverId);
   let pinnedThisSession = false;
-  let locked = false;
+  /** Why the session is locked, once a listing was blocked: every call is refused from then on. */
+  let locked: string | undefined;
   const fromClient = new Map<Id, { method: string; tool?: string; cursor?: boolean; started: number }>();
 
   const child = spawn(options.command, options.args, {
@@ -111,7 +114,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
         if (message.method === "tools/call") {
           const tool = typeof message.params?.name === "string" ? message.params.name : "";
           const reason = locked
-            ? "this session is locked because the server's tool definitions changed"
+            ? `this session is locked because ${locked}`
             : !pin
               ? "no approved tool manifest yet (the client must list tools first)"
               : !pin.tools[tool]
@@ -176,6 +179,25 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     answerServer(blocked(id, `mcpcage blocked ${method}: ${reason}`));
     return undefined;
   };
+  /**
+   * A tool's result is data the model reads, and a server can write instructions into it. Blocking
+   * or editing a result would break legitimate content, so mcpcage only says what it sees: the signs
+   * go to the audit log, and the high-severity ones to stderr.
+   */
+  const resultSigns = (id: Id, tool: string, message: Message) => {
+    const findings = scanResult(message);
+    if (findings.length === 0) return;
+    audit.write("result-signs", { id, tool, suspicious: countFindings(findings) });
+    const warning = describeResultSigns(tool, findings);
+    if (warning) log(`mcpcage: ${warning}. Run \`mcpcage audit show ${serverId}\` for the record.`);
+  };
+  /** A listing refused whole: the client gets an error, the session is locked, nothing is pinned or saved. */
+  const refuseListing = (id: Id, refusal: string, lock: string, entry: Record<string, unknown>): Message => {
+    locked = lock;
+    audit.write("list-blocked", entry);
+    log(`mcpcage: blocked tools/list from ${serverId}: ${refusal}. Nothing was pinned, and the session is locked.`);
+    return blocked(id, `mcpcage blocked tools/list: ${refusal}.`);
+  };
   /** What becomes of one message from the server: passed on, replaced, or dropped (undefined). */
   const fromServer = (message: Message): Message | undefined => {
     if (message.method !== undefined) {
@@ -204,13 +226,31 @@ export function runProxy(options: ProxyOptions): Promise<number> {
         ms: Date.now() - request.started,
         bytes: JSON.stringify(message.result ?? message.error ?? null).length,
       });
+      resultSigns(id, request.tool ?? "", message);
       return message;
     }
     if (request.method !== "tools/list" || !isToolList(message.result?.tools)) return message;
 
     const tools: ToolDefinition[] = message.result.tools;
+    // Refused before anything walks it: nothing of such a listing is pinned, saved or explained.
+    const most = MAX_TOOLS.toLocaleString("en-US");
+    if (tools.length > MAX_TOOLS) {
+      return refuseListing(id, `the server lists more than ${most} tools`, `the server listed more than ${most} tools`, {
+        reason: "too-many",
+        count: tools.length,
+        limit: MAX_TOOLS,
+      });
+    }
+    const deep = tooDeep(tools);
+    if (deep) {
+      return refuseListing(id, `the definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep`, "the server listed a definition nested too deep", {
+        reason: "too-deep",
+        tool: deep.name,
+        limit: MAX_DEPTH,
+      });
+    }
     if (!pin && strict) {
-      locked = true;
+      locked = "the server's tool definitions changed";
       const unapproved = tools.map((tool) => ({ kind: "new-tool" as const, name: tool.name, after: tool }));
       savePending(serverId, tools, unapproved);
       audit.write("list-blocked", { reason: "not-approved", tools: tools.map((tool) => tool.name), suspicious: countSuspicious(unapproved) });
@@ -233,7 +273,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       audit.write("list-verified", { tools: tools.length });
       return message;
     }
-    locked = true;
+    locked = "the server's tool definitions changed";
     savePending(serverId, tools, violations);
     const suspicious = countSuspicious(violations);
     audit.write("list-blocked", {

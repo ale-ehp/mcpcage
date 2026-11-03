@@ -180,10 +180,21 @@ rules are a reading aid, not a verdict: the block itself comes from the pin, whi
 They are measured against real servers: the 14 tools of `@modelcontextprotocol/server-filesystem`
 produce no finding, and a test keeps it that way.
 
+Tool results are read by the same rules, except those that match what ordinary data is made of
+(web and email addresses, IP addresses, encoded blobs, HTML comments, `.env` files, blank stretches).
+What they find is recorded in the audit log as `result-signs` and the high-severity signs are printed
+on stderr, but a result is never blocked or changed: it reaches the client as the server sent it.
+
+The rules read a long text a window at a time, and at most 20,000 strings or 32 Mi characters of one
+definition or result. Past that they stop, and a `scan-budget` sign stands for the rest: high in a
+definition, which is then too much to review and should be treated as hidden, medium in a result.
+
 **What the server may send.** The proxy passes on JSON-RPC only: other output is dropped, and so
 is a response to a request the client never sent or already got an answer to. A line longer than
 16 MiB is counted and thrown away as it streams in, so a server cannot exhaust mcpcage's memory. A
-server may ping the client and ask for its roots. A request to run the model
+listing of more than 10,000 tools, or with a definition nested more than 256 levels deep, is refused
+whole, before anything walks it: the client gets an error, nothing is pinned, and the session is
+locked. A server may ping the client and ask for its roots. A request to run the model
 (`sampling/createMessage`) or to put a question to you (`elicitation/create`) is a way in for a
 prompt injection and a way out for data: mcpcage answers it with an error unless you pass
 `--allow-server-requests`, and does the same with any request it does not know. Every drop and
@@ -211,12 +222,14 @@ declares install scripts (`npm view`, cached for a week; `--offline` uses the ca
 the configuration holds a secret in clear text (named, never shown, masked in command lines too)
 and whether an argument opens the whole disk, the whole home directory or a directory with
 credentials. `--inspect` starts each npx server inside the cage, with its path arguments mounted
-read-only and no network, lists its tools and runs the rules above on them. It mounts the sensitive
-paths too, only for that listing: in that time a server could copy what it reads there into its
-tool descriptions or its error output, and the report prints parts of both. `--fix` prints the
-plan, asks for the word `yes` (or takes `--yes`), rewrites only the server entries of each file in
-the file's own style, leaves a server that needs a sensitive path as it is (with the reason), keeps
-a backup (`<file>.mcpcage.bak`) and replaces the file atomically.
+read-only and no network, lists its tools and runs the rules above on them. It reads the server
+with the proxy's limits: a line over 16 MiB is dropped, and a server that lists more than 10,000
+tools, or a definition nested more than 256 levels deep, is reported as refused rather than read.
+It mounts the sensitive paths too, only for that listing: in that time a server could copy what it
+reads there into its tool descriptions or its error output, and the report prints parts of both.
+`--fix` prints the plan, asks for the word `yes` (or takes `--yes`), rewrites only the server
+entries of each file in the file's own style, leaves a server that needs a sensitive path as it is
+(with the reason), keeps a backup (`<file>.mcpcage.bak`) and replaces the file atomically.
 
 **The cage.** Each server runs with:
 
@@ -283,8 +296,9 @@ In short:
 - Packages that need install scripts (native addons) will not build with scripts disabled.
 - Trust on first use trusts the first manifest. Use `--strict` where that matters, and
   `protect --inspect` to see the signs before approving.
-- The rules recognize the signs they know. A rewritten instruction can avoid them; the pin still
-  blocks the change.
+- The rules recognize the signs they know. A rewritten instruction can avoid them; in a tool
+  definition the pin still blocks the change, but a tool result is never blocked, so the model may
+  still follow what it says.
 - Network access is all or nothing. A per-server egress allowlist is planned.
 - The audit log is tamper-evident, not tamper-proof: someone with your user account can delete it.
 - Only tools are pinned; prompt and resource descriptions are not yet.

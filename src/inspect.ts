@@ -1,17 +1,19 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { isJsonObject } from "./jsonc.js";
-import { isToolList, type ToolDefinition } from "./manifest.js";
+import { LineSplitter, MAX_LINE_BYTES } from "./lines.js";
+import { isToolList, MAX_TOOLS, type ToolDefinition } from "./manifest.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const VERSION = packageVersion();
 
 /**
  * A minimal MCP client over stdio: initialize, then every page of tools/list. It reads the tools a
- * server offers without approving or pinning anything, for `mcpcage protect --inspect`.
+ * server offers without approving or pinning anything, for `mcpcage protect --inspect`, and reads
+ * the server with the proxy's limits: a line over MAX_LINE_BYTES is dropped as it streams in, and
+ * a listing of more than MAX_TOOLS tools is refused.
  */
 export function listTools(command: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<ToolDefinition[]> {
   return new Promise((resolve, reject) => {
@@ -21,16 +23,26 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
     let nextId = 1;
     let stderr = "";
     let done = false;
+    // Lines over MAX_LINE_BYTES, thrown away unread: the answer may have been one of them.
+    let dropped = 0;
+    let longest = 0;
 
+    /** Why an answer may be missing: the lines too long to read, and the end of the server's stderr. */
     const tail = () => {
+      const limit = `over the ${MAX_LINE_BYTES / 1024 / 1024} MiB limit`;
+      const note =
+        dropped === 0
+          ? ""
+          : dropped === 1
+            ? `; dropped a line of ${longest} bytes from the server, ${limit}`
+            : `; dropped ${dropped} lines from the server ${limit}, the longest of ${longest} bytes`;
       const text = stderr.trim();
-      return text ? `: ${text.slice(-500)}` : "";
+      return `${note}${text ? `: ${text.slice(-500)}` : ""}`;
     };
     const finish = (error?: Error) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      lines.close();
       child.stdin.end();
       child.kill("SIGTERM");
       // A server that ignores SIGTERM must not keep mcpcage waiting.
@@ -59,8 +71,9 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
       finish(new Error(`the server stopped before listing its tools (${signal ? `signal ${signal}` : `exit code ${code}`})${tail()}`));
     });
 
-    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    lines.on("line", (line) => {
+    /** One line from the server: an answer, a request to answer, or noise to skip. */
+    const read = (line: string) => {
+      if (done) return;
       let message: unknown;
       try {
         message = JSON.parse(line);
@@ -94,10 +107,32 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
         finish(new Error("the server's answer to tools/list holds no list of tools"));
         return;
       }
-      tools.push(...result.tools);
+      if (tools.length + result.tools.length > MAX_TOOLS) {
+        finish(new Error(`the server lists more than ${MAX_TOOLS.toLocaleString("en-US")} tools, which mcpcage refuses`));
+        return;
+      }
+      for (const tool of result.tools) tools.push(tool);
       if (typeof result.nextCursor === "string" && result.nextCursor !== "") request("tools/list", { cursor: result.nextCursor });
       else finish();
-    });
+    };
+    // Whatever goes wrong while reading a line fails this inspection, and only this one: an exception
+    // escaping here would end mcpcage before `protect` reported on the other servers.
+    const lines = new LineSplitter(
+      MAX_LINE_BYTES,
+      (line) => {
+        try {
+          read(line);
+        } catch (error) {
+          finish(new Error(`reading the server's answer failed: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      },
+      (bytes) => {
+        dropped += 1;
+        longest = Math.max(longest, bytes);
+      },
+    );
+    child.stdout.on("data", (chunk: Buffer) => lines.push(chunk));
+    child.stdout.on("end", () => lines.end());
 
     request("initialize", { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "mcpcage", version: VERSION } });
   });

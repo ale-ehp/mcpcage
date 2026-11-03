@@ -6,7 +6,7 @@ import { claudeCodeSections, type ClientId, type ConfigLocation } from "./client
 import { createBackup, hostPath, isWrapped, serverType, wrapEntry, type ServerEntry, type ServerType } from "./config.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
-import type { ToolDefinition } from "./manifest.js";
+import { MAX_DEPTH, tooDeep, type ToolDefinition } from "./manifest.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
 import { parseMount, type SandboxOptions } from "./sandbox.js";
@@ -137,6 +137,9 @@ async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEn
   const env = stringValues(entry.env);
   try {
     const tools = await inspect({ argv, env });
+    // The proxy refuses such a listing whole, so the report does not read it either.
+    const deep = tooDeep(tools);
+    if (deep) throw new Error(`the definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep, which mcpcage refuses`);
     return { tools: tools.length, findings: findingsIn(tools) };
   } catch (error) {
     // The server's own error output may repeat a value it was given: no value reaches the report.

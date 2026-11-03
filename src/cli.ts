@@ -12,8 +12,9 @@ import { discoverConfigs } from "./clients.js";
 import { unwrapConfig, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
+import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, serverDir } from "./paths.js";
-import { approvePending, listServers, loadPending, loadPin, readJson } from "./pinstore.js";
+import { approvePending, listServers, loadPending, loadPin, readJson, type Pending } from "./pinstore.js";
 import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, type ServerRecord } from "./sandbox.js";
@@ -358,6 +359,7 @@ function diff(argv: string[]): number {
     console.log(`${serverId}: no tool changes waiting for approval.`);
     return 0;
   }
+  refuseTooDeep(serverId, pending);
   console.log(`${serverId}: tool definitions seen ${pending.seenAt} differ from the approved ones:\n`);
   console.log(describeViolationsWithFindings(pending.violations));
   return 1;
@@ -372,6 +374,7 @@ async function approve(argv: string[]): Promise<number> {
     console.log(`${serverId}: nothing to approve.`);
     return 0;
   }
+  refuseTooDeep(serverId, pending);
   console.log(describeViolationsWithFindings(pending.violations));
   // Said before the question and before --yes takes effect: this is the last moment to look.
   const { high } = countSuspicious(pending.violations);
@@ -390,6 +393,21 @@ async function approve(argv: string[]): Promise<number> {
   new AuditLog(serverId, `approve-${Date.now()}`).write("approved", { tools: Object.keys(pin?.tools ?? {}) });
   console.log(`Approved ${Object.keys(pin?.tools ?? {}).length} tools for ${serverId}.`);
   return 0;
+}
+
+/**
+ * Showing and approving a definition walk it level by level, so one nested deeper than MAX_DEPTH is
+ * refused here too. The proxy no longer saves such a listing, but older versions did under --strict
+ * as deep as their stack allowed: a definition 3,000 levels deep was saved, then crashed them.
+ */
+function refuseTooDeep(serverId: string, pending: Pending): void {
+  const compared = pending.violations.flatMap((violation) => (violation.kind === "changed-tool" ? [violation.before, violation.after] : [violation.after]));
+  const deep = tooDeep([...pending.tools, ...compared]);
+  if (!deep) return;
+  throw new Error(
+    `the pending definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep, so it is neither shown nor approved. ` +
+      `Delete ${join(serverDir(serverId), "pending.json")} to discard it.`,
+  );
 }
 
 function list(): number {

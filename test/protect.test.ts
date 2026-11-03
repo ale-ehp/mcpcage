@@ -9,10 +9,11 @@ import { serverType, wrapEntry } from "../src/config.js";
 import { listTools } from "../src/inspect.js";
 import { hasComments, parseJsonc } from "../src/jsonc.js";
 import { parseLaunch, serverIdFor } from "../src/launch.js";
+import { tooDeep } from "../src/manifest.js";
 import { installScripts } from "../src/npm-scripts.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs } from "../src/protect.js";
 import { runArgs } from "../src/sandbox.js";
-import { fakeServer, fakeUserEnv, mcpcageWithEnv, root } from "./helpers.js";
+import { fakeServer, fakeUserEnv, hostileServer, mcpcageWithEnv, root } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
 const noNpm = () => ({ status: 0, stdout: "", stderr: "" });
@@ -392,6 +393,22 @@ describe("inspection", () => {
     expect(text).toContain("                could not inspect: the server stopped before listing its tools (exit code 1): bad key *** for *** [U+001B][31mfatal\n");
     expect(text).not.toContain("0123456789");
     expect(text).toContain("  1 has tools with high-severity signs of hidden instructions.\n  1 server could not be inspected.\n");
+  });
+});
+
+describe("inspection of a definition nested too deep", () => {
+  it("says the server's tools are refused, as the proxy refuses them, instead of reading them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-inspection-"));
+    const file = join(dir, "mcp.json");
+    writeJsonFile(file, { mcpServers: { nested: { command: "npx", args: ["-y", "nested-mcp"] } } });
+    let schema: object = { type: "string" };
+    for (let level = 1; level < 10_000; level++) schema = { type: "array", items: schema };
+    const inspect = async () => [{ name: "nested", inputSchema: schema }];
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, inspect });
+    const refusal = 'the definition of "nested" is nested more than 256 levels deep, which mcpcage refuses';
+    expect(report.servers[0]!.inspection).toEqual({ tools: 0, findings: [], error: refusal });
+    expect(renderReport(report, { home: dir })).toContain(`could not inspect: ${refusal}\n`);
   });
 });
 
@@ -800,5 +817,42 @@ describe("listing a server's tools", () => {
     );
     await expect(listTools(process.execPath, ["-e", "setInterval(() => {}, 1000)"], process.env, 300)).rejects.toThrow("did not answer within 0.3 s");
     await expect(listTools(join(tmpdir(), "no-such-program-mcpcage"), [], process.env, 15_000)).rejects.toThrow(/could not start/);
+  });
+
+  it("drops a line over 16 MiB as it streams in, reads on, and names it when the answer is missing", async () => {
+    // 20 MiB of junk on one line, then the answer: the junk is dropped and the answer read.
+    expect((await listTools(process.execPath, [hostileServer, "giant"], process.env, 15_000)).map((tool) => tool.name)).toEqual(["echo"]);
+    // A server whose only output is one line of 17 MiB.
+    const bytes = 17 * 1024 * 1024;
+    const giantOnly = `process.stdout.write("a".repeat(${bytes}) + "\\n", () => process.exit(0))`;
+    await expect(listTools(process.execPath, ["-e", giantOnly], process.env, 15_000)).rejects.toThrow(
+      `the server stopped before listing its tools (exit code 0); dropped a line of ${bytes} bytes from the server, over the 16 MiB limit`,
+    );
+  });
+
+  it("reads a definition nested 10,000 levels deep without walking it, for protect to refuse", async () => {
+    const tools = await listTools(process.execPath, [hostileServer, "deep"], process.env, 15_000);
+    expect(tools.map((tool) => tool.name)).toEqual(["nested"]);
+    expect(tooDeep(tools)?.name).toBe("nested");
+  });
+
+  it("refuses a server that lists more than 10,000 tools, without keeping them", async () => {
+    // One line of 200,000 tools: appending them in one call threw inside the line handler and ended the process.
+    await expect(listTools(process.execPath, [hostileServer, "many"], process.env, 15_000)).rejects.toThrow(
+      "the server lists more than 10,000 tools, which mcpcage refuses",
+    );
+  });
+
+  it("says in the report why it refused a server's tools", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-inspection-"));
+    const file = join(dir, "mcp.json");
+    writeJsonFile(file, { mcpServers: { deep: { command: "npx", args: ["-y", "deep-mcp"] }, many: { command: "npx", args: ["-y", "many-mcp"] } } });
+    // The real reader, on the hostile server in the mode the package is named after.
+    const inspect = async (launch: { argv: string[] }) => listTools(process.execPath, [hostileServer, launch.argv[2]!.replace("-mcp", "")], process.env, 15_000);
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, inspect });
+    const text = renderReport(report, { home: dir });
+    expect(text).toContain('could not inspect: the definition of "nested" is nested more than 256 levels deep, which mcpcage refuses\n');
+    expect(text).toContain("could not inspect: the server lists more than 10,000 tools, which mcpcage refuses\n");
   });
 });

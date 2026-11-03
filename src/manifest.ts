@@ -62,6 +62,36 @@ export function isToolList(value: unknown): value is ToolDefinition[] {
   );
 }
 
+/**
+ * How deep a tool definition may nest objects and arrays, the definition itself being the first
+ * level. Real schemas stay within a few dozen. Pinning, comparing, explaining and scanning a
+ * definition walk it level by level, and a few kilobytes nested 10,000 levels deep ran them out of
+ * stack and crashed the proxy: a definition nested deeper than this is refused whole, before any of
+ * them runs.
+ */
+export const MAX_DEPTH = 256;
+
+/**
+ * The most tools one listing may hold. Real servers list a few dozen. Every tool listed is pinned,
+ * compared and scanned: a single line of 200,000 tools made `protect --inspect` throw, and took the
+ * proxy two seconds and 11 MiB of log lines to explain once blocked. A listing with more is refused
+ * whole, like a definition nested too deep.
+ */
+export const MAX_TOOLS = 10_000;
+
+/** The first definition that nests deeper than MAX_DEPTH, measured with a stack instead of recursion. */
+export function tooDeep(definitions: ToolDefinition[]): ToolDefinition | undefined {
+  return definitions.find((definition) => {
+    const stack: Array<[object, number]> = [[definition, 1]];
+    while (stack.length > 0) {
+      const [value, depth] = stack.pop()!;
+      if (depth > MAX_DEPTH) return true;
+      for (const inner of Object.values(value)) if (inner !== null && typeof inner === "object") stack.push([inner, depth + 1]);
+    }
+    return false;
+  });
+}
+
 /** Human-readable explanation of what changed, for the terminal and for `mcpcage diff`. */
 export function describeViolations(violations: Violation[]): string {
   return violations.flatMap((violation) => describeViolation(violation)).join("\n");

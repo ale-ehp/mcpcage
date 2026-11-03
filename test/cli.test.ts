@@ -29,6 +29,24 @@ describe("cli", () => {
     expect(mcpcage(home, "list").stdout).toContain("PENDING CHANGES");
   });
 
+  it("refuses to show or approve a pending definition nested too deep, and pins nothing", () => {
+    const home = freshHome();
+    let schema: object = { type: "string" };
+    for (let level = 1; level < 10_000; level++) schema = { type: "array", items: schema };
+    const nested = { name: "nested", inputSchema: schema };
+    // Older versions saved listings like this under --strict, as deep as their stack allowed; at
+    // 10,000 levels any walk of the definition crashes diff and approve.
+    const dir = join(home, "servers", "deep");
+    mkdirSync(dir, { recursive: true });
+    const pending = { serverId: "deep", seenAt: "2026-11-03T00:00:00.000Z", tools: [nested], violations: [{ kind: "new-tool", name: "nested", after: nested }] };
+    writeFileSync(join(dir, "pending.json"), JSON.stringify(pending));
+    for (const result of [mcpcage(home, "diff", "deep"), mcpcage(home, "approve", "deep", "--yes")]) {
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain('mcpcage: the pending definition of "nested" is nested more than 256 levels deep, so it is neither shown nor approved.');
+    }
+    expect(existsSync(join(dir, "pin.json"))).toBe(false);
+  });
+
   it("shows the audit trail without arguments or results", async () => {
     const home = freshHome();
     const session = await connectFake(home, "v1");

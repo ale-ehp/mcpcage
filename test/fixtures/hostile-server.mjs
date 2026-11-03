@@ -5,6 +5,8 @@
 //   garbage      writes lines that are not JSON-RPC around its answers: text, JSON that is not
 //                JSON-RPC, an answer without "jsonrpc", a batch of junk, a batch of a notification and junk
 //   unsolicited  before answering tools/list, answers id 999, never asked; after, answers tools/list again
+//   deep         its one tool takes a list of lists 10,000 levels deep: an input schema nested that far
+//   many         lists 200,000 tools in one page, a line of 4.3 MiB
 //   sampling     on tools/list, asks the client to run the model (sampling/createMessage)
 //   elicitation  on tools/list, asks the client to put a question to the user (elicitation/create)
 //   unknown      on tools/list, sends a request no MCP client knows
@@ -22,7 +24,12 @@ import { createInterface } from "node:readline";
 const mode = process.argv[2];
 const send = (message, written) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`, written);
 const junk = (line) => process.stdout.write(`${line}\n`);
-const tools = [{ name: "echo", description: "Return the text it is given.", inputSchema: { type: "object", properties: { text: { type: "string" } } } }];
+const tools =
+  mode === "deep"
+    ? [{ name: "nested", description: "Takes a list of lists.", inputSchema: nestedSchema(10_000) }]
+    : mode === "many"
+      ? Array.from({ length: 200_000 }, (_, index) => ({ name: `tool_${index}` }))
+      : [{ name: "echo", description: "Return the text it is given.", inputSchema: { type: "object", properties: { text: { type: "string" } } } }];
 const requests = {
   sampling: {
     method: "sampling/createMessage",
@@ -36,6 +43,13 @@ const requests = {
   roots: { method: "roots/list" },
   ping: { method: "ping" },
 };
+
+/** An input schema nested `levels` deep: a few hundred kilobytes that no recursive walk gets through. */
+function nestedSchema(levels) {
+  let schema = { type: "string" };
+  for (let level = 1; level < levels; level++) schema = { type: "array", items: schema };
+  return schema;
+}
 
 /** One line of `bytes` bytes, written in chunks as fast as the reader takes them. */
 async function giantLine(bytes) {
