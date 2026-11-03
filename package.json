@@ -1,6 +1,6 @@
 {
   "name": "mcpcage",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Run any MCP server in a cage: tool definitions pinned, calls audited, the server sandboxed in a hardened container.",
   "license": "Apache-2.0",
   "author": "Alessandro Veneziano",

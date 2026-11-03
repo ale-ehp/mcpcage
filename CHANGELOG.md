@@ -3,6 +3,21 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-03
+
+### Added
+
+- Devin: `mcpcage protect` finds its MCP configuration files, `~/.config/devin/mcp_config.json`
+  (`%APPDATA%\devin\mcp_config.json` on Windows), `<project>/.devin/mcp_config.json` and
+  `<project>/.devin/mcp_config.local.json`, and reports their servers; `--fix` routes their npx
+  servers through mcpcage, with a backup, as it does for Cursor, and `mcpcage wrap` takes these
+  files too. The Windsurf files of older installs are still read.
+
+### Changed
+
+- `mcpcage protect` lists the clients of the files it did not find on their own line, under the
+  count, so the report stays readable in narrow terminals.
+
 ## [0.2.1] - 2026-11-03
 
 ### Fixed

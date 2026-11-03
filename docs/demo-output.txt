@@ -45,10 +45,11 @@ Claude Desktop  ~/Library/Application Support/Claude/claude_desktop_config.json
                 install scripts: none (prepare runs only for git installs)
 Cursor  ~/.cursor/mcp.json
   notes         mcpcage run --id demo-notes -- npx -y /tmp/mcpcage-demo-XXXX/notes-server  caged
-Not found: 9 other configuration files (Claude Code, Cursor, VS Code, GitHub Copilot CLI, Windsurf)
+Not found: 12 other configuration files
+  Claude Code, Cursor, VS Code, GitHub Copilot CLI, Windsurf, Devin
 
 Summary
-  3 servers in 2 configuration files (11 files checked, 9 absent).
+  3 servers in 2 configuration files (14 files checked, 12 absent).
   2 run on your machine with your permissions and no cage.          -> mcpcage protect --fix
   1 keeps a secret in clear text in a configuration file.
   1 can reach your whole home directory or more.
