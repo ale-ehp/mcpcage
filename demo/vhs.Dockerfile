@@ -1,4 +1,4 @@
-# The image that records docs/demo.gif (demo/record.sh plays demo/demo.tape in it). The official VHS
+# The image that records docs/demo.webp (demo/record.sh plays demo/demo.tape in it). The official VHS
 # image has ffmpeg, ttyd and bash, but no Node.js to run the demo, no docker CLI for the demo to
 # build and start its cages (the CLI talks to the host's Docker daemon through the mounted socket),
 # and not the typeface of the recording: VT323 by Peter Hull, under the SIL Open Font License 1.1,

@@ -2,9 +2,9 @@
 
 **Run any MCP server in a cage: tool definitions pinned, hidden instructions explained, calls audited, the server sandboxed in a hardened container.**
 
-![mcpcage demo: a stolen key stopped, a rug pull blocked and explained, exposed servers found](docs/demo.gif)
+![mcpcage demo: a stolen key stopped, a rug pull blocked and explained, exposed servers found](docs/demo.webp)
 
-The recording is reproducible: `npm run demo:gif` records it again from [demo/demo.tape](demo/demo.tape).
+The recording is reproducible: `npm run demo:webp` records it again from [demo/demo.tape](demo/demo.tape).
 
 ```bash
 mcpcage protect          # every MCP server configured on this machine, and what each one can reach
@@ -44,7 +44,7 @@ mcpcage covers the stdio servers that nothing else isolates.
 
 `node demo/run-demo.mjs` reproduces the attacks locally and safely: the SSH key is fake, it lives
 in a throwaway HOME, and the attacker's collector listens on 127.0.0.1. CI runs it on every change,
-and `npm run demo:gif` records it as the GIF above.
+and `npm run demo:webp` records it as the animation above.
 
 ```text
 --- 1a. Without mcpcage: the server runs on your machine, as with a plain `npx` entry
@@ -290,7 +290,7 @@ npm ci
 npm test               # unit and integration tests, no Docker needed
 npm run test:docker    # the cage and `protect --inspect` against a real Docker daemon
 node demo/run-demo.mjs # the three scenes
-npm run demo:gif       # record docs/demo.gif with VHS (needs Docker; on Colima the repo must be under your home)
+npm run demo:webp      # record docs/demo.webp with VHS (needs Docker; on Colima the repo must be under your home)
 ```
 
 mcpcage has no runtime dependencies. Releases are published to npm with provenance, with a

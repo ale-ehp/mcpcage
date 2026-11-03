@@ -1,7 +1,7 @@
-# The demo at the top of the README, about 40 seconds. Record it with `npm run demo:gif`
+# The demo at the top of the README, about 40 seconds. Record it with `npm run demo:webp`
 # (demo/record.sh): VHS runs in a container (demo/vhs.Dockerfile), and the demo inside it builds and
 # starts its cages through the host's Docker daemon. VHS writes a video inside the container, and
-# record.sh turns it into docs/demo.gif with demo/crt-gif.sh, which shows it on the screen of an old
+# record.sh turns it into docs/demo.webp with demo/crt-webp.sh, which shows it on the screen of an old
 # CRT television: VHS's own GIF output keeps every frame in memory at once (about 2 GB here), more
 # than a 2 GB Docker VM such as Colima's default has.
 Output "/tmp/demo.mp4"
@@ -9,7 +9,7 @@ Output "/tmp/demo.mp4"
 Set Shell "bash"
 # Monochrome: the VT323 typeface (installed by demo/vhs.Dockerfile), warm white on black, and every
 # ANSI colour a shade of that white, so the recording is one hue and carries only brightness: the
-# green of the phosphor and the television around it come from demo/crt-gif.sh. The screen of that
+# green of the phosphor and the television around it come from demo/crt-webp.sh. The screen of that
 # television is about 5:4, so the recording is 5:4 too, with a padding that keeps the first and last
 # characters of every row clear of its rounded corners. The font is the largest at which the lines
 # of the protect report in scene 3, up to 99 characters, stay whole: at this size the terminal has

@@ -5,6 +5,6 @@ coverage/
 .fablize/
 GUIDA-PERSONALE.md
 .mcpcage-test/
-# The video of the last `npm run demo:gif`, kept to run demo/crt-gif.sh again without recording.
+# The video of the last `npm run demo:webp`, kept to run demo/crt-webp.sh again without recording.
 demo/.recording/
 .DS_Store
