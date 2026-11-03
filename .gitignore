@@ -2,9 +2,6 @@ node_modules/
 dist/
 coverage/
 *.tgz
-.fablize/
-GUIDA-PERSONALE.md
-.mcpcage-test/
 # The video of the last `npm run demo:webp`, kept to run demo/crt-webp.sh again without recording.
 demo/.recording/
 .DS_Store
