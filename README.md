@@ -226,7 +226,7 @@ a backup (`<file>.mcpcage.bak`) and replaces the file atomically.
 | Filesystem | read-only root, `noexec` tmpfs at `/tmp`, no host paths unless `--mount` (read-only by default) |
 | User | `65532:65532` (nonroot) |
 | Privileges | `--cap-drop ALL`, `no-new-privileges` |
-| Resources | 512 MB memory, 1 CPU, 128 processes (configurable) |
+| Resources | 512 MB memory and no swap, 1 CPU, 128 processes (configurable) |
 | Environment | only `HOME=/tmp` and the variables named with `--env` |
 | Isolation | `--ipc none`, its own hostname, removed on exit |
 

@@ -90,6 +90,9 @@ export function runArgs(options: Pick<SandboxOptions, "serverId" | "spec" | "mou
     "--security-opt", "no-new-privileges",
     "--pids-limit", "128",
     "--memory", options.memory,
+    // The same value as --memory leaves the container no swap: without it Docker allows as much swap
+    // again on a host that has some, and the limit silently doubles.
+    "--memory-swap", options.memory,
     "--cpus", options.cpus,
     "--ipc", "none",
     "--hostname", "mcpcage",
