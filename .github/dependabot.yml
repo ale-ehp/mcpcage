@@ -8,8 +8,16 @@ updates:
     directory: /
     schedule:
       interval: weekly
-  # Digest updates for the base images caged servers are built from.
+    ignore:
+      # The types follow the Node line mcpcage targets (engines, CI and the base images).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+  # Digest updates for the base images caged servers are built from. The Node line itself is
+  # chosen by hand, together with the distroless runtime (nodejs22) and @types/node.
   - package-ecosystem: docker
     directory: /runtime
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
