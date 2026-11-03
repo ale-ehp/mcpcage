@@ -1,4 +1,4 @@
-# The demo at the top of the README, about 40 seconds. Record it with `npm run demo:webp`
+# The demo at the top of the README, about 35 seconds. Record it with `npm run demo:webp`
 # (demo/record.sh): VHS runs in a container (demo/vhs.Dockerfile), and the demo inside it builds and
 # starts its cages through the host's Docker daemon. VHS writes a video inside the container, and
 # record.sh turns it into docs/demo.webp with demo/crt-webp.sh, which shows it on the screen of an old
