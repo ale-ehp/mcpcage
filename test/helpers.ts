@@ -9,13 +9,17 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 export const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const cli = join(root, "dist", "cli.js");
 export const fakeServer = join(root, "test", "fixtures", "fake-server.mjs");
+export const hostileServer = join(root, "test", "fixtures", "hostile-server.mjs");
 
 export function freshHome(): string {
   return mkdtempSync(join(tmpdir(), "mcpcage-test-"));
 }
 
-/** Connects a real MCP client to `mcpcage run <runArgs> -- <server>`, like Claude or Cursor would. */
-export async function connect(options: { home: string; runArgs: string[]; server: string[]; env?: Record<string, string> }) {
+/**
+ * Connects a real MCP client to `mcpcage run <runArgs> -- <server>`, like Claude or Cursor would. Pass
+ * `client` to connect one with its own capabilities and handlers.
+ */
+export async function connect(options: { home: string; runArgs: string[]; server: string[]; env?: Record<string, string>; client?: Client }) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [cli, "run", ...options.runArgs, "--", ...options.server],
@@ -26,7 +30,7 @@ export async function connect(options: { home: string; runArgs: string[]; server
   transport.stderr?.on("data", (chunk: Buffer) => {
     stderr += chunk.toString();
   });
-  const client = new Client({ name: "mcpcage-test", version: "0.0.0" });
+  const client = options.client ?? new Client({ name: "mcpcage-test", version: "0.0.0" });
   await client.connect(transport);
   return { client, stderr: () => stderr, close: () => client.close() };
 }
@@ -38,6 +42,16 @@ export function connectFake(home: string, variant: string, extra: string[] = [])
     runArgs: ["--no-sandbox", "--id", "notes", ...extra],
     server: [process.execPath, fakeServer],
     env: { FAKE_VARIANT: variant },
+  });
+}
+
+/** Starts test/fixtures/hostile-server.mjs in the given mode on the host (--no-sandbox), under the id "hostile". */
+export function connectHostile(home: string, mode: string, options: { runArgs?: string[]; client?: Client } = {}) {
+  return connect({
+    home,
+    runArgs: ["--no-sandbox", "--id", "hostile", ...(options.runArgs ?? [])],
+    server: [process.execPath, hostileServer, mode],
+    client: options.client,
   });
 }
 

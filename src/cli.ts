@@ -44,6 +44,8 @@ Run options:
                         let --mount reach the whole disk, your home directory or a directory with credentials
   --env <NAME[=value]>  pass one environment variable into the container (repeatable)
   --allow-net           give the server network access (default: none)
+  --allow-server-requests
+                        let the server ask your client to run the model or to question you (default: refused)
   --strict              refuse servers whose tools were never approved (default: trust on first use)
   --id <id>             server id (default: derived from the package and arguments)
   --memory <size>       memory limit (default 512m)    --cpus <n>  CPU limit (default 1)
@@ -110,6 +112,7 @@ function parseRun(argv: string[]) {
       "allow-sensitive-mount": { type: "boolean", default: false },
       env: { type: "string", multiple: true, default: [] },
       "allow-net": { type: "boolean", default: false },
+      "allow-server-requests": { type: "boolean", default: false },
       strict: { type: "boolean", default: false },
       id: { type: "string" },
       image: { type: "string" },
@@ -191,12 +194,14 @@ async function run(argv: string[]): Promise<number> {
       env: values.env.map((variable) => variable.split("=")[0]),
     });
   }
+  if (values["allow-server-requests"]) log(`mcpcage: WARNING ${serverId} may ask your client to run the model or to question you (--allow-server-requests).`);
 
   return runProxy({
     serverId,
     command,
     args,
     strict: values.strict,
+    allowServerRequests: values["allow-server-requests"],
     audit: auditLog,
     input: process.stdin,
     output: process.stdout,
@@ -451,6 +456,10 @@ function doctor(): number {
   if (existsSync(cageHome())) console.log(`      servers       ${listServers().length}`);
   return checks.every(([, ok]) => ok) ? 0 : 1;
 }
+
+// A client that closes the pipe carrying mcpcage's log lines makes every later write to stderr fail
+// with EPIPE. Nothing can be done about it, and the proxy already shuts down when its stdout fails.
+process.stderr.on("error", () => {});
 
 main(process.argv.slice(2)).then(
   (code) => {

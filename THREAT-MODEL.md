@@ -18,7 +18,10 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 | A trusted package that turns malicious in an update (rug pull) | postmark-mcp after fifteen clean releases | The lockfile keeps the approved version until `--rebuild`. When the update arrives, changed tool definitions block the session until a human approves them. |
 | Tool poisoning through descriptions | hidden instructions in a tool description | Every description and schema is fingerprinted; a change is shown by `mcpcage diff` and blocked until approved. Fixed rules point at the signs of hidden instructions (privileged tags, "ignore previous instructions", "do not tell the user", secret files, invisible characters, orders about other tools) so the reviewer does not have to find them alone. The first manifest is trusted unless `--strict` is used. |
 | Instructions hidden in invisible characters | zero-width text, Unicode Tags, bidi controls, variation selectors in a description | The same rules report them as high-severity signs, decode Unicode Tags to the text they spell, and show every invisible character as `[U+XXXX]`, so what the reviewer reads is what the model reads. |
-| A server that pollutes stdout | logs or binary output on the JSON-RPC channel | Non-JSON lines are dropped and recorded. |
+| A server that pollutes stdout | logs, binary output or JSON that is not JSON-RPC on the channel | Anything that is not JSON-RPC is dropped and recorded. |
+| A server that tries to exhaust the proxy's memory | one line of gigabytes without a newline; requests whose answers it never reads; notifications faster than the client reads them | A line over 16 MiB is counted and thrown away as it streams in, never held whole, and recorded with its size; the proxy goes on serving. mcpcage stops answering refused requests while 16 MiB wait unread in the server's input, and stops reading the server while the client is behind. |
+| A server that answers what nobody asked | a forged response to a request the client never sent, or a second response to one already answered | A response whose id the client is not waiting for is dropped and recorded. |
+| A server that makes the client act for it | `sampling/createMessage` to run the model on the server's prompt, `elicitation/create` to put the server's question to the user | Both are a way in for a prompt injection and a way out for data, so they are refused by default with an error to the server, like any request mcpcage does not know, and recorded. `ping` and `roots/list` pass, and so do notifications. `--allow-server-requests` lets every request through, with a warning on stderr. |
 | A server that asks to call tools outside its manifest | a call routed to a tool the user never saw | Calls to tools that are not approved never reach the server. |
 | A server written into a client configuration without the user's knowledge | SANDWORM_MODE adding entries to Claude Code, Cursor and Windsurf configs | `mcpcage protect` reads every configuration file the clients document and lists each server with how it starts, what it can reach and whether it is caged; `--fix` cages the npx ones. |
 | Someone editing the audit trail after the fact | removing the record of a call | The hash chain makes edits, reordering and deletions inside a file detectable. |
@@ -70,6 +73,13 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   and `protect --inspect` shows the signs in a server's tools before you approve anything.
 - **Deleting the audit log.** The chain proves that a file was not altered, not that it still
   exists. Shipping entries to an external store is not implemented yet.
+- **The rate of log entries.** Every line dropped, request refused and unsolicited response writes
+  one audit entry and one line on stderr, with ids recorded as the server sent them, up to 16 MiB
+  each. A server can grow the audit log and the client's log as fast as it writes; there is no rate
+  limit.
+- **Ids of another type.** An answer must carry the id of its request with the same type, as
+  JSON-RPC requires. A server that answers the request with id `5` using the id `"5"` has its answer
+  dropped as unsolicited, and the request goes unanswered.
 - **Prompts and resources.** Their descriptions are not pinned yet.
 - **Remote MCP servers.** Nothing runs locally to cage; they are out of scope. `protect` lists
   them and reports credentials written in clear text in their headers.

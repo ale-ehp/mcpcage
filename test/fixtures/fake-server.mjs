@@ -3,7 +3,6 @@
 //   poisoned  same tools, but add_note's description now carries a hidden instruction (rug pull)
 //   reworded  same tools, add_note's description reworded harmlessly (a change with nothing suspicious)
 //   extra     v1 plus a tool that was never approved
-//   noisy     v1, but it prints a log line to stdout before speaking JSON-RPC
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -36,5 +35,4 @@ if (variant === "extra") {
   }));
 }
 
-if (variant === "noisy") process.stdout.write("debug: fake server starting\n");
 await server.connect(new StdioServerTransport());

@@ -1,9 +1,13 @@
+import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { unwrapConfig, wrapConfig } from "../src/config.js";
 import { parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
+import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint } from "../src/manifest.js";
 import { dockerfile, parseMount, runArgs } from "../src/sandbox.js";
 
@@ -155,5 +159,76 @@ describe("client configuration", () => {
     expect(outcome.key).toBe("servers");
     expect(outcome.changed).toHaveLength(1);
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(original);
+  });
+});
+
+describe("server line splitting", () => {
+  /** The lines the splitter gives; a dropped line shows as its size. */
+  function split(chunks: Buffer[], maxBytes: number): string[] {
+    const lines: string[] = [];
+    const splitter = new LineSplitter(maxBytes, (line) => lines.push(line), (bytes) => lines.push(`<${bytes} bytes dropped>`));
+    for (const chunk of chunks) splitter.push(chunk);
+    splitter.end();
+    return lines;
+  }
+
+  /** The lines readline gives, as the proxy read them before it had its own splitter. */
+  async function splitWithReadline(chunks: Buffer[]): Promise<string[]> {
+    const input = new PassThrough();
+    const reader = createInterface({ input, crlfDelay: Infinity });
+    const lines: string[] = [];
+    reader.on("line", (line) => lines.push(line));
+    for (const chunk of chunks) input.write(chunk);
+    input.end();
+    await once(reader, "close");
+    return lines;
+  }
+
+  it("cuts lines exactly as readline did, on random text in random chunks", async () => {
+    // "\r", "\n" and "\r\n" anywhere, and characters of two to four bytes cut between chunks.
+    const pieces = ["a", "{", "}", " ", '"', "é", "€", "😀", "\n", "\r", "\r\n", "\r\r", "\n\r", "\n\n"];
+    let seed = 1;
+    const random = (below: number) => {
+      seed = (seed * 1103515245 + 12345) % 2 ** 31;
+      return Math.floor((seed / 2 ** 31) * below);
+    };
+    for (let round = 0; round < 300; round++) {
+      let text = "";
+      for (let count = random(40); count > 0; count--) text += pieces[random(pieces.length)];
+      const bytes = Buffer.from(text);
+      const chunks: Buffer[] = [];
+      for (let at = 0; at < bytes.length; ) {
+        const size = 1 + random(6);
+        chunks.push(bytes.subarray(at, at + size));
+        at += size;
+      }
+      expect(split(chunks, MAX_LINE_BYTES), JSON.stringify(text)).toEqual(await splitWithReadline(chunks));
+    }
+  });
+
+  it("drops a line over the limit, counting all of it, and goes on with the next one", () => {
+    const part = Buffer.from("x".repeat(600));
+    // The "\r\n" after the long line is split between two chunks.
+    expect(split([Buffer.from("first\n"), part, part, Buffer.from("\r"), Buffer.from("\nnext\n")], 1024)).toEqual(["first", "<1200 bytes dropped>", "next"]);
+    expect(split([Buffer.from(`${"y".repeat(1024)}\n${"y".repeat(1025)}\n`)], 1024)).toEqual(["y".repeat(1024), "<1025 bytes dropped>"]);
+    expect(split([Buffer.from("z".repeat(2000))], 1024)).toEqual(["<2000 bytes dropped>"]);
+  });
+
+  it("keeps its memory bounded while a server streams a line of 1 GiB", () => {
+    const chunk = Buffer.alloc(64 * 1024, "a");
+    const lines: string[] = [];
+    const dropped: number[] = [];
+    const splitter = new LineSplitter(MAX_LINE_BYTES, (line) => lines.push(line), (bytes) => dropped.push(bytes));
+    const before = process.memoryUsage().rss;
+    let peak = before;
+    for (let sent = 0; sent < 1024 ** 3; sent += chunk.length) {
+      splitter.push(chunk);
+      if (sent % (1024 * 1024) === 0) peak = Math.max(peak, process.memoryUsage().rss);
+    }
+    splitter.push(Buffer.from('\n{"jsonrpc":"2.0","id":1,"result":{}}\n'));
+    // A splitter that kept the line would hold 1 GiB here; this one holds at most the 16 MiB limit.
+    expect(peak - before).toBeLessThan(64 * 1024 * 1024);
+    expect(dropped).toEqual([1024 ** 3]);
+    expect(lines).toEqual(['{"jsonrpc":"2.0","id":1,"result":{}}']);
   });
 });

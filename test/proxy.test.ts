@@ -1,21 +1,30 @@
-import { spawn } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import {
+  CreateMessageRequestSchema,
+  ElicitRequestSchema,
+  ErrorCode,
+  ListRootsRequestSchema,
+  LoggingMessageNotificationSchema,
+  McpError,
+} from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
-import { cli, connectFake, freshHome, mcpcage } from "./helpers.js";
+import { cli, connectFake, connectHostile, freshHome, hostileServer, mcpcage } from "./helpers.js";
 
 const BLOCKED = -32001;
 
-function auditEntries(home: string): Array<{ event: string } & Record<string, unknown>> {
-  const dir = join(home, "audit", "notes");
+function auditEntries(home: string, server = "notes"): Array<{ event: string } & Record<string, unknown>> {
+  const dir = join(home, "audit", server);
   return readdirSync(dir)
     .sort()
     .flatMap((file) => readFileSync(join(dir, file), "utf8").split("\n").filter(Boolean))
     .map((line) => JSON.parse(line) as { event: string } & Record<string, unknown>);
 }
 
-function auditEvents(home: string): string[] {
-  return auditEntries(home).map((entry) => entry.event);
+function auditEvents(home: string, server = "notes"): string[] {
+  return auditEntries(home, server).map((entry) => entry.event);
 }
 
 /** The block message is one stderr write that ends with this line; wait for it before reading stderr. */
@@ -180,13 +189,216 @@ describe("--strict", () => {
   });
 });
 
+/**
+ * A client with every capability a server can ask for: it runs the model, puts questions to the user
+ * and lists its roots. It records every request from the server that reaches it, and the log lines.
+ */
+function capableClient() {
+  const client = new Client({ name: "mcpcage-test", version: "0.0.0" }, { capabilities: { sampling: {}, elicitation: {}, roots: {} } });
+  const asked: string[] = [];
+  const logged: unknown[] = [];
+  client.setRequestHandler(CreateMessageRequestSchema, async (request) => {
+    asked.push(request.method);
+    return { model: "test-model", role: "assistant", content: { type: "text", text: "the model's answer" } };
+  });
+  client.setRequestHandler(ElicitRequestSchema, async (request) => {
+    asked.push(request.method);
+    return { action: "decline" };
+  });
+  client.setRequestHandler(ListRootsRequestSchema, async (request) => {
+    asked.push(request.method);
+    return { roots: [{ uri: "file:///work", name: "work" }] };
+  });
+  client.fallbackRequestHandler = async (request) => {
+    asked.push(request.method);
+    throw new McpError(ErrorCode.MethodNotFound, "Method not found");
+  };
+  client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => {
+    logged.push(notification.params.data);
+  });
+  return { client, asked, logged };
+}
+
+/**
+ * `mcpcage run` with a bare JSON-RPC client on its stdio, to see exactly what reaches the client. With
+ * `readOutput: false` the client never reads what mcpcage writes to it.
+ */
+function rawSession(home: string, mode: string, { readOutput = true } = {}) {
+  const proxy = spawn(process.execPath, [cli, "run", "--no-sandbox", "--id", "hostile", "--", process.execPath, hostileServer, mode], {
+    env: { ...process.env, MCPCAGE_HOME: home },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  if (readOutput) {
+    proxy.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+  }
+  proxy.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  // mcpcage may exit while the test is still writing to it; that write fails, and that is all.
+  proxy.stdin.on("error", () => {});
+  const exited = new Promise<number | null>((resolve) => proxy.once("exit", (code) => resolve(code)));
+  // Complete lines only: the last piece may be a line that is still arriving.
+  const received = () =>
+    stdout
+      .split("\n")
+      .slice(0, -1)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { id?: unknown });
+  return {
+    pid: proxy.pid!,
+    send: (message: Record<string, unknown>) => proxy.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`),
+    /** Bytes mcpcage wrote that the client has not read yet (with `readOutput: false`). */
+    unread: () => proxy.stdout.readableLength,
+    /** The client goes away: its end of mcpcage's stdout is closed. */
+    closeOutput: () => proxy.stdout.destroy(),
+    /** The exit code of mcpcage. */
+    exited,
+    /** Waits for the answer to the request with this id. */
+    answer: (id: number) => vi.waitFor(() => expect(received().map((message) => message.id)).toContain(id), { timeout: 10_000 }),
+    received,
+    stderr: () => stderr,
+    close: async () => {
+      proxy.stdin.end();
+      await exited;
+    },
+  };
+}
+
 describe("stdout hygiene", () => {
-  it("drops non-JSON output from the server instead of passing it to the client", async () => {
+  it("drops output from the server that is not JSON-RPC instead of passing it to the client", async () => {
     const home = freshHome();
-    const session = await connectFake(home, "noisy");
-    expect((await session.client.listTools()).tools).toHaveLength(2);
+    const { client, logged } = capableClient();
+    // The SDK client reports here every line it cannot take as a JSON-RPC message.
+    const errors: Error[] = [];
+    client.onerror = (error) => errors.push(error);
+    const session = await connectHostile(home, "garbage", { client });
+    expect((await session.client.listTools()).tools.map((tool) => tool.name)).toEqual(["echo"]);
     await session.close();
-    expect(auditEvents(home)).toContain("stdout-noise");
+    expect(errors).toEqual([]);
+    // Text, JSON that is not JSON-RPC, an answer without "jsonrpc", a batch of junk, and a batch that
+    // mixed junk with a notification: only that notification reached the client.
+    expect(auditEvents(home, "hostile").filter((event) => event === "stdout-noise")).toHaveLength(5);
+    expect(logged).toEqual(["kept from a batch"]);
+  });
+
+  it("throws away a line over 16 MiB as it streams in, and keeps serving", async () => {
+    const home = freshHome();
+    // The server writes 20 MiB without a newline before its answer to tools/list.
+    const session = await connectHostile(home, "giant");
+    expect((await session.client.listTools()).tools.map((tool) => tool.name)).toEqual(["echo"]);
+    await session.client.ping();
+    await session.close();
+    expect(auditEntries(home, "hostile")).toContainEqual(expect.objectContaining({ event: "oversize-line", bytes: 20 * 1024 * 1024 }));
+    expect(session.stderr()).toContain(`mcpcage: dropped a line of ${20 * 1024 * 1024} bytes from the server, over the 16 MiB limit`);
+  });
+
+  it("drops a response to a request the client never sent, and a second response to one", async () => {
+    const home = freshHome();
+    const session = rawSession(home, "unsolicited");
+    session.send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "raw", version: "0" } } });
+    await session.answer(1);
+    session.send({ method: "notifications/initialized" });
+    session.send({ id: 2, method: "tools/list" });
+    await session.answer(2);
+    // The server answers 999 before tools/list and tools/list again after, both before this ping:
+    // once the ping is answered, the proxy has read both.
+    session.send({ id: 3, method: "ping" });
+    await session.answer(3);
+    await session.close();
+    expect(session.received().map((message) => message.id)).toEqual([1, 2, 3]);
+    expect(session.received()[1]).toMatchObject({ result: { tools: [{ name: "echo" }] } });
+    const unsolicited = auditEntries(home, "hostile").filter((entry) => entry.event === "unsolicited-response");
+    expect(unsolicited.map((entry) => entry.id)).toEqual([999, 2]);
+    expect(session.stderr()).toContain("mcpcage: dropped a response from the server to a request the client is not waiting for (id 999)");
+  });
+});
+
+describe("requests from the server", () => {
+  /** The answer the hostile server got to its request, which it prints on stderr. */
+  async function answerToServer(session: { stderr: () => string }) {
+    const prefix = "hostile-server got ";
+    let line: string | undefined;
+    await vi.waitFor(() => {
+      line = session.stderr().split("\n").find((entry) => entry.startsWith(prefix));
+      expect(line).toBeDefined();
+    }, { timeout: 10_000 });
+    return JSON.parse(line!.slice(prefix.length)) as Record<string, unknown>;
+  }
+
+  it.each([
+    ["sampling", "sampling/createMessage", "the server asked your client to run the model"],
+    ["elicitation", "elicitation/create", "the server asked your client to put a question to you"],
+    ["unknown", "hostile/exfiltrate", "the server sent a request that mcpcage does not know"],
+  ])("refuses %s by default: the server gets an error, the client never sees the request", async (mode, method, reason) => {
+    const home = freshHome();
+    const { client, asked, logged } = capableClient();
+    const session = await connectHostile(home, mode, { client });
+    await session.client.listTools();
+    const answer = await answerToServer(session);
+    await session.close();
+    const message = `mcpcage blocked ${method}: ${reason}. Pass --allow-server-requests to allow it.`;
+    expect(answer).toEqual({ jsonrpc: "2.0", id: "hostile-1", error: { code: BLOCKED, message } });
+    expect(asked).toEqual([]);
+    // A notification is not a request: the server's log line still reaches the client.
+    expect(logged).toEqual(["a log line from the server"]);
+    expect(session.stderr()).toContain(`mcpcage: blocked ${method} from hostile: ${reason}.`);
+    const entries = auditEntries(home, "hostile");
+    expect(entries).toContainEqual(expect.objectContaining({ event: "server-request-blocked", id: "hostile-1", method }));
+    expect(entries.map((entry) => entry.event)).not.toContain("server-request");
+  });
+
+  it.each([
+    ["roots", "roots/list", { roots: [{ uri: "file:///work", name: "work" }] }],
+    ["ping", "ping", {}],
+  ])("lets %s through by default", async (mode, method, result) => {
+    const home = freshHome();
+    const { client } = capableClient();
+    const session = await connectHostile(home, mode, { client });
+    await session.client.listTools();
+    expect(await answerToServer(session)).toEqual({ jsonrpc: "2.0", id: "hostile-1", result });
+    await session.close();
+    const entries = auditEntries(home, "hostile");
+    expect(entries).toContainEqual(expect.objectContaining({ event: "server-request", id: "hostile-1", method }));
+    expect(entries.map((entry) => entry.event)).not.toContain("server-request-blocked");
+  });
+
+  it("lets sampling through with --allow-server-requests, and warns", async () => {
+    const home = freshHome();
+    const { client, asked } = capableClient();
+    const session = await connectHostile(home, "sampling", { runArgs: ["--allow-server-requests"], client });
+    await session.client.listTools();
+    expect(await answerToServer(session)).toMatchObject({ id: "hostile-1", result: { content: { type: "text", text: "the model's answer" } } });
+    await session.close();
+    expect(asked).toEqual(["sampling/createMessage"]);
+    expect(session.stderr()).toContain("mcpcage: WARNING hostile may ask your client to run the model or to question you (--allow-server-requests).");
+    const entries = auditEntries(home, "hostile");
+    expect(entries.find((entry) => entry.event === "start")).toMatchObject({ allowServerRequests: true });
+    expect(entries).toContainEqual(expect.objectContaining({ event: "server-request", method: "sampling/createMessage" }));
+  });
+
+  it("stops answering refused requests while the server leaves the answers unread", async () => {
+    const home = freshHome();
+    const session = rawSession(home, "flood");
+    let pid = 0;
+    await vi.waitFor(() => {
+      expect(session.received()).toContainEqual(expect.objectContaining({ params: expect.objectContaining({ data: "flood done" }) }));
+      pid = Number(/hostile-server pid (\d+)/.exec(session.stderr())?.[1]);
+      expect(pid).toBeGreaterThan(0);
+    }, { timeout: 10_000 });
+    // Now the server reads what mcpcage queued for it while it was not reading.
+    process.kill(pid, "SIGUSR2");
+    await session.close();
+    // 24 answers of 1 MiB were due; mcpcage stops adding them once 16 MiB are waiting.
+    const answers = Number(/hostile-server got (\d+) answers/.exec(session.stderr())?.[1]);
+    expect(answers).toBeGreaterThan(0);
+    expect(answers).toBeLessThan(24);
+    expect(auditEvents(home, "hostile").filter((event) => event === "server-request-blocked")).toHaveLength(24);
+    // The audit log holds the 24 ids of 1 MiB.
+    rmSync(home, { recursive: true, force: true });
   });
 });
 
@@ -235,4 +447,51 @@ describe("server failure", () => {
     expect(auditEntries(home).at(-1)).toMatchObject({ event: "stop", code: 125 });
     // The 5 s limit above has to fire before vitest's own, which is also 5 s by default.
   }, 15_000);
+
+  it("exits with the server's code, without a stack trace, when the server dies while the client writes", async () => {
+    const home = freshHome();
+    const session = rawSession(home, "exit");
+    // The server answers initialize and exits at once. The 8 MiB sent with it are never read: they
+    // wait for a reader that is gone, and writing them to the server fails with EPIPE.
+    session.send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "raw", version: "0" } } });
+    for (let id = 2; id < 10; id++) session.send({ id, method: "ping", params: { padding: "x".repeat(1024 * 1024) } });
+    expect(await session.exited).toBe(3);
+    expect(session.stderr()).not.toContain("EPIPE");
+    expect(session.stderr()).not.toMatch(/^\s+at /m);
+    expect(auditEntries(home, "hostile").at(-1)).toMatchObject({ event: "stop", code: 3 });
+  });
+});
+
+describe("client failure", () => {
+  it("stops the server, without a stack trace, when the client goes away while the server floods it", async () => {
+    const home = freshHome();
+    // The client reads nothing, so mcpcage holds the flood back and the server is still writing when
+    // the client goes away.
+    const session = rawSession(home, "notify-flood", { readOutput: false });
+    await vi.waitFor(() => expect(session.unread()).toBeGreaterThan(0), { timeout: 10_000 });
+    const server = Number(spawnSync("pgrep", ["-P", String(session.pid)], { encoding: "utf8" }).stdout.trim());
+    expect(server).toBeGreaterThan(0);
+    const closed = Date.now();
+    session.closeOutput();
+    await session.exited;
+    expect(session.stderr()).not.toContain("EPIPE");
+    expect(session.stderr()).not.toMatch(/^\s+at /m);
+    // The server never reads its input, so it does not end on its own: it is stopped a few seconds later.
+    await vi.waitFor(() => expect(() => process.kill(server, 0)).toThrow(), { timeout: 10_000 });
+    expect(Date.now() - closed).toBeLessThan(10_000);
+    expect(auditEntries(home, "hostile").at(-1)).toMatchObject({ event: "stop", signal: "SIGTERM" });
+  });
+
+  it("exits with the server's code when the client is gone and the server ends on its own", async () => {
+    const home = freshHome();
+    const session = rawSession(home, "ping");
+    // The client is gone before the first answer: writing it fails, and the server ends once its
+    // input closes.
+    session.closeOutput();
+    session.send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "raw", version: "0" } } });
+    expect(await session.exited).toBe(0);
+    expect(session.stderr()).not.toContain("EPIPE");
+    expect(session.stderr()).not.toMatch(/^\s+at /m);
+    expect(auditEntries(home, "hostile").at(-1)).toMatchObject({ event: "stop", code: 0 });
+  });
 });

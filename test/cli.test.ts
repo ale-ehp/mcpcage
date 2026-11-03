@@ -10,6 +10,7 @@ describe("cli", () => {
     const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
     expect(mcpcage(home, "--help").stdout).toContain("mcpcage run [options] -- npx -y <package>");
     expect(mcpcage(home, "--help").stdout).toContain("\n  --allow-sensitive-mount\n");
+    expect(mcpcage(home, "--help").stdout).toContain("\n  --allow-server-requests\n");
     expect(mcpcage(home, "--version").stdout.trim()).toBe(version);
     expect(mcpcage(home, "nonsense").code).toBe(2);
   });

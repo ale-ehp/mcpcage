@@ -144,6 +144,7 @@ MCP client ──stdio──> mcpcage proxy ──stdio──> docker run (harde
                          ├─ tools/list: compare with the approved manifest, block if changed
                          ├─ explain:    fixed rules point at the signs of hidden instructions
                          ├─ tools/call: refuse tools that are not approved
+                         ├─ requests:   sampling and elicitation refused unless --allow-server-requests
                          ├─ stdout:     drop anything that is not JSON-RPC
                          └─ audit:      hash-chained JSONL, hashes of arguments only
 ```
@@ -178,6 +179,15 @@ Invisible characters are printed as `[U+XXXX]`, so what you read is what the mod
 rules are a reading aid, not a verdict: the block itself comes from the pin, which sees any change.
 They are measured against real servers: the 14 tools of `@modelcontextprotocol/server-filesystem`
 produce no finding, and a test keeps it that way.
+
+**What the server may send.** The proxy passes on JSON-RPC only: other output is dropped, and so
+is a response to a request the client never sent or already got an answer to. A line longer than
+16 MiB is counted and thrown away as it streams in, so a server cannot exhaust mcpcage's memory. A
+server may ping the client and ask for its roots. A request to run the model
+(`sampling/createMessage`) or to put a question to you (`elicitation/create`) is a way in for a
+prompt injection and a way out for data: mcpcage answers it with an error unless you pass
+`--allow-server-requests`, and does the same with any request it does not know. Every drop and
+refusal is recorded in the audit log.
 
 **Finding exposed servers.** `mcpcage protect` reads the configuration files the clients document
 and never writes outside `~/.mcpcage` unless you pass `--fix`:
@@ -255,8 +265,9 @@ mcpcage doctor                                         check Docker and the loca
 
 Run options: `--mount <path>[:rw]`, `--allow-sensitive-mount` (without it, a `--mount` of the whole
 disk, your home directory or a directory with credentials is refused), `--env <NAME[=value]>`,
-`--allow-net`, `--strict`, `--id`, `--memory`, `--cpus`, `--keep-image-user` (with `--image`),
-`--rebuild`, `--no-sandbox`.
+`--allow-net`, `--allow-server-requests` (without it, a server's requests to run the model or to
+question you are refused), `--strict`, `--id`, `--memory`, `--cpus`, `--keep-image-user` (with
+`--image`), `--rebuild`, `--no-sandbox`.
 
 Protect options: `--project <dir>` (default: the current directory), `--inspect`, `--offline`,
 `--fix`, `--yes`, `--no-build`, `--command <path>`. Without `--fix` the exit code is 1 when at
