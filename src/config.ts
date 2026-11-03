@@ -128,8 +128,15 @@ type Rewrite = (
 ) => ServerEntry | undefined;
 
 function transform(file: string, dryRun: boolean, rewrite: Rewrite): WrapOutcome {
-  if (!existsSync(file)) throw new Error(`${file} does not exist`);
-  const text = readFileSync(file, "utf8");
+  // Read first and explain a missing file from the error: a look before the read would leave a
+  // moment in which the file can change under the name that is then rewritten.
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`${file} does not exist`);
+    throw error;
+  }
   let config: Record<string, unknown>;
   try {
     config = JSON.parse(text) as Record<string, unknown>;
