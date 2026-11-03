@@ -2,13 +2,14 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { connectFake, freshHome, mcpcage } from "./helpers.js";
+import { connectFake, freshHome, mcpcage, root } from "./helpers.js";
 
 describe("cli", () => {
   it("prints help and version", () => {
     const home = freshHome();
+    const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
     expect(mcpcage(home, "--help").stdout).toContain("mcpcage run [options] -- npx -y <package>");
-    expect(mcpcage(home, "--version").stdout.trim()).toBe("0.2.0");
+    expect(mcpcage(home, "--version").stdout.trim()).toBe(version);
     expect(mcpcage(home, "nonsense").code).toBe(2);
   });
 

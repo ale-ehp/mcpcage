@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -18,7 +19,8 @@ import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
 
-const VERSION = "0.2.0";
+// Read from the package's own package.json, one level above dist/, so a release never reports a stale number.
+const VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
 const HELP = `mcpcage ${VERSION}: run any MCP server in a cage.
 
