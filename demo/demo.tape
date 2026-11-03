@@ -1,4 +1,4 @@
-# The demo at the top of the README, about 34 seconds. Record it with `npm run demo:gif`
+# The demo at the top of the README, about 40 seconds. Record it with `npm run demo:gif`
 # (demo/record.sh): VHS runs in a container (demo/vhs.Dockerfile), and the demo inside it builds and
 # starts its cages through the host's Docker daemon. VHS writes a video inside the container, and
 # record.sh turns it into docs/demo.gif with demo/crt-gif.sh, which shows it on the screen of an old
@@ -10,15 +10,15 @@ Set Shell "bash"
 # Monochrome: the VT323 typeface (installed by demo/vhs.Dockerfile), warm white on black, and every
 # ANSI colour a shade of that white, so the recording is one hue and carries only brightness: the
 # green of the phosphor and the television around it come from demo/crt-gif.sh. The screen of that
-# television is about 5:4 and its corners are long curves, so the recording is 5:4 too, with a wide
-# padding that keeps the first and last characters of every row clear of the corners. At this size
-# the terminal has 103 columns and 34 rows: the lines of the protect report in scene 3, up to 99
-# characters, stay whole, the longer text of scenes 1 and 2 wraps, and all of scene 3 fits.
+# television is about 5:4, so the recording is 5:4 too, with a padding that keeps the first and last
+# characters of every row clear of its rounded corners. The font is the largest at which the lines
+# of the protect report in scene 3, up to 99 characters, stay whole: at this size the terminal has
+# 101 columns and 34 rows, the longer text of scenes 1 and 2 wraps, and all of scene 3 fits.
 Set FontFamily "VT323"
-Set FontSize 22
-Set Width 1080
-Set Height 880
-Set Padding 60
+Set FontSize 24
+Set Width 1140
+Set Height 930
+Set Padding 50
 Set Theme { "name": "monochrome", "background": "#000000", "foreground": "#f2f0e6", "selection": "#3a3934", "cursor": "#f2f0e6", "black": "#2b2a26", "red": "#d9d7cd", "green": "#e3e1d7", "yellow": "#ebe9df", "blue": "#cfcdc4", "magenta": "#d4d2c8", "cyan": "#dedcd2", "white": "#e6e4da", "brightBlack": "#8a887f", "brightRed": "#f2f0e6", "brightGreen": "#f7f5eb", "brightYellow": "#fbf9ef", "brightBlue": "#eceae0", "brightMagenta": "#efede3", "brightCyan": "#f5f3e9", "brightWhite": "#fffdf4" }
 Set CursorBlink true
 Set TypingSpeed 40ms
