@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parseLaunch } from "./launch.js";
 
-/** One MCP server entry, as Claude Desktop, Claude Code, Cursor, VS Code, Copilot and Windsurf store it. */
+/** One MCP server entry, as Claude Desktop, Claude Code, Cursor, VS Code, Copilot, Windsurf and Devin store it. */
 export interface ServerEntry {
   command?: string;
   args?: string[];

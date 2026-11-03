@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { isJsonObject, parseJsonc } from "./jsonc.js";
 
-export type ClientId = "claude-desktop" | "claude-code" | "cursor" | "vscode" | "copilot" | "windsurf";
+export type ClientId = "claude-desktop" | "claude-code" | "cursor" | "vscode" | "copilot" | "windsurf" | "devin";
 
 export interface ConfigLocation {
   client: ClientId;
@@ -24,11 +24,13 @@ const CLIENT_NAMES: Record<ClientId, string> = {
   vscode: "VS Code",
   copilot: "GitHub Copilot CLI",
   windsurf: "Windsurf",
+  devin: "Devin",
 };
 
 /**
  * Where each client keeps its MCP servers, as the clients' own documentation states it (checked
- * 2026-11-02). Absent files are listed too, so a report can say what was looked at.
+ * 2026-11-02; Devin's checked 2026-11-03). Absent files are listed too, so a report can say what
+ * was looked at.
  */
 export function discoverConfigs(options: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; project: string }): ConfigLocation[] {
   const windows = options.platform === "win32";
@@ -59,6 +61,10 @@ export function discoverConfigs(options: { platform: NodeJS.Platform; home: stri
   add("copilot", "user", path.join(options.env.COPILOT_HOME || path.join(home, ".copilot"), "mcp-config.json"));
   add("windsurf", "user", path.join(home, ".codeium", "windsurf", "mcp_config.json"));
   add("windsurf", "user", path.join(home, ".codeium", "windsurf-next", "mcp_config.json"));
+  // Devin keeps its user file under ~/.config on macOS as on Linux, not under Library/Application Support.
+  add("devin", "user", path.join(windows ? appData : path.join(home, ".config"), "devin", "mcp_config.json"));
+  add("devin", "project", path.join(project, ".devin", "mcp_config.json"));
+  add("devin", "project", path.join(project, ".devin", "mcp_config.local.json"));
 
   const claudeCode = locations.find((location) => location.client === "claude-code" && location.scope === "user");
   if (claudeCode?.exists) claudeCode.nested = claudeCodeSections(readQuietly(claudeCode.file));

@@ -11,11 +11,11 @@ mcpcage protect          # every MCP server configured on this machine, and what
 mcpcage protect --fix    # route the npx ones through the cage, after showing the plan (backups kept)
 ```
 
-Every `npx` MCP server in Claude Desktop, Claude Code, Cursor, VS Code, GitHub Copilot CLI and
-Windsurf then starts through mcpcage: inside a container with no network, a read-only filesystem
-and no access to your home directory, behind a proxy that blocks it if its tool definitions change
-after you approved them, and tells you why the change looks dangerous. Nothing else about your
-setup changes.
+Every `npx` MCP server in Claude Desktop, Claude Code, Cursor, VS Code, GitHub Copilot CLI,
+Windsurf and Devin then starts through mcpcage: inside a container with no network, a read-only
+filesystem and no access to your home directory, behind a proxy that blocks it if its tool
+definitions change after you approved them, and tells you why the change looks dangerous. Nothing
+else about your setup changes.
 
 ## Why
 
@@ -186,6 +186,10 @@ and never writes outside `~/.mcpcage` unless you pass `--fix`:
 | VS Code | the user profile `mcp.json` (`~/Library/Application Support/Code/User/`, `%APPDATA%\Code\User\`, `~/.config/Code/User/`, also Insiders), `<project>/.vscode/mcp.json`; comments and trailing commas are understood |
 | GitHub Copilot CLI | `$COPILOT_HOME/mcp-config.json`, default `~/.copilot/mcp-config.json` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json`, `~/.codeium/windsurf-next/mcp_config.json` |
+| Devin | `~/.config/devin/mcp_config.json` (macOS and Linux), `%APPDATA%\devin\mcp_config.json` (Windows), `<project>/.devin/mcp_config.json`, `<project>/.devin/mcp_config.local.json` |
+
+Devin also imports the servers in Cursor, Windsurf and Claude Code files (its `read_config_from`
+setting, on by default), so caging those files covers Devin too.
 
 For each server the report says which client and file it comes from, how it starts (`npx`, `uvx`,
 `docker`, remote, something else), whether it already runs through mcpcage, whether its package

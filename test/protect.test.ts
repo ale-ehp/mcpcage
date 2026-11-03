@@ -65,6 +65,7 @@ function fakeMachine() {
     cursor: at("cursor", "user"),
     vscodeUser: at("vscode", "user"),
     vscodeProject: at("vscode", "project"),
+    devin: at("devin", "user"),
   };
   writeJsonFile(files.desktop, {
     mcpServers: {
@@ -113,6 +114,7 @@ function fakeMachine() {
 }
 `,
   );
+  writeJsonFile(files.devin, { mcpServers: { "devin-tool": { command: "npx", args: ["-y", "@acme/devin-tool"] } } });
   // CLAUDECODE: Claude Code counts as running, whatever runs these tests.
   const env = fakeUserEnv(home, cage, { CLAUDECODE: "1" });
   return { top, home, project, cage, data, notes, files, env };
@@ -164,10 +166,13 @@ describe("configuration discovery", () => {
       { client: "copilot", scope: "user", file: join(home, ".copilot", "mcp-config.json"), key: "mcpServers", jsonc: false },
       { client: "windsurf", scope: "user", file: join(home, ".codeium", "windsurf", "mcp_config.json"), key: "mcpServers", jsonc: false },
       { client: "windsurf", scope: "user", file: join(home, ".codeium", "windsurf-next", "mcp_config.json"), key: "mcpServers", jsonc: false },
+      { client: "devin", scope: "user", file: join(home, ".config", "devin", "mcp_config.json"), key: "mcpServers", jsonc: false },
+      { client: "devin", scope: "project", file: join(project, ".devin", "mcp_config.json"), key: "mcpServers", jsonc: false },
+      { client: "devin", scope: "project", file: join(project, ".devin", "mcp_config.local.json"), key: "mcpServers", jsonc: false },
     ]);
     expect(locations.filter((location) => location.exists).map((location) => location.file)).toEqual(created);
     expect(locations.map((location) => location.clientName)).toEqual([
-      "Claude Desktop", "Claude Code", "Claude Code", "Cursor", "Cursor", "VS Code", "VS Code", "VS Code", "GitHub Copilot CLI", "Windsurf", "Windsurf",
+      "Claude Desktop", "Claude Code", "Claude Code", "Cursor", "Cursor", "VS Code", "VS Code", "VS Code", "GitHub Copilot CLI", "Windsurf", "Windsurf", "Devin", "Devin", "Devin",
     ]);
     expect(locations[1]!.nested).toEqual([
       { path: ["mcpServers"], label: "user" },
@@ -194,6 +199,9 @@ describe("configuration discovery", () => {
       join(copilot, "mcp-config.json"),
       join(home, ".codeium", "windsurf", "mcp_config.json"),
       join(home, ".codeium", "windsurf-next", "mcp_config.json"),
+      join(home, ".config", "devin", "mcp_config.json"),
+      join(project, ".devin", "mcp_config.json"),
+      join(project, ".devin", "mcp_config.local.json"),
     ]);
     expect(locations.filter((location) => location.exists).map((location) => location.file)).toEqual([join(home, ".config", "Code", "User", "mcp.json"), join(copilot, "mcp-config.json")]);
   });
@@ -213,6 +221,9 @@ describe("configuration discovery", () => {
       "D:\\copilot\\mcp-config.json",
       "C:\\Users\\me\\.codeium\\windsurf\\mcp_config.json",
       "C:\\Users\\me\\.codeium\\windsurf-next\\mcp_config.json",
+      "C:\\Users\\me\\AppData\\Roaming\\devin\\mcp_config.json",
+      "C:\\work\\app\\.devin\\mcp_config.json",
+      "C:\\work\\app\\.devin\\mcp_config.local.json",
     ]);
     expect(locations.every((location) => !location.exists)).toBe(true);
   });
@@ -221,7 +232,7 @@ describe("configuration discovery", () => {
     const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
     const files = discoverConfigs({ platform: "darwin", home, env: {}, project: home }).map((location) => location.file);
     expect(files.filter((file) => file === join(home, ".cursor", "mcp.json"))).toHaveLength(1);
-    expect(files).toHaveLength(10);
+    expect(files).toHaveLength(13);
   });
 });
 
@@ -488,10 +499,12 @@ describe("mcpcage protect", () => {
     expect(out).toContain(`Cursor  ${tilde(files.cursor, home)}\n  files `);
     expect(line("memory")).toMatch(/npx -y @modelcontextprotocol\/server-memory +NOT CAGED$/); // read through the JSONC comments
     expect(line("vs-proj")).toMatch(/NOT CAGED$/);
+    expect(out).toContain(`Devin  ${tilde(files.devin, home)}\n  devin-tool `);
+    expect(line("devin-tool")).toMatch(/^ {2}devin-tool {4}npx -y @acme\/devin-tool +NOT CAGED$/);
     // The files that do not exist are counted on one line and their clients listed once each on the next, just before the summary.
     const absent = discoverConfigs({ platform: process.platform, home, env: {}, project }).filter((location) => !existsSync(location.file));
-    expect(absent.map((location) => location.clientName)).toEqual(["Cursor", "VS Code", "GitHub Copilot CLI", "Windsurf", "Windsurf"]);
-    expect(out).toContain(["", "Not found: 5 other configuration files", "  Cursor, VS Code, GitHub Copilot CLI, Windsurf", "", "Summary", ""].join("\n"));
+    expect(absent.map((location) => location.clientName)).toEqual(["Cursor", "VS Code", "GitHub Copilot CLI", "Windsurf", "Windsurf", "Devin", "Devin"]);
+    expect(out).toContain(["", "Not found: 7 other configuration files", "  Cursor, VS Code, GitHub Copilot CLI, Windsurf, Devin", "", "Summary", ""].join("\n"));
     for (const location of absent) expect(out).not.toContain(location.scope === "user" ? tilde(location.file, home) : location.file);
     expect(out).not.toContain("(absent)");
     // ${input:token} is filled in by the client: not a secret written in the file.
@@ -499,8 +512,8 @@ describe("mcpcage protect", () => {
     expect(out).toContain(
       [
         "Summary",
-        "  11 servers in 6 configuration files (11 files checked, 5 absent).",
-        "  7 run on your machine with your permissions and no cage.          -> mcpcage protect --fix",
+        "  12 servers in 7 configuration files (14 files checked, 7 absent).",
+        "  8 run on your machine with your permissions and no cage.          -> mcpcage protect --fix",
         "  1 keeps a secret in clear text in a configuration file.",
         "  1 can reach your whole home directory or more.",
         "  0 use a package with install scripts.",
@@ -538,7 +551,10 @@ describe("mcpcage protect", () => {
       args: ["run", "--env", "API_TOKEN", "--", "npx", "-y", "@acme/project-tool"],
       env: { API_TOKEN: "${input:token}" },
     });
-    for (const name of ["desktop", "cursor", "mcpJson"] as const) expect(readFileSync(`${files[name]}.mcpcage.bak`)).toEqual(original[name]);
+    // Devin's file is plain JSON with mcpServers, like Cursor's: rewritten the same way.
+    expect(result.stdout).toContain(`  caged devin-tool in ${tilde(files.devin, home)}\n`);
+    expect(JSON.parse(readFileSync(files.devin, "utf8"))).toEqual({ mcpServers: { "devin-tool": { command: "/opt/mcpcage", args: ["run", "--", "npx", "-y", "@acme/devin-tool"] } } });
+    for (const name of ["desktop", "cursor", "mcpJson", "devin"] as const) expect(readFileSync(`${files[name]}.mcpcage.bak`)).toEqual(original[name]);
 
     for (const name of ["vscodeUser", "vscodeProject", "claudeJson"] as const) {
       expect(readFileSync(files[name])).toEqual(original[name]);
@@ -562,10 +578,24 @@ describe("mcpcage protect", () => {
         return match ? [[match[1], match[2]]] : [];
       }),
     );
-    expect(statuses).toEqual({ filesystem: "caged", github: "caged", notes: "caged", "proj-npx": "NOT CAGED", "project-tool": "caged", files: "caged", memory: "NOT CAGED", "vs-proj": "NOT CAGED" });
+    expect(statuses).toEqual({ filesystem: "caged", github: "caged", notes: "caged", "proj-npx": "NOT CAGED", "project-tool": "caged", files: "caged", memory: "NOT CAGED", "vs-proj": "NOT CAGED", "devin-tool": "caged" });
     expect(again.stdout).toContain("  3 run on your machine with your permissions and no cage.");
-    expect(again.stdout).toContain("  5 already run through mcpcage.");
+    expect(again.stdout).toContain("  6 already run through mcpcage.");
     expect(again.code).toBe(1);
+  });
+
+  it("wrap --dry-run takes a Devin project file like a Cursor file and writes nothing", () => {
+    const machine = fakeMachine();
+    const file = locationsFor(machine.home, machine.project)("devin", "project");
+    expect(file).toBe(join(machine.project, ".devin", "mcp_config.json"));
+    writeJsonFile(file, { mcpServers: { shared: { command: "npx", args: ["-y", "@acme/shared-mcp"], env: { ACME_TOKEN: "${env:ACME_TOKEN}" } } } });
+    const original = readFileSync(file);
+
+    const result = mcpcageWithEnv(machine.env, "wrap", "--dry-run", file);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toBe(`${file} (mcpServers) [dry run]\n  caged shared: mcpcage run --env ACME_TOKEN -- npx -y @acme/shared-mcp\n`);
+    expect(readFileSync(file)).toEqual(original);
+    expect(existsSync(`${file}.mcpcage.bak`)).toBe(false);
   });
 
   it("counts `mcpcage run --no-sandbox` as not caged, and --fix asks to remove --no-sandbox by hand", () => {

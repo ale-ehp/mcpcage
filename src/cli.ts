@@ -50,7 +50,7 @@ Run options:
   --no-sandbox          run on the host: pinning and audit only, no isolation (not recommended)
 
 Protect options:
-  --project <dir>       also check this project's .mcp.json, .cursor/ and .vscode/ (default: current directory)
+  --project <dir>       also check this project's .mcp.json, .cursor/, .vscode/ and .devin/ (default: current directory)
   --inspect             start each npx server in the cage and look for hidden instructions in its tools
   --offline             do not ask the npm registry; use what was looked up before
   --fix                 route every npx server through mcpcage, after showing the plan (backups are kept)
