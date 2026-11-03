@@ -3,6 +3,15 @@
   "version": "0.2.0",
   "description": "Run any MCP server in a cage: tool definitions pinned, calls audited, the server sandboxed in a hardened container.",
   "license": "Apache-2.0",
+  "author": "Alessandro Veneziano",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ale-ehp/mcpcage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ale-ehp/mcpcage/issues"
+  },
+  "homepage": "https://github.com/ale-ehp/mcpcage#readme",
   "type": "module",
   "bin": {
     "mcpcage": "dist/cli.js"
