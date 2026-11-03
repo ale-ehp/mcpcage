@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, posix, win32 } from "node:path";
 import { claudeCodeSections, type ClientId, type ConfigLocation } from "./clients.js";
-import { hostPath, isWrapped, serverType, wrapEntry, type ServerEntry, type ServerType } from "./config.js";
+import { createBackup, hostPath, isWrapped, serverType, wrapEntry, type ServerEntry, type ServerType } from "./config.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
 import type { ToolDefinition } from "./manifest.js";
@@ -438,9 +438,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
 function replaceFile(file: string, original: Buffer, text: string): string {
   const target = realpathSync(file);
   const mode = statSync(target).mode & 0o777;
-  let backup = `${file}.mcpcage.bak`;
-  if (existsSync(backup)) backup = `${file}.mcpcage.${new Date().toISOString().replace(/[:.]/g, "-")}.bak`;
-  writeFileSync(backup, original, { flag: "wx", mode });
+  const backup = createBackup(file, (name) => writeFileSync(name, original, { flag: "wx", mode }));
   chmodSync(backup, mode);
   const temporary = join(dirname(target), `.${basename(target)}.mcpcage-${process.pid}-${randomBytes(4).toString("hex")}.tmp`);
   try {

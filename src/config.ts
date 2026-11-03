@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { constants, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parseLaunch } from "./launch.js";
@@ -145,11 +146,28 @@ function transform(file: string, dryRun: boolean, rewrite: Rewrite): WrapOutcome
   }
 
   if (!dryRun && outcome.changed.length > 0) {
-    let backup = `${file}.mcpcage.bak`;
-    if (existsSync(backup)) backup = `${file}.mcpcage.${new Date().toISOString().replace(/[:.]/g, "-")}.bak`;
-    copyFileSync(file, backup);
-    outcome.backup = backup;
+    outcome.backup = createBackup(file, (backup) => copyFileSync(file, backup, constants.COPYFILE_EXCL));
     writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
   }
   return outcome;
+}
+
+/**
+ * A backup next to `file` that never replaces another: `<file>.mcpcage.bak`, else a name with the
+ * time, else that name with a random suffix. `create` must refuse a name that exists (EEXIST):
+ * looking first and writing after would leave a moment in which a file can appear under that name.
+ */
+export function createBackup(file: string, create: (backup: string) => void): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  for (const backup of [`${file}.mcpcage.bak`, `${file}.mcpcage.${stamp}.bak`]) {
+    try {
+      create(backup);
+      return backup;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+  const backup = `${file}.mcpcage.${stamp}-${randomBytes(4).toString("hex")}.bak`;
+  create(backup);
+  return backup;
 }
