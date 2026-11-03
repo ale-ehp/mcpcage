@@ -488,10 +488,10 @@ describe("mcpcage protect", () => {
     expect(out).toContain(`Cursor  ${tilde(files.cursor, home)}\n  files `);
     expect(line("memory")).toMatch(/npx -y @modelcontextprotocol\/server-memory +NOT CAGED$/); // read through the JSONC comments
     expect(line("vs-proj")).toMatch(/NOT CAGED$/);
-    // The files that do not exist are counted on one line, with their clients once each, just before the summary.
+    // The files that do not exist are counted on one line and their clients listed once each on the next, just before the summary.
     const absent = discoverConfigs({ platform: process.platform, home, env: {}, project }).filter((location) => !existsSync(location.file));
     expect(absent.map((location) => location.clientName)).toEqual(["Cursor", "VS Code", "GitHub Copilot CLI", "Windsurf", "Windsurf"]);
-    expect(out).toContain(["", "Not found: 5 other configuration files (Cursor, VS Code, GitHub Copilot CLI, Windsurf)", "", "Summary", ""].join("\n"));
+    expect(out).toContain(["", "Not found: 5 other configuration files", "  Cursor, VS Code, GitHub Copilot CLI, Windsurf", "", "Summary", ""].join("\n"));
     for (const location of absent) expect(out).not.toContain(location.scope === "user" ? tilde(location.file, home) : location.file);
     expect(out).not.toContain("(absent)");
     // ${input:token} is filled in by the client: not a secret written in the file.

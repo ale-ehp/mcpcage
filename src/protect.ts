@@ -227,8 +227,9 @@ export function renderReport(report: ProtectReport, options: { home: string }): 
     }
   }
   // Most clients are not installed on a given machine: their paths would bury the files that matter.
+  // The client list sits on its own line, so the report stays readable in narrow terminals.
   if (absent.length > 0) {
-    lines.push(`Not found: ${absent.length} other configuration file${absent.length === 1 ? "" : "s"} (${[...new Set(absent)].join(", ")})`);
+    lines.push(`Not found: ${absent.length} other configuration file${absent.length === 1 ? "" : "s"}`, `  ${[...new Set(absent)].join(", ")}`);
   }
   lines.push("", "Summary", ...summary(report));
   return lines.join("\n");
