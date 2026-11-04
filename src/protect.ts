@@ -8,7 +8,7 @@ import {
 } from "./config.js";
 import { envFileOf, mcpcageAt, type ForeignPath, type McpcageKind } from "./installed.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
-import { parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
+import { isNpx, parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
 import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
@@ -1064,7 +1064,7 @@ function npxCommand(entry: ServerEntry, type: ServerType): string[] | undefined 
   if (type === "npx") return [entry.command as string, ...args];
   if (type !== "mcpcage" || !args.includes("--")) return undefined;
   const inner = args.slice(args.indexOf("--") + 1);
-  return inner[0] !== undefined && /(^|[/\\])npx(\.cmd)?$/.test(inner[0]) ? inner : undefined;
+  return inner[0] !== undefined && isNpx(inner[0]) ? inner : undefined;
 }
 
 function npmPackage(argv: string[]): { spec: string; local: boolean } | undefined {

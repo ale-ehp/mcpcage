@@ -17,7 +17,7 @@ export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Pla
   if (image) return { kind: "image", image, args: argv };
   const [command, ...rest] = argv;
   if (!command) throw new Error("missing the server command after `--`");
-  if (!/(^|[/\\])npx(\.cmd)?$/.test(command)) return { kind: "host", command, args: rest };
+  if (!isNpx(command, platform)) return { kind: "host", command, args: rest };
 
   let index = 0;
   while (index < rest.length && rest[index]!.startsWith("-")) {
@@ -34,6 +34,15 @@ export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Pla
   if (isLocalPath(spec, platform)) return { kind: "npm", packageName: "", localPath: spec, args };
   const { name, range } = splitPackageSpec(spec);
   return { kind: "npm", packageName: name, versionRange: range, args };
+}
+
+/**
+ * Whether a command names npx: `npx` or `npx.cmd`, bare or as a path. Windows compares file names
+ * without case, and starts NPX, npx.CMD and C:\NODEJS\NPX.CMD as it starts npx: they were taken for
+ * other programs there, which protect could not count as npx servers and mcpcage could not cage.
+ */
+export function isNpx(command: string, platform: NodeJS.Platform = process.platform): boolean {
+  return /(^|[/\\])npx(\.cmd)?$/.test(platform === "win32" ? command.toLowerCase() : command);
 }
 
 /**

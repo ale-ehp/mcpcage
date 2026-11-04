@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
 import { discoverConfigs, type ClientId } from "../src/clients.js";
-import { moveHostEnv, serverType, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
+import { isWrapped, moveHostEnv, serverType, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
 import { listTools } from "../src/inspect.js";
 import { mcpcageAt } from "../src/installed.js";
 import { hasComments, parseJsonc } from "../src/jsonc.js";
@@ -17,7 +17,7 @@ import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs } from "../src/protect.js";
 import { parseMount, runArgs } from "../src/sandbox.js";
-import { idleProgram } from "./fake-programs.js";
+import { idleProgram, onWindows } from "./fake-programs.js";
 import { asStored, cli, fakeServer, fakeUserEnv, hostileServer, literal, mcpcageWithEnv, native, root, stubHome } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
@@ -461,6 +461,22 @@ describe("wrapping one entry", () => {
     expect(wrapEntry({ type: "local", command: "npx", args: ["-y", "pkg"] }, { command: "mcpcage" })).toMatchObject({ entry: { type: "local", command: "mcpcage" } });
     expect(wrapEntry({ command: "npx", args: ["--registry", "x", "pkg"] }, { command: "mcpcage" })).toEqual({ skip: "unsupported npx flag --registry" });
     expect(wrapEntry({ serverUrl: "https://x" }, { command: "mcpcage" })).toEqual({ skip: "remote server: nothing runs locally to cage" });
+  });
+
+  it("compares the names of npx, uvx, docker and mcpcage without case on Windows, as Windows does, and only there", () => {
+    for (const command of ["NPX", "npx.CMD", "Npx.Cmd", "C:\\Program Files\\nodejs\\NPX.CMD"]) {
+      expect(serverType({ command, args: ["-y", "pkg"] }, "win32")).toBe("npx");
+      expect(serverType({ command, args: ["-y", "pkg"] }, "darwin")).toBe("other");
+      expect(parseLaunch([command, "-y", "pkg@1"], undefined, "win32")).toEqual({ kind: "npm", packageName: "pkg", versionRange: "1", args: [] });
+      expect(parseLaunch([command, "-y", "pkg@1"], undefined, "linux")).toEqual({ kind: "host", command, args: ["-y", "pkg@1"] });
+      // Caged as npx is.
+      const wrapped = onWindows(() => wrapEntry({ command, args: ["-y", "pkg"] }, { command: "mcpcage" }));
+      expect(wrapped).toEqual({ entry: { command: "mcpcage", args: ["run", "--", command, "-y", "pkg"] } });
+    }
+    expect([serverType({ command: "UVX.EXE" }, "win32"), serverType({ command: "C:\\Docker\\Docker.EXE" }, "win32")]).toEqual(["uvx", "docker"]);
+    const mcpcage = { command: "C:\\npm\\MCPCAGE.CMD", args: ["run", "--", "npx", "-y", "pkg"] };
+    expect([serverType(mcpcage, "win32"), serverType(mcpcage, "darwin")]).toEqual(["mcpcage", "other"]);
+    expect([isWrapped(mcpcage, "win32"), isWrapped(mcpcage, "linux")]).toEqual([true, false]);
   });
 
   it("moves the env that would act on the host into the cage as NAME=value, drops HOME and MCPCAGE_HOME, and keeps the rest as before", () => {

@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
 import { envFileOf, foreignPath, mcpcageAt, movedPlaces, type ForeignPath } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
-import { parseLaunch } from "./launch.js";
+import { isNpx, parseLaunch } from "./launch.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
 
@@ -389,17 +389,25 @@ export function hostPath(arg: unknown): string | undefined {
 
 /**
  * `remote` for servers reached over the network (nothing runs locally), `mcpcage` for entries that
- * already start through `mcpcage run`, otherwise the program that starts the server.
+ * already start through `mcpcage run`, otherwise the program that starts the server. `platform` is
+ * the system the entry is started on: Windows compares file names without case (see isNpx).
  */
-export function serverType(entry: ServerEntry): ServerType {
+export function serverType(entry: ServerEntry, platform: NodeJS.Platform = process.platform): ServerType {
   const type = typeof entry.type === "string" ? entry.type.toLowerCase() : undefined;
   if (entry.url != null || entry.serverUrl != null || (type !== undefined && REMOTE_TYPES.has(type))) return "remote";
-  if (isWrapped(entry)) return "mcpcage";
-  const program = typeof entry.command === "string" ? (entry.command.split(/[/\\]/).pop() ?? "") : "";
-  if (/^npx(\.cmd)?$/.test(program)) return "npx";
+  if (isWrapped(entry, platform)) return "mcpcage";
+  if (typeof entry.command !== "string") return "other";
+  if (isNpx(entry.command, platform)) return "npx";
+  const program = programName(entry.command, platform);
   if (/^uvx(\.exe)?$/.test(program)) return "uvx";
   if (/^docker(\.exe)?$/.test(program)) return "docker";
   return "other";
+}
+
+/** The file name of a command, in lowercase on Windows, which compares file names without case. */
+function programName(command: string, platform: NodeJS.Platform): string {
+  const name = command.split(/[/\\]/).pop() ?? "";
+  return platform === "win32" ? name.toLowerCase() : name;
 }
 
 /**
@@ -429,10 +437,11 @@ export function unwrapEntry(entry: ServerEntry): { entry: ServerEntry } | { skip
   return { entry: restored };
 }
 
-export function isWrapped(entry: ServerEntry): entry is ServerEntry & { command: string; args: string[] } {
-  // `where mcpcage` gives mcpcage.cmd on Windows. The arguments must be a list: an object whose "0"
-  // is "run" looked wrapped too, and unwrap stopped at it with "args.indexOf is not a function".
-  return typeof entry.command === "string" && /(^|[/\\])mcpcage(\.cmd|\.exe)?$/.test(entry.command) && Array.isArray(entry.args) && entry.args[0] === "run";
+export function isWrapped(entry: ServerEntry, platform: NodeJS.Platform = process.platform): entry is ServerEntry & { command: string; args: string[] } {
+  // `where mcpcage` gives mcpcage.cmd on Windows, which starts it as MCPCAGE.CMD too. The arguments
+  // must be a list: an object whose "0" is "run" looked wrapped too, and unwrap stopped at it with
+  // "args.indexOf is not a function".
+  return typeof entry.command === "string" && /^mcpcage(\.cmd|\.exe)?$/.test(programName(entry.command, platform)) && Array.isArray(entry.args) && entry.args[0] === "run";
 }
 
 type Rewrite = (
