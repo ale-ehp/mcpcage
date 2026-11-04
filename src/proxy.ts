@@ -313,7 +313,14 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       resultSigns(id, request.tool ?? "", message);
       return message;
     }
-    if (request.method !== "tools/list" || !isToolList(message.result?.tools)) return message;
+    if (request.method !== "tools/list" || message.result?.tools === undefined) return message;
+    // A list with one entry that is no tool definition (no string name, or no object at all) passed
+    // whole and unchecked: the tools beside it reached the client neither pinned nor compared with the
+    // pin, and a client that skips the odd entry shows the model the rest. Refused whole instead.
+    if (!isToolList(message.result.tools)) {
+      const refusal = "the server listed something that is not a tool definition";
+      return refuseListing(id, refusal, refusal, { reason: "not-tools" });
+    }
 
     const tools: ToolDefinition[] = message.result.tools;
     // Refused before anything walks it: nothing of such a listing is pinned, saved or explained.
