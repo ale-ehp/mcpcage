@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { MAX_DEPTH, nestedDeeperThan, pinTools, tooDeep, type Pin, type ToolDefinition, type Violation } from "./manifest.js";
+import { MAX_DEPTH, nestedDeeperThan, own, pinTools, tooDeep, type Pin, type ToolDefinition, type Violation } from "./manifest.js";
 import { cageHome, serverDir } from "./paths.js";
 
 /** A manifest that was seen but not approved yet, waiting for `mcpcage approve`. */
@@ -19,7 +19,7 @@ export interface Pending {
 export function loadPin(serverId: string, warn: (message: string) => void = (message) => process.stderr.write(`${message}\n`)): Pin | undefined {
   const pin = readJson<Pin>(join(serverDir(serverId), "pin.json"));
   if (!pin) return undefined;
-  const deep = Object.keys(pin.tools).filter((name) => nestedDeeperThan(pin.tools[name]?.definition, MAX_DEPTH));
+  const deep = Object.keys(pin.tools).filter((name) => nestedDeeperThan(own(pin.tools, name)?.definition, MAX_DEPTH));
   if (deep.length === 0) return pin;
   for (const name of deep) delete pin.tools[name];
   const names = deep.map((name) => JSON.stringify(name)).join(", ");

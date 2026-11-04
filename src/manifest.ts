@@ -32,8 +32,20 @@ export function toolFingerprint(tool: ToolDefinition): string {
   return sha256(canonicalJson(visible));
 }
 
+/**
+ * The property `key` of `record` if it is its own, else undefined. Tool names and schema keys come
+ * from the server, and JSON.parse makes an own property of any name: looked up plainly,
+ * "constructor", "toString" or "__proto__" find what every object inherits from Object.prototype.
+ */
+export function own<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
 export function pinTools(serverId: string, tools: ToolDefinition[], base?: Pin): Pin {
-  const pinned: Record<string, PinnedTool> = { ...(base?.tools ?? {}) };
+  // Without a prototype, so that a tool named "__proto__" is stored like any other. Assigned on a
+  // plain object, it replaced the object's prototype instead: it was never saved, and at the next
+  // start the server was blocked for a change it never made.
+  const pinned: Record<string, PinnedTool> = Object.assign(Object.create(null), base?.tools);
   for (const tool of tools) pinned[tool.name] = { hash: toolFingerprint(tool), definition: tool };
   return { version: 1, serverId, approvedAt: new Date().toISOString(), tools: pinned };
 }
@@ -45,7 +57,7 @@ export function pinTools(serverId: string, tools: ToolDefinition[], base?: Pin):
 export function checkTools(pin: Pin, tools: ToolDefinition[]): Violation[] {
   const violations: Violation[] = [];
   for (const tool of tools) {
-    const approved = pin.tools[tool.name];
+    const approved = own(pin.tools, tool.name);
     if (!approved) {
       violations.push({ kind: "new-tool", name: tool.name, after: tool });
     } else if (approved.hash !== toolFingerprint(tool)) {
@@ -136,8 +148,10 @@ export function jsonChanges(before: unknown, after: unknown, path = ""): string[
   const keys = new Set([...Object.keys(before as object), ...Object.keys(after as object)]);
   for (const key of [...keys].sort()) {
     if (key === "_meta" && path === "") continue;
-    const left = (before as Record<string, unknown>)[key];
-    const right = (after as Record<string, unknown>)[key];
+    // A key on one side only is absent on the other. Read plainly, a "constructor" added by the
+    // server was compared with Object itself, which cannot be shown, and explaining the change threw.
+    const left = own(before as Record<string, unknown>, key);
+    const right = own(after as Record<string, unknown>, key);
     changes.push(...jsonChanges(left, right, path ? `${path}.${key}` : key));
   }
   return changes;

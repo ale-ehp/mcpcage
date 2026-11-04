@@ -4,7 +4,7 @@ import type { Readable, Writable } from "node:stream";
 import { AuditLog } from "./audit.js";
 import { canonicalJson, sha256 } from "./canonical.js";
 import { LineSplitter, MAX_LINE_BYTES } from "./lines.js";
-import { checkTools, isToolList, MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, pinTools, tooDeep, type Pin, type ToolDefinition } from "./manifest.js";
+import { checkTools, isToolList, MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, own, pinTools, tooDeep, type Pin, type ToolDefinition } from "./manifest.js";
 import { loadPin, savePending, savePin } from "./pinstore.js";
 import { countFindings, countSuspicious, describeResultSigns, describeViolationsWithFindings, highSeveritySigns, scanResult } from "./suspicious.js";
 
@@ -113,11 +113,13 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       if (message.method !== undefined && message.id !== undefined && message.id !== null) {
         if (message.method === "tools/call") {
           const tool = typeof message.params?.name === "string" ? message.params.name : "";
+          // Only a tool approved under that very name passes: looked up plainly, "constructor",
+          // "toString", "__proto__" and the other names every object inherits passed unlisted.
           const reason = locked
             ? `this session is locked because ${locked}`
             : !pin
               ? "no approved tool manifest yet (the client must list tools first)"
-              : !pin.tools[tool]
+              : !own(pin.tools, tool)
                 ? `tool "${tool}" is not in the approved manifest`
                 : undefined;
           if (reason) {
@@ -268,7 +270,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       pin = pinTools(serverId, tools, pin);
       pinnedThisSession = true;
       savePin(pin);
-      audit.write("pinned", { tools: tools.map((tool) => ({ name: tool.name, hash: pin!.tools[tool.name]!.hash })) });
+      audit.write("pinned", { tools: tools.map((tool) => ({ name: tool.name, hash: own(pin!.tools, tool.name)!.hash })) });
       return message;
     }
 

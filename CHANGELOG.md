@@ -3,6 +3,21 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Names that every JavaScript object inherits fooled the pinning: what a definition held under a
+  `"__proto__"` key was left out of its fingerprint, so hidden text added there passed as no
+  change; a `tools/call` for `constructor`, `toString`, `__proto__` or another such name reached the
+  server although no tool of that name was approved; a tool named `__proto__` was never saved and
+  blocked its server at the next start; and a key named `constructor` added to a definition or
+  removed from it crashed the proxy, `mcpcage diff` and `mcpcage approve`. Every key now counts, in
+  fingerprints and in the hashes of the audit log, and a call passes only for a tool approved under
+  its own name. A definition approved by an earlier version with a `"__proto__"` key therefore
+  counts as changed once and needs a fresh approval, and an audit entry that an earlier version
+  wrote with such a key no longer verifies.
+
 ## [0.4.0] - 2026-11-04
 
 Hardening. Every change below came out of trying to break mcpcage: hostile servers against the
