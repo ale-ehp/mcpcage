@@ -6,8 +6,9 @@
 #   bash demo/crt-webp.sh <input.mp4> <output.webp>
 # The television is demo/crt-frame.png: a photo of a JCPenney RGB Monitor/Receiver, a CRT television
 # of the 1980s, prepared once from a PNG cut-out found on the web: cropped to the television, its
-# screen and the background made transparent with a soft edge, the outline of its screen
-# straightened, and the brand label painted over.
+# screen and the background made transparent, the outline of its screen straightened and the
+# brand label painted over, then retouched by hand: the sides of the cabinet and the edge of the
+# screen cut clean, the colours of the logo and the buttons brighter.
 # The output is a lossless animated WebP, not a GIF. A GIF has 256 colours in all and a pixel that is
 # either opaque or transparent: the soft edges of the television came out as stairs on the page and
 # the green of the screen had about 140 levels. The WebP keeps every colour and 256 levels of
@@ -43,19 +44,23 @@ ffmpeg -v error -f lavfi -i "color=white:s=$size" -vf "format=yuv420p,$curve,for
 ffmpeg -v error -f lavfi -i "color=white:s=$size,format=gray" -vf "geq=lum='if(mod(Y,3),255,185)'" -frames:v 1 "$work/scanlines.png"
 
 # The television, scaled once and laid over every frame. The hole of its screen in
-# demo/crt-frame.png (800x815) has the bounding box x 93, y 80, 615x497: about 5:4, which is why the
+# demo/crt-frame.png (800x815) has the bounding box x 93, y 79, 615x499: about 5:4, which is why the
 # tape records at 1140x930. The photo is scaled so that the box comes out 40 px narrower than the
-# video, and the video is centred on it: the bezel covers 20 px of the picture on every side, more
-# than the curve pulls in the middle of the left and right sides (16 px), so no black shows between
-# the picture and the bezel; and the padding of the tape keeps the first and last characters of
-# every row clear of the rounded corners of the hole.
-read -r fw fh vx vy <<<"$(awk -v w="$sw" -v h="$sh" 'BEGIN { k = (w - 40) / 615; printf "%d %d %d %d\n", 800 * k + 0.5, 815 * k + 0.5, (93 + 615 / 2) * k - w / 2 + 0.5, (80 + 497 / 2) * k - h / 2 + 0.5 }')"
+# video, and the video is centred on it: the bezel covers 20 px of the picture on the left and right
+# and 19 at the top and bottom, more than the curve pulls in the middle of the left and right sides
+# (16 px), so no black shows between the picture and the bezel; and the padding of the tape keeps
+# the first and last characters of every row clear of the rounded corners of the hole.
+read -r fw fh vx vy <<<"$(awk -v w="$sw" -v h="$sh" 'BEGIN { k = (w - 40) / 615; printf "%d %d %d %d\n", 800 * k + 0.5, 815 * k + 0.5, (93 + 615 / 2) * k - w / 2 + 0.5, (79 + 499 / 2) * k - h / 2 + 0.5 }')"
+# The photo is scaled with its colours premultiplied by its alpha, so that a transparent pixel adds
+# nothing to the edge next to it: the photo keeps white under its transparent pixels, and scaled as
+# they are, that white came out as a light line around the television and around its screen.
 # The colours of the photo are made coarser once, because a lossless WebP stores every distinct
 # colour and a photo has tens of thousands: gray in steps of 8 (the grain of the plastic hides the
 # steps) and colour in steps of 24 around the warm gray of the plastic (U 126, V 130 in YUV),
-# rounded so that the reds of the logo keep their hue. About 140 colours. The alpha stays as it is:
-# soft around the television and around the hole of its screen.
-ffmpeg -v error -i "$frame" -vf "format=rgba,scale=$fw:$fh:flags=lanczos,format=yuva444p,
+# rounded so that the reds of the logo keep their hue. About 160 colours. The alpha stays as it is,
+# so the edges of the television and of its screen stay smooth.
+ffmpeg -v error -i "$frame" -vf "format=gbrap,premultiply=inplace=1,scale=$fw:$fh:flags=lanczos,
+unpremultiply=inplace=1,format=yuva444p,
 lutyuv=y='trunc(val/8)*8+4':u='round((val-126)/24)*24+126':v='round((val-130)/24)*24+130',format=rgba" -frames:v 1 "$work/tv.png"
 
 # In order: 20 frames a second, the rate VHS captures at (Set Framerate in the tape); the curve;
