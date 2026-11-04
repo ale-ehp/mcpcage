@@ -18,7 +18,7 @@ import { cageHome, checkServerId, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, refuseTooMany, type Pending } from "./pinstore.js";
 import { envFileNote, fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, uncheckedFiles, writableMounts, writableWarning, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
-import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
+import { dockerAvailable, INSTALL_BASE, npxProgram, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
 import { boundedLog, terminalSafe } from "./terminal.js";
 
@@ -161,8 +161,7 @@ async function run(argv: string[]): Promise<number> {
     // The npx command line alone: one that `cmd /c` runs (see cmdNpx) starts without cmd, which
     // would read its arguments as commands.
     const line = (spec.kind === "npm" ? npxArgv(server) : undefined) ?? server;
-    command = line[0]!;
-    args = line.slice(1);
+    ({ command, args } = onHost(line, spec.kind === "npm"));
     log(`mcpcage: WARNING ${serverId} runs on the host without isolation (--no-sandbox). Tool pinning and audit are still on.`);
     auditLog.write("sandbox", { mode: "none", command: [command, ...args] });
   } else {
@@ -215,6 +214,31 @@ async function run(argv: string[]): Promise<number> {
     output: process.stdout,
     log,
   });
+}
+
+/**
+ * How `run --no-sandbox` starts a server's command line on the host: as written on macOS and Linux;
+ * on Windows npx as npm's npx-cli.js run by the node running mcpcage (see npxProgram), and never a
+ * batch file. Node starts a .cmd or .bat only through cmd.exe, which would read the server's
+ * arguments as commands, and refuses to start one without it since the fix of CVE-2024-27980 (a plain
+ * spawn throws EINVAL); a bare name finds only a .com or an .exe. A bare name whose PATH lookup finds
+ * a batch file first is refused too, with the file named, instead of failing with ENOENT.
+ */
+function onHost(line: string[], npx: boolean): { command: string; args: string[] } {
+  const [program, ...rest] = line as [string, ...string[]];
+  if (process.platform !== "win32") return { command: program, args: rest };
+  if (npx) {
+    const found = npxProgram();
+    if (found === undefined) throw new Error(`npx not found: mcpcage starts npm's npx-cli.js with the node it runs on, and there is none next to ${process.execPath}`);
+    return { command: found.file, args: [...found.args, ...rest] };
+  }
+  const batch = /\.(?:cmd|bat)$/i.test(program) ? program : /^[^/\\.]+$/.test(program) ? commandOnPath(program) : undefined;
+  if (batch !== undefined && /\.(?:cmd|bat)$/i.test(batch)) {
+    throw new Error(
+      `${batch} is a batch file, which Windows starts only through cmd.exe, a shell that would read the server's arguments as commands: give --no-sandbox the program it starts instead (for a package npm installed, node.exe and its script)`,
+    );
+  }
+  return { command: program, args: rest };
 }
 
 async function wrap(command: "wrap" | "unwrap", argv: string[]): Promise<number> {

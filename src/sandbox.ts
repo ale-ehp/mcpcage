@@ -674,6 +674,18 @@ export function npmProgram(): HostProgram | undefined {
   return file === undefined ? foundNowhere("npm") : { file, args: [], env: trustedEnv([dirname(file)]) };
 }
 
+/**
+ * The npx `run --no-sandbox` starts on Windows: npm's npx-cli.js next to the node running mcpcage, run
+ * by that node, as npmProgram runs npm-cli.js. Started by name, npx was not found ("spawn npx
+ * ENOENT", exit 127): Node starts a bare name only as a .com or an .exe, and npm installs npx.cmd,
+ * which starts only through cmd.exe, a shell that would read the server's arguments as commands.
+ * Undefined when npm's script is not there. On macOS and Linux npx is started by name, as before.
+ */
+export function npxProgram(): { file: string; args: string[] } | undefined {
+  const script = join(dirname(process.execPath), "node_modules", "npm", "bin", "npx-cli.js");
+  return existsSync(script) ? { file: process.execPath, args: [script] } : undefined;
+}
+
 /*
  * A program found nowhere would be started by its bare name, and looked for again where the system
  * looks for one. On macOS and Linux that is the PATH it is given, of the trusted places only, all of

@@ -2,10 +2,11 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { dockerAvailable, dockerProgram, npmProgram, runArgs } from "../src/sandbox.js";
+import { dockerAvailable, dockerProgram, npmProgram, npxProgram, runArgs } from "../src/sandbox.js";
 import { fakePrograms, isProgram, onWindows, STANDARD_PLACES, standardDocker } from "./fake-programs.js";
-import { freshHome, mcpcageWithEnv } from "./helpers.js";
+import { connect, fakeServer, freshHome, mcpcageWithEnv } from "./helpers.js";
 
 // A client starts mcpcage with the PATH a server entry's `env` sets. The docker, the credential
 // helper, the npm and the node that PATH puts first must not be the ones mcpcage runs.
@@ -131,6 +132,57 @@ describe("on Windows, a docker or an npm found nowhere", () => {
     projectWithDecoys();
     const node = join(mkdtempSync(join(tmpdir(), "mcpcage-nodejs-")), "node.exe");
     expect(onWindows(() => npmProgram(), node)?.file).toBeUndefined();
+  });
+});
+
+describe("run --no-sandbox on Windows", () => {
+  /** A node installed as Node's installer does it on Windows, with npm's npx-cli.js next to it or without. */
+  function nodeInstall(withNpx: boolean): { node: string; script: string } {
+    const dir = join(mkdtempSync(join(tmpdir(), "mcpcage-nodejs-")), "nodejs");
+    const script = join(dir, "node_modules", "npm", "bin", "npx-cli.js");
+    mkdirSync(dirname(script), { recursive: true });
+    if (withNpx) writeFileSync(script, "");
+    return { node: join(dir, "node.exe"), script };
+  }
+
+  it("starts npx as npm's npx-cli.js with the node running mcpcage, never by name, and nothing without it", () => {
+    const { node, script } = nodeInstall(true);
+    expect(onWindows(() => npxProgram(), node)).toEqual({ file: node, args: [script] });
+    expect(onWindows(() => npxProgram(), nodeInstall(false).node)).toBeUndefined();
+  });
+
+  /** A package with a bin that runs the fake notes server, which npx installs from its directory, without the registry. */
+  function notesPackage(): string {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-npx-pkg-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "mcpcage-npx-notes", version: "1.0.0", type: "module", bin: { "mcpcage-npx-notes": "server.mjs" } }));
+    writeFileSync(join(dir, "server.mjs"), `#!/usr/bin/env node\nawait import(${JSON.stringify(pathToFileURL(fakeServer).href)});\n`);
+    return dir;
+  }
+
+  it.runIf(process.platform === "win32")("starts npx, which a plain spawn could not find, and a cmd /c npx without cmd", async () => {
+    const home = freshHome();
+    for (const server of [["npx", "-y", notesPackage()], ["cmd", "/c", "npx", "-y", notesPackage()]]) {
+      const session = await connect({ home, runArgs: ["--no-sandbox", "--id", "notes"], server, env: { FAKE_VARIANT: "v1" } });
+      try {
+        expect((await session.client.listTools()).tools.map((tool) => tool.name)).toEqual(["add_note", "list_notes"]);
+      } finally {
+        await session.close();
+      }
+    }
+  });
+
+  it.runIf(process.platform === "win32")("refuses a batch file, named or found by a bare name, rather than start it through a shell", () => {
+    const home = freshHome();
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-batch-"));
+    const batch = join(dir, "server.cmd");
+    writeFileSync(batch, "@echo started\r\n");
+    const why = "is a batch file, which Windows starts only through cmd.exe, a shell that would read the server's arguments as commands";
+    const named = mcpcageWithEnv({ ...process.env, MCPCAGE_HOME: home }, "run", "--no-sandbox", "--", batch, "&", "calc");
+    expect(named.stderr).toContain(`mcpcage: ${batch} ${why}`);
+    expect(named.code).toBe(1);
+    const bare = mcpcageWithEnv({ ...process.env, MCPCAGE_HOME: home, PATH: `${dir}${delimiter}${process.env.PATH ?? ""}` }, "run", "--no-sandbox", "--", "server");
+    expect(bare.stderr).toContain(`mcpcage: ${batch} ${why}`);
+    expect(bare.stdout).toBe("");
   });
 });
 
