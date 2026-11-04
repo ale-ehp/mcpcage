@@ -399,9 +399,12 @@ describe("sandbox command", () => {
       for (const spelled of [dir, dir.toUpperCase(), dir.toLowerCase(), dir.split("\\").join("/"), `${dir}\\`]) expect(parseMount(spelled), spelled).toEqual(expected);
       // \Users\me is on the current drive.
       if (parse(process.cwd()).root.toLowerCase() === parse(dir).root.toLowerCase()) expect(parseMount(dir.slice(2))).toEqual(expected);
-      const mounts = withSettingsReadOnly([parseMount(`${dir.toUpperCase()}:rw`), parseMount(join(dir.toLowerCase(), "SUB"))]);
+      // Spelled two ways, a writable folder inside a read-only one lands inside it in the cage.
+      const mounts = withSettingsReadOnly([parseMount(dir.toUpperCase()), parseMount(`${join(dir.toLowerCase(), "SUB")}:rw`)]);
       const targets = runArgs({ ...base, mounts }, "img").filter((arg) => arg.startsWith("type=bind")).map((arg) => /target=([^,]*)/.exec(arg)![1]!);
       expect(targets).toEqual([inCage(dir), `${inCage(dir)}/Sub`]);
+      // The other way round it is refused, however it is spelled (see withSettingsReadOnly).
+      expect(() => withSettingsReadOnly([parseMount(`${dir.toUpperCase()}:rw`), parseMount(join(dir.toLowerCase(), "SUB"))])).toThrow(`${join(dir, "Sub")}, mounted read-only, would not stay read-only inside it`);
     });
 
     // GitHub's Windows runners spell TEMP so (C:\Users\RUNNER~1); C:\PROGRA~1 is on most machines.
@@ -469,10 +472,8 @@ describe("settings in a writable mount", () => {
   })();
 
   describe("on macOS and Windows, which compare names without case", () => {
-    const systems = [
-      ["darwin", "macOS"],
-      ["win32", "Windows"],
-    ] as const;
+    // Windows keeps no read-only mount inside a writable one at all: see the tests of Windows below.
+    const systems = [["darwin", "macOS"]] as const;
 
     it("refuses a writable mount that holds a .git file or .mcp.json, which the server could change under another case of its name", () => {
       for (const [platform, system] of systems) {
@@ -527,7 +528,9 @@ describe("settings in a writable mount", () => {
     it("follows a .git file in a read-only mount to its repository by the absolute path git writes on Windows", () => {
       // `git worktree add` and `git init --separate-git-dir` write where the repository is in full, with
       // forward slashes on Windows (C:/Users/...). A .git file the user mounted read-only is accepted
-      // there; the repository it names, in the writable mount around it, is kept read-only too.
+      // on macOS; the repository it names, in the writable mount around it, is kept read-only too. On
+      // Windows that read-only mount is refused (see the tests of Windows below); the path is followed
+      // there with the rules of macOS.
       for (const [platform] of systems) {
         const dir = mkdtempSync(join(tmpdir(), "mcpcage-case-"));
         mkdirSync(join(dir, "app"));
@@ -546,7 +549,77 @@ describe("settings in a writable mount", () => {
       mkdirSync(join(dir, "repository meta", "hooks"), { recursive: true });
       const short = execSync(`for %I in ("${join(dir, "repository meta")}") do @echo %~sI`, { encoding: "utf8" }).trim();
       writeFileSync(join(dir, "app", ".git"), `gitdir: ${short}\n`);
-      expect(withSettingsReadOnly([rw(dir), ro(join(dir, "app"))], SETTINGS_LIMITS, "win32")).toContainEqual(ro(join(dir, "repository meta")));
+      // With the rules of macOS: Windows refuses the read-only mount inside the writable one first.
+      expect(withSettingsReadOnly([rw(dir), ro(join(dir, "app"))], SETTINGS_LIMITS, "darwin")).toContainEqual(ro(join(dir, "repository meta")));
+      expect(() => withSettingsReadOnly([rw(dir), ro(join(dir, "app"))], SETTINGS_LIMITS, "win32")).toThrow("Docker Desktop lets a server");
+    });
+  });
+
+  describe("on Windows, where Docker Desktop reaches past a read-only mount under another case of its name", () => {
+    const why = "on Windows, Docker Desktop lets a server in a writable folder reach a read-only one inside it under another case of its name";
+    const windows = (mounts: Mount[]) => withSettingsReadOnly(mounts, SETTINGS_LIMITS, "win32");
+    /** A directory with the given files and empty directories (names ending in /). */
+    const tree = (paths: string[]) => {
+      const dir = mkdtempSync(join(tmpdir(), "mcpcage-windows-"));
+      for (const path of paths) {
+        mkdirSync(join(dir, path.endsWith("/") ? path : join(path, "..")), { recursive: true });
+        if (!path.endsWith("/")) writeFileSync(join(dir, path), "\n");
+      }
+      return dir;
+    };
+
+    it("refuses a writable folder that holds a git or editor setting, a directory as well as a file, at any depth", () => {
+      const dir = mkdtempSync(join(tmpdir(), "mcpcage-windows-"));
+      mkdirSync(join(dir, "a", "b", ".vscode"), { recursive: true });
+      expect(() => windows([rw(dir)])).toThrow(
+        `--mount ${dir}:rw: ${join(dir, "a", "b", ".vscode")} cannot be kept read-only: ${why}, here ${join(dir, "a", "b", ".VSCODE")}. ` +
+          `Mount a narrower folder that holds no git or editor settings, or mount ${dir} read-only by dropping :rw.`,
+      );
+      // A repository, as `git init` leaves it, and a setting that is a file.
+      const repository = mkdtempSync(join(tmpdir(), "mcpcage-windows-"));
+      mkdirSync(join(repository, ".git", "hooks"), { recursive: true });
+      expect(() => windows([rw(repository)])).toThrow(`${join(repository, ".git")} cannot be kept read-only: ${why}, here ${join(repository, ".GIT")}.`);
+      const project = mkdtempSync(join(tmpdir(), "mcpcage-windows-"));
+      writeFileSync(join(project, ".mcp.json"), "{}\n");
+      expect(() => windows([rw(project)])).toThrow(`${join(project, ".mcp.json")} cannot be kept read-only: ${why}, here ${join(project, ".MCP.JSON")}.`);
+      // Nothing to keep read-only: a folder with no settings, a read-only mount, a writable mount given for a setting itself.
+      const plain = mkdtempSync(join(tmpdir(), "mcpcage-windows-"));
+      mkdirSync(join(plain, "src", "node_modules", "x", ".git"), { recursive: true });
+      expect(windows([rw(plain)])).toEqual([rw(plain)]);
+      expect(windows([ro(dir)])).toEqual([ro(dir)]);
+      expect(windows([rw(join(repository, ".git"))])).toEqual([rw(join(repository, ".git"))]);
+    });
+
+    it("adds no mount inside a writable folder: no read-only setting, no repository a .git file leads to, no directory held in place", () => {
+      // Elsewhere each of these is a read-only mount inside the writable one, or a directory mounted onto itself to hold one in place.
+      const dir = tree(["a/b/c/.git/config", "a/b/.vscode/settings.json", "a/notes.md"]);
+      expect(settings([rw(dir)])).toHaveLength(6);
+      expect(() => windows([rw(dir)])).toThrow(why);
+      const linked = tree(["app/", "meta/hooks/", "meta/config"]);
+      writeFileSync(join(linked, "app", ".git"), `gitdir: ${join(realpathSync.native(linked), "meta")}\n`);
+      expect(withSettingsReadOnly([rw(linked), ro(join(linked, "app"))], SETTINGS_LIMITS, "darwin")).toContainEqual(ro(join(linked, "meta")));
+      expect(() => windows([rw(linked), ro(join(linked, "app"))])).toThrow(why);
+      // Nothing in the way: the mounts as given.
+      const plain = tree(["src/index.js", "notes.md"]);
+      const elsewhere = tree(["docs/"]);
+      expect(windows([rw(plain), ro(elsewhere)])).toEqual([rw(plain), ro(elsewhere)]);
+    });
+
+    it("refuses a read-only folder the user mounts inside a writable one, however either is written and in any order", () => {
+      const dir = tree(["sub/notes.md"]);
+      const sub = join(dir, "sub");
+      expect(() => windows([rw(dir), ro(sub)])).toThrow(
+        `--mount ${dir}:rw: ${sub}, mounted read-only, would not stay read-only inside it: ${why}, here ${join(dir, "SUB")}. ` +
+          `Mount a narrower folder that does not hold ${sub}, or mount ${dir} read-only by dropping :rw.`,
+      );
+      expect(() => windows([ro(sub), rw(dir)])).toThrow(`${sub}, mounted read-only, would not stay read-only inside it`);
+      expect(() => windows([rw(dir), ro(join(dir.toUpperCase(), "SUB"))])).toThrow(why);
+      expect(() => windows([rw(dir.toUpperCase()), ro(sub)])).toThrow(why);
+      // A writable folder inside a read-only one: what the server reaches through the read-only one,
+      // under any spelling, is read-only (seen on the PC: SUB/y.txt answered EROFS).
+      expect(byTarget(windows([ro(dir), rw(sub)]))).toEqual(byTarget([ro(dir), rw(sub)]));
+      // macOS and Linux keep the read-only folder inside the writable one: a mount point there covers every spelling.
+      for (const platform of ["darwin", "linux"] as const) expect(withSettingsReadOnly([rw(dir), ro(sub)], SETTINGS_LIMITS, platform)).toEqual([rw(dir), ro(sub)]);
     });
   });
 

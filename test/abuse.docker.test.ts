@@ -219,7 +219,9 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
     }
   }, 120_000);
 
-  it("cannot change git's or the editors' settings in a read-write mount, only the other files there", async () => {
+  // On Windows a read-write mount that holds git's or an editor's settings is refused before any cage
+  // starts, for directories too (see withSettingsReadOnly, and its tests in units.test.ts).
+  it.skipIf(process.platform === "win32")("cannot change git's or the editors' settings in a read-write mount, only the other files there", async () => {
     // A project as an editor opens it. Everything is open to every user, so only the mounts can refuse
     // the server: git would run a command written into .git/config or .git/hooks on the host.
     const project = mkdtempSync(join(root, "test", "fixtures", "abuse-project-"));
@@ -251,7 +253,7 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
     }
   }, 120_000);
 
-  it("cannot move git's settings away with the directories that hold them and put its own in their place", async () => {
+  it.skipIf(process.platform === "win32")("cannot move git's settings away with the directories that hold them and put its own in their place", async () => {
     // A read-only mount moves with its directory: renaming org would take org/app/.git along and leave
     // the server free to write a new org/app/.git/config, which git on the host would then run.
     const project = mkdtempSync(join(root, "test", "fixtures", "abuse-project-"));
@@ -389,6 +391,8 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
   it("keeps an intact audit log of every attack", () => {
     expect(mcpcage(home, "audit", "verify", "abuse").code).toBe(0);
     const shown = mcpcage(home, "audit", "show", "abuse", "--lines", "500").stdout;
-    for (const tool of ["environment", "write_outside", "move_aside", "network", "fork_bomb", "eat_memory"]) expect(shown).toContain(`"tool":"${tool}"`);
+    // move_aside is called only by a test that Windows refuses to start (see above).
+    const attacks = ["environment", "write_outside", ...(process.platform === "win32" ? [] : ["move_aside"]), "network", "fork_bomb", "eat_memory"];
+    for (const tool of attacks) expect(shown).toContain(`"tool":"${tool}"`);
   });
 });

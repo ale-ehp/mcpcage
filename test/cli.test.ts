@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +20,8 @@ const SPELLED_IN_JSON = "\\u001b[2J\\r[U+009B][U+202E][U+200B]";
 const FOLDS_CASE = process.platform === "darwin" || process.platform === "win32";
 /** A mounted path as mcpcage names it: on Windows as the system spells it on disk, long names for 8.3 short ones (C:\Users\RUNNER~1). */
 const onDisk = (path: string) => (process.platform === "win32" ? realpathSync.native(path) : path);
+/** Why Windows refuses a writable mount that holds a setting (see withSettingsReadOnly). */
+const ON_WINDOWS = "on Windows, Docker Desktop lets a server in a writable folder reach a read-only one inside it under another case of its name";
 
 describe("cli", () => {
   it("prints help and version", () => {
@@ -232,7 +234,14 @@ describe("cli", () => {
     // No Docker to reach: a run that got past the settings would stop there.
     const env = fakeUserEnv(join(top, "home"), join(top, "cage"), noDocker(top));
     const server = ["--", "npx", "-y", "something"];
-    expect(mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server).stderr).toContain("Docker is required");
+    const first = mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server).stderr;
+    if (process.platform === "win32") {
+      // There no read-only mount inside a writable one holds: the repository refuses the start.
+      expect(first).toContain(`${join(onDisk(project), ".git")} cannot be kept read-only: ${ON_WINDOWS}`);
+      rmSync(join(project, ".git"), { recursive: true });
+    } else {
+      expect(first).toContain("Docker is required");
+    }
 
     mkdirSync(join(top, "elsewhere"));
     symlinkSync(join(top, "elsewhere"), join(project, ".vscode"));
@@ -276,14 +285,19 @@ describe("cli", () => {
     expect(refused.code).toBe(1);
     const shown = onDisk(project);
     expect(refused.stderr).toBe(
-      `mcpcage: --mount ${shown}:rw: ${join(shown, ".mcp.json")} is a file, and on ${system} the server could change it as ${join(shown, ".MCP.JSON")}, ` +
-        `the same file under another case of its name, which a read-only mount does not cover. Mount a narrower directory, or mount ${shown} read-only by dropping :rw.\n`,
+      process.platform === "win32"
+        ? `mcpcage: --mount ${shown}:rw: ${join(shown, ".mcp.json")} cannot be kept read-only: ${ON_WINDOWS}, here ${join(shown, ".MCP.JSON")}. ` +
+            `Mount a narrower folder that holds no git or editor settings, or mount ${shown} read-only by dropping :rw.\n`
+        : `mcpcage: --mount ${shown}:rw: ${join(shown, ".mcp.json")} is a file, and on ${system} the server could change it as ${join(shown, ".MCP.JSON")}, ` +
+            `the same file under another case of its name, which a read-only mount does not cover. Mount a narrower directory, or mount ${shown} read-only by dropping :rw.\n`,
     );
     expect(mcpcageWithEnv(env, "run", "--mount", project, ...server).stderr).toContain("Docker is required");
     // Looked for at every run: a .git file that appeared since is refused the same way.
     expect(mcpcageWithEnv(env, "run", "--mount", `${join(project, "app")}:rw`, ...server).stderr).toContain("Docker is required");
     writeFileSync(join(project, "app", ".git"), "gitdir: ../meta\n");
-    expect(mcpcageWithEnv(env, "run", "--mount", `${join(project, "app")}:rw`, ...server).stderr).toContain(`${join(shown, "app", ".git")} is a file, and on ${system}`);
+    expect(mcpcageWithEnv(env, "run", "--mount", `${join(project, "app")}:rw`, ...server).stderr).toContain(
+      process.platform === "win32" ? `${join(shown, "app", ".git")} cannot be kept read-only: ${ON_WINDOWS}` : `${join(shown, "app", ".git")} is a file, and on ${system}`,
+    );
   });
 
   it("refuses a mount of the account's own ~/.ssh when HOME names another directory", () => {

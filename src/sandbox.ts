@@ -265,6 +265,9 @@ const HOST_SETTINGS: ReadonlySet<string> = new Set([
   ".mcp.json",
 ]);
 
+/** Why a read-only mount inside a writable one is refused on Windows (see withSettingsReadOnly). */
+const ON_WINDOWS = "on Windows, Docker Desktop lets a server in a writable folder reach a read-only one inside it under another case of its name";
+
 /** How far the search for those settings goes in one writable mount, and how many mounts it may add in all. */
 export const SETTINGS_LIMITS = { entries: 100_000, mounts: 1_000 };
 
@@ -293,16 +296,36 @@ export const SETTINGS_LIMITS = { entries: 100_000, mounts: 1_000 };
  *
  * macOS and Windows compare names without case (`platform`, this system's by default). A read-only
  * mount covers the one name it is placed on, and the server writes through the writable mount under
- * any other spelling of it: `.GIT` reached the host's `.git` file, `.MCP.JSON` its `.mcp.json`. A
- * directory is a mount point under every spelling, but a file setting cannot be kept read-only
- * there, so a writable mount that holds one refuses the start. Paths are compared as the system
- * spells them on disk, and without case: a mount spelled `P10` reaches the repository `p10/meta`.
+ * any other spelling of it: `.GIT` reached the host's `.git` file, `.MCP.JSON` its `.mcp.json`. On
+ * macOS a directory is a mount point under every spelling, but a file setting cannot be kept
+ * read-only there, so a writable mount that holds one refuses the start. Paths are compared as the
+ * system spells them on disk, and without case: a mount spelled `P10` reaches the repository `p10/meta`.
+ *
+ * On Windows no read-only mount inside a writable one holds, a directory's neither: with Docker
+ * Desktop a server wrote /c/.../.GIT/config through the writable mount around a read-only .git, and
+ * the host's .git\config changed; it wrote SUB/x.txt next to a read-only `sub` the user mounted
+ * inside a writable folder. So there a writable mount that holds any setting, and a read-only mount
+ * the user gives inside a writable one, refuse the start, and nothing is ever added inside a
+ * writable mount. A writable mount inside a read-only one is fine: whatever the server reaches
+ * through the read-only one, under any spelling, is read-only (SUB/y.txt there answered EROFS).
  */
 export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS, platform: NodeJS.Platform = process.platform): Mount[] {
   const isSetting = (name: string) => HOST_SETTINGS.has(name.toLowerCase());
   const foldsCase = platform === "darwin" || platform === "win32";
+  const windows = platform === "win32";
   const refuse = (mount: Mount, problem: string, remedy = "Mount a narrower directory") =>
     new Error(`--mount ${mount.source}:rw: ${problem}. ${remedy}, or mount ${mount.source} read-only by dropping :rw.`);
+  /** `name` under another case, as the server could write it. */
+  const otherCase = (name: string) => (name === name.toUpperCase() ? name.toLowerCase() : name.toUpperCase());
+  if (windows) {
+    for (const inner of mounts) {
+      if (!inner.readOnly) continue;
+      const outer = mounts.find((mount) => !mount.readOnly && within(inner.target, mount.target, true) && inner.target.toLowerCase() !== mount.target.toLowerCase());
+      if (outer === undefined) continue;
+      const names = inner.source.split(sep).slice(outer.source.split(sep).length);
+      throw refuse(outer, `${inner.source}, mounted read-only, would not stay read-only inside it: ${ON_WINDOWS}, here ${join(outer.source, otherCase(names[0]!), ...names.slice(1))}`, `Mount a narrower folder that does not hold ${inner.source}`);
+    }
+  }
   // Every mount by where it is in the container, compared resolved: docker refuses two mounts at one
   // place, however it is spelled.
   const placed = new Map<string, Mount>();
@@ -316,6 +339,9 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS, 
   };
   const added: Mount[] = [];
   const add = (from: Mount, mount: Mount) => {
+    // Unreached on Windows, where a writable mount that holds a setting refuses first: kept so that no
+    // later rule can put a mount there that the server would reach past.
+    if (windows) throw refuse(from, `${mount.source} cannot be kept ${mount.readOnly ? "read-only" : "in place"}: ${ON_WINDOWS}`, "Mount a narrower folder that holds no git or editor settings");
     placed.set(mount.target, mount);
     added.push(mount);
     if (added.length > limits.mounts) {
@@ -356,11 +382,12 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS, 
         // writable mount: in `<dir>/x,source=/home/me/.ssh,target=/k/.git` it would write fields of its own.
         if (path.includes(",")) throw refuse(mount, `${path} cannot be kept read-only, because paths containing commas are not supported`, "Rename it");
         const target = resolve(mount.target, relative(mount.source, path));
-        // Where the server can write next to it (a read-only mount the user gave covers every spelling).
+        if (windows) {
+          throw refuse(mount, `${path} cannot be kept read-only: ${ON_WINDOWS}, here ${join(dir, otherCase(entry.name))}`, "Mount a narrower folder that holds no git or editor settings");
+        }
+        // Where the server can write next to it (on macOS a read-only mount the user gave covers every spelling).
         if (foldsCase && !entry.isDirectory() && holder(dirname(target))?.readOnly === false) {
-          const other = join(dir, entry.name === entry.name.toUpperCase() ? entry.name.toLowerCase() : entry.name.toUpperCase());
-          const system = platform === "win32" ? "Windows" : "macOS";
-          throw refuse(mount, `${path} is ${entry.isFile() ? "a file" : "not a directory"}, and on ${system} the server could change it as ${other}, the same file under another case of its name, which a read-only mount does not cover`);
+          throw refuse(mount, `${path} is ${entry.isFile() ? "a file" : "not a directory"}, and on macOS the server could change it as ${join(dir, otherCase(entry.name))}, the same file under another case of its name, which a read-only mount does not cover`);
         }
         if (entry.name.toLowerCase() === ".git" && entry.isFile()) gitFiles.set(path, mount);
         if (placed.has(target)) continue;
