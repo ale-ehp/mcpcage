@@ -14,7 +14,7 @@ import { listTools } from "./inspect.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, checkServerId, serverDir } from "./paths.js";
-import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, type Pending } from "./pinstore.js";
+import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, refuseTooMany, type Pending } from "./pinstore.js";
 import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
@@ -376,6 +376,9 @@ async function approve(argv: string[]): Promise<number> {
     return 0;
   }
   refuseTooDeep(serverId, pending);
+  // Before the question, which would be asked for nothing. approvePending says why a pin it loads
+  // leaves a definition out; here it is only counted.
+  refuseTooMany(serverId, loadPin(serverId, () => {}), pending);
   console.log(describeViolationsWithFindings(pending.violations));
   // Said before the question and before --yes takes effect: this is the last moment to look.
   const { high } = countSuspicious(pending.violations);

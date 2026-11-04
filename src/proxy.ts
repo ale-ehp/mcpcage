@@ -237,12 +237,12 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     refuseListing(id, `the server lists more than ${most} tools`, `the server listed more than ${most} tools`, { reason: "too-many", count, limit: MAX_TOOLS });
   /**
    * Saves a blocked page as pending for `mcpcage diff` and `approve`, merged with the tools already
-   * waiting there, unless that would take them past MAX_TOOLS: pages and listings add up in the pending
-   * manifest, and a server could pile up any number of tools in it, 10,000 a page. The refusal to send
-   * instead, if so.
+   * waiting there, unless approving them would take the pin past MAX_TOOLS: pages and listings add up
+   * in the pending manifest, and a server could pile up any number of tools in it, 10,000 a page. The
+   * refusal to send instead, if so.
    */
   const savePage = (id: Id, tools: ToolDefinition[], violations: Violation[]): Message | undefined => {
-    const count = pendingCount(serverId, tools);
+    const count = pendingCount(serverId, tools, pin);
     if (count > MAX_TOOLS) return tooMany(id, count);
     savePending(serverId, tools, violations);
     return undefined;

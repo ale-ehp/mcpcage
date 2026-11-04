@@ -3,6 +3,7 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuditLog } from "../src/audit.js";
+import { pinTools } from "../src/manifest.js";
 import { auditDir, checkServerId, serverDir } from "../src/paths.js";
 import { connectFake, fakeUserEnv, freshHome, mcpcage, mcpcageWithEnv, root } from "./helpers.js";
 
@@ -267,6 +268,32 @@ describe("cli", () => {
     const result = mcpcage(home, "run", "--", "python3", "server.py");
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("is not an npx command");
+  });
+});
+
+describe("approving past the pin limit", () => {
+  it("refuses before asking when the pending tools would take the pin past 10,000, and keeps them pending", () => {
+    const home = freshHome();
+    const dir = join(home, "servers", "limit");
+    mkdirSync(dir, { recursive: true });
+    const pinFile = join(dir, "pin.json");
+    const pendingFile = join(dir, "pending.json");
+    writeFileSync(pinFile, JSON.stringify(pinTools("limit", Array.from({ length: 10_000 }, (_, n) => ({ name: `tool_${n}` })))));
+    // Saved as an older version saved it, which counted the pending tools alone.
+    const oneMore = { name: "one_more", description: "One tool more." };
+    const pending = JSON.stringify({ serverId: "limit", seenAt: "2026-11-03T00:00:00.000Z", tools: [oneMore], violations: [{ kind: "new-tool", name: "one_more", after: oneMore }] });
+    writeFileSync(pendingFile, pending);
+    const refusal = `mcpcage: approving the pending tools of limit would pin 10,001 tools, more than the 10,000 one server may have, so nothing was approved. Delete ${pendingFile} to discard them.\n`;
+    // Before, approve --yes made a pin of 10,001. Without --yes, the refusal comes before the question.
+    for (const args of [["--yes"], []]) {
+      const result = mcpcage(home, "approve", "limit", ...args);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toBe(refusal);
+      expect(result.stdout).toBe("");
+    }
+    expect(Object.keys((JSON.parse(readFileSync(pinFile, "utf8")) as { tools: object }).tools)).toHaveLength(10_000);
+    expect(readFileSync(pendingFile, "utf8")).toBe(pending);
+    expect(existsSync(join(home, "audit", "limit"))).toBe(false);
   });
 });
 

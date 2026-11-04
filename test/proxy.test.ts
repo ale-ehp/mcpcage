@@ -747,6 +747,48 @@ describe("listings with too many tools", () => {
   });
 });
 
+describe("the pin limit for pending tools", () => {
+  /** Pins the fake server's tools, then fills the pin up to 10,000 tools with others. */
+  async function fullPin(home: string) {
+    await firstSession(home);
+    const file = join(home, "servers", "notes", "pin.json");
+    const pin = JSON.parse(readFileSync(file, "utf8")) as { tools: Record<string, unknown> };
+    for (let n = 0; n < 9_998; n++) pin.tools[`filler_${n}`] = { hash: "filler", definition: { name: `filler_${n}` } };
+    writeFileSync(file, JSON.stringify(pin));
+    return file;
+  }
+
+  it("refuses a page whose new tool would take the pin past 10,000 once approved, and saves nothing of it", async () => {
+    const home = freshHome();
+    const pinFile = await fullPin(home);
+    const pinned = readFileSync(pinFile, "utf8");
+    // "extra" lists one tool more. Before, it was saved as pending, and approving it made a pin of 10,001.
+    const session = await connectFake(home, "extra");
+    await expect(session.client.listTools()).rejects.toMatchObject({
+      code: BLOCKED,
+      message: expect.stringContaining("mcpcage blocked tools/list: the server lists more than 10,000 tools."),
+    });
+    await vi.waitFor(() => expect(session.stderr()).toContain("mcpcage: blocked tools/list from notes: the server lists more than 10,000 tools. Nothing was pinned, and the session is locked."));
+    await session.close();
+    expect(existsSync(join(home, "servers", "notes", "pending.json"))).toBe(false);
+    expect(readFileSync(pinFile, "utf8")).toBe(pinned);
+    expect(auditEntries(home).filter((entry) => entry.event === "list-blocked")).toEqual([
+      expect.objectContaining({ reason: "too-many", count: 10_001, limit: 10_000 }),
+    ]);
+  });
+
+  it("still saves a change to pinned tools at the limit as pending", async () => {
+    const home = freshHome();
+    await fullPin(home);
+    const session = await connectFake(home, "reworded");
+    await expect(session.client.listTools()).rejects.toMatchObject({ code: BLOCKED, message: expect.stringContaining("changed since they were approved") });
+    await blockLogged(session);
+    await session.close();
+    const pending = JSON.parse(readFileSync(join(home, "servers", "notes", "pending.json"), "utf8")) as { tools: Array<{ name: string }> };
+    expect(pending.tools.map((tool) => tool.name)).toEqual(["add_note", "list_notes"]);
+  });
+});
+
 describe("requests from the server", () => {
   /** The answer the hostile server got to its request, which it prints on stderr. */
   async function answerToServer(session: { stderr: () => string }) {

@@ -10,7 +10,7 @@ import { isWrapped, moveHostEnv, unwrapConfig, unwrapEntry, wrapConfig, type Ser
 import { parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep, type Pin, type ToolDefinition } from "../src/manifest.js";
-import { approvePending, loadPin, savePending, savePin } from "../src/pinstore.js";
+import { approvePending, loadPin, pendingCount, savePending, savePin } from "../src/pinstore.js";
 import { dockerfile, parseMount, runArgs, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
 import { describeViolationsWithFindings } from "../src/suspicious.js";
 import { fakeUserEnv, mcpcageWithEnv } from "./helpers.js";
@@ -135,6 +135,44 @@ describe("manifest pinning", () => {
     expect(jsonChanges(tool, { ...tool, inputSchema: { type: "object", properties: { a: { type: "string" } } } })).toEqual([
       'inputSchema.properties.a.type: "number" -> "string"',
     ]);
+  });
+});
+
+describe("the pin limit at approval", () => {
+  const filler = Array.from({ length: 10_000 }, (_, n) => ({ name: `tool_${n}` }));
+  const oneMore = { name: "one_more", description: "One tool more." };
+
+  it("counts the pinned tools with the pending ones and the page", () => {
+    inFreshHome(() => {
+      const pin = pinTools("s", filler);
+      // Before, only the pending tools and the page were counted: 1, and the page was saved.
+      expect(pendingCount("s", [oneMore], pin)).toBe(10_001);
+      // A page that changes pinned tools adds nothing to the count.
+      expect(pendingCount("s", [{ name: "tool_0", description: "Changed." }], pin)).toBe(10_000);
+      savePending("s", [{ name: "waiting" }], [{ kind: "new-tool", name: "waiting", after: { name: "waiting" } }]);
+      expect(pendingCount("s", [oneMore], pin)).toBe(10_002);
+      expect(pendingCount("s", [oneMore], undefined)).toBe(2);
+    });
+  });
+
+  it("refuses to approve pending tools that would take the pin past 10,000, and leaves them pending", () => {
+    inFreshHome((home) => {
+      savePin(pinTools("s", filler));
+      // Saved as an older version saved it, which counted the pending tools alone.
+      savePending("s", [oneMore], [{ kind: "new-tool", name: "one_more", after: oneMore }]);
+      const pendingFile = join(home, "servers", "s", "pending.json");
+      const before = readFileSync(pendingFile, "utf8");
+      // Before, approving made a pin of 10,001.
+      expect(() => approvePending("s", () => {})).toThrow(
+        `approving the pending tools of s would pin 10,001 tools, more than the 10,000 one server may have, so nothing was approved. Delete ${pendingFile} to discard them.`,
+      );
+      expect(Object.keys(loadPin("s")!.tools)).toHaveLength(10_000);
+      expect(readFileSync(pendingFile, "utf8")).toBe(before);
+      // Up to the limit, approving merges as before.
+      savePin(pinTools("s", filler.slice(1)));
+      expect(Object.keys(approvePending("s", () => {})!.tools)).toHaveLength(10_000);
+      expect(existsSync(pendingFile)).toBe(false);
+    });
   });
 });
 

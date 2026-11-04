@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { MAX_DEPTH, nestedDeeperThan, own, pinTools, tooDeep, type Pin, type ToolDefinition, type Violation } from "./manifest.js";
+import { MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, own, pinTools, tooDeep, type Pin, type ToolDefinition, type Violation } from "./manifest.js";
 import { cageHome, serverDir } from "./paths.js";
 import { terminalSafe } from "./terminal.js";
 
@@ -56,14 +56,21 @@ function previousPending(serverId: string): Pending | undefined {
   return loaded && !tooDeep(pendingDefinitions(loaded)) ? loaded : undefined;
 }
 
-/**
- * How many tools the pending manifest would hold once `tools` are saved, merged by name as savePending
- * merges them. The proxy refuses a page that would take it past MAX_TOOLS.
- */
-export function pendingCount(serverId: string, tools: ToolDefinition[]): number {
-  const names = new Set((previousPending(serverId)?.tools ?? []).map((tool) => tool.name));
+/** How many tools `pin` holds once `tools` are approved on top of it: approving merges them by name. */
+export function approvedCount(pin: Pin | undefined, tools: ToolDefinition[]): number {
+  const names = new Set(pin ? Object.keys(pin.tools) : []);
   for (const tool of tools) names.add(tool.name);
   return names.size;
+}
+
+/**
+ * How many tools the pin would hold once `tools` are saved as pending, merged by name as savePending
+ * merges them, and approved on top of `pin`. The proxy refuses a page that would take it past
+ * MAX_TOOLS. The pending tools were counted alone before: one new tool was saved next to a pin of
+ * 10,000, and approving it made a pin of 10,001.
+ */
+export function pendingCount(serverId: string, tools: ToolDefinition[], pin: Pin | undefined): number {
+  return approvedCount(pin, [...(previousPending(serverId)?.tools ?? []), ...tools]);
 }
 
 /** Pagination can deliver a manifest in pieces: pending tools accumulate until approved. */
@@ -88,10 +95,26 @@ export function savePending(serverId: string, tools: ToolDefinition[], violation
 export function approvePending(serverId: string, warn?: (message: string) => void): Pin | undefined {
   const pending = loadPending(serverId);
   if (!pending) return undefined;
-  const pin = pinTools(serverId, pending.tools, loadPin(serverId, warn));
+  const approved = loadPin(serverId, warn);
+  refuseTooMany(serverId, approved, pending);
+  const pin = pinTools(serverId, pending.tools, approved);
   savePin(pin);
   rmSync(join(serverDir(serverId), "pending.json"), { force: true });
   return pin;
+}
+
+/**
+ * Approving `pending` on top of `pin` may not take it past MAX_TOOLS, which the proxy never pins past
+ * either: a pending manifest saved by an older version, which counted the pending tools alone, can.
+ * The refusal leaves the pending manifest as it is.
+ */
+export function refuseTooMany(serverId: string, pin: Pin | undefined, pending: Pending): void {
+  const count = approvedCount(pin, pending.tools);
+  if (count <= MAX_TOOLS) return;
+  throw new Error(
+    `approving the pending tools of ${serverId} would pin ${count.toLocaleString("en-US")} tools, more than the ${MAX_TOOLS.toLocaleString("en-US")} one server may have, so nothing was approved. ` +
+      `Delete ${join(serverDir(serverId), "pending.json")} to discard them.`,
+  );
 }
 
 export function listServers(): string[] {
