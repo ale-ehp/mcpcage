@@ -244,8 +244,8 @@ credentials. `--inspect` starts each npx server inside the cage, with its path a
 read-only and no network, lists its tools and runs the rules above on them. It reads the server
 with the proxy's limits: a line over 16 MiB is dropped, and a server that lists more than 10,000
 tools, or a definition nested more than 256 levels deep, is reported as refused rather than read.
-It mounts the sensitive paths too, only for that listing: in that time a server could copy what it
-reads there into its tool descriptions or its error output, and the report prints parts of both.
+It never mounts a sensitive path: the server is inspected without it, and the report says so
+(`inspected without ~/.ssh: your SSH keys in ~/.ssh`).
 `--fix` prints the plan, asks for the word `yes` (or takes `--yes`), rewrites only the server
 entries of each file in the file's own style, leaves a server that needs a sensitive path as it is
 (with the reason), keeps a backup (`<file>.mcpcage.bak`) and replaces the file atomically.

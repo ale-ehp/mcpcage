@@ -526,6 +526,62 @@ describe("inspection sandbox", () => {
     }
     expect(() => inspectionSandbox({ argv: ["uvx", "mcp-server-time"], env: {} })).toThrow("only npx servers can be inspected");
   });
+
+  it("mounts a path as it is written: a final :rw names a directory, never makes a mount writable", () => {
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+    // Both exist: parseMount read the argument as ~/.ssh with the option rw, and mounted the keys writable.
+    mkdirSync(join(home, ".ssh"));
+    mkdirSync(join(home, ".ssh:rw"));
+    vi.stubEnv("HOME", home);
+    try {
+      const options = inspectionSandbox({ argv: ["npx", "-y", "@modelcontextprotocol/server-filesystem", join(home, ".ssh:rw")], env: {} });
+      expect(options.mounts).toEqual([{ source: join(home, ".ssh:rw"), target: join(home, ".ssh:rw"), readOnly: true }]);
+      expect(options.spec.args).toEqual([join(home, ".ssh:rw")]);
+      const mounts = runArgs(options, "image").filter((arg) => arg.startsWith("type=bind"));
+      expect(mounts).toEqual([`type=bind,source=${join(home, ".ssh:rw")},target=${join(home, ".ssh:rw")},readonly`]);
+      expect(mounts.join("\n")).not.toContain(`source=${join(home, ".ssh")},`);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("never mounts a sensitive path, and the report says what the server was inspected without", async () => {
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+    const data = mkdtempSync(join(tmpdir(), "mcpcage-data-"));
+    mkdirSync(join(home, ".ssh"));
+    const file = join(home, "mcp.json");
+    writeJsonFile(file, {
+      mcpServers: {
+        keys: { command: "npx", args: ["-y", "keys-mcp", "~/.ssh", data] },
+        needy: { command: "npx", args: ["-y", "needy-mcp", join(home, ".ssh")] },
+        plain: { command: "npx", args: ["-y", "plain-mcp", data] },
+      },
+    });
+    vi.stubEnv("HOME", home);
+    try {
+      const options = inspectionSandbox({ argv: ["npx", "-y", "keys-mcp", "~/.ssh", data], env: {} });
+      expect(options.mounts).toEqual([{ source: data, target: data, readOnly: true }]);
+      // The server is still given the path; only the mount is left out.
+      expect(options.spec.args).toEqual([join(home, ".ssh"), data]);
+
+      const inspect = async (launch: { argv: string[] }) => {
+        if (launch.argv.includes("needy-mcp")) throw new Error(`the server stopped before listing its tools (exit code 1): ENOENT ${join(home, ".ssh")}`);
+        return [{ name: "read", description: "Read a file." }];
+      };
+      const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+      const report = await scanConfigs({ locations: [location], home, offline: true, cacheDir: join(home, "cache"), npmRunner: noNpm, inspect });
+      const skipped = [{ path: join(home, ".ssh"), reason: "your SSH keys in ~/.ssh" }];
+      expect(report.servers.map((server) => server.inspection?.skipped)).toEqual([skipped, skipped, undefined]);
+      expect(report.servers[1]!.inspection!.error).toContain("the server stopped before listing its tools");
+
+      const text = renderReport(report, { home });
+      expect(text).toContain("                inspected without ~/.ssh: your SSH keys in ~/.ssh\n                tools: 1, no signs of hidden instructions\n");
+      expect(text).toContain("                inspected without ~/.ssh: your SSH keys in ~/.ssh\n                could not inspect: the server stopped before listing its tools");
+      expect(text.match(/inspected without/g)).toHaveLength(2);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 describe("install scripts", () => {

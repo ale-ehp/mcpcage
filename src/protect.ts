@@ -4,11 +4,11 @@ import { posix, win32 } from "node:path";
 import { claudeCodeSections, type ClientId, type ConfigLocation } from "./clients.js";
 import { hostPath, isWrapped, replaceFile, serverType, wrapEntry, type ServerEntry, type ServerType } from "./config.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
-import { parseLaunch, serverIdFor } from "./launch.js";
+import { parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, tooDeep, type ToolDefinition } from "./manifest.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
-import { parseMount, type SandboxOptions } from "./sandbox.js";
+import type { SandboxOptions } from "./sandbox.js";
 import { sensitivePath } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
 
@@ -39,7 +39,13 @@ export interface ServerReport {
   /** Arguments and --mount paths, as written, that open the whole disk, the whole home directory or a directory with credentials. */
   broadAccess: string[];
   installScripts?: InstallScripts;
-  inspection?: { tools: number; findings: Finding[]; error?: string };
+  /** `skipped`: the path arguments the inspection did not mount, because they are sensitive (see sensitive.ts). */
+  inspection?: { tools: number; findings: Finding[]; error?: string; skipped?: SkippedPath[] };
+}
+
+export interface SkippedPath {
+  path: string;
+  reason: string;
 }
 
 export type ScannedFile = ConfigLocation & { error?: string; servers: number };
@@ -134,15 +140,19 @@ async function describeServer(
 
 async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEntry, hidden: string[]): Promise<NonNullable<ServerReport["inspection"]>> {
   const env = stringValues(entry.env);
+  // Reported whether the server lists its tools or not: one that needs the path left out may not start.
+  const npm = npmLaunch(argv);
+  const skipped = npm ? inspectionPlan(npm).skipped : [];
+  const left = skipped.length > 0 ? { skipped } : {};
   try {
     const tools = await inspect({ argv, env });
     // The proxy refuses such a listing whole, so the report does not read it either.
     const deep = tooDeep(tools);
     if (deep) throw new Error(`the definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep, which mcpcage refuses`);
-    return { tools: tools.length, findings: findingsIn(tools) };
+    return { tools: tools.length, findings: findingsIn(tools), ...left };
   } catch (error) {
     // The server's own error output may repeat a value it was given: no value reaches the report.
-    return { tools: 0, findings: [], error: hideValues(oneLine((error as Error).message), [...Object.values(env), ...hidden]) };
+    return { tools: 0, findings: [], error: hideValues(oneLine((error as Error).message), [...Object.values(env), ...hidden]), ...left };
   }
 }
 
@@ -157,18 +167,24 @@ function findingsIn(tools: ToolDefinition[]): Finding[] {
 /**
  * How `--inspect` starts one npx server: in its cage, without network, with its existing path
  * arguments mounted READ-ONLY at the same place and given as absolute paths, because some servers
- * (server-filesystem) check their directories at start. Nothing in the cage is writable.
+ * (server-filesystem) check their directories at start. Nothing in the cage is writable. A path is
+ * mounted as it is written: parseMount would read a final `:rw` as an option, and a server given a
+ * directory named `.ssh:rw` was inspected with the real ~/.ssh mounted writable.
  */
 export function inspectionSandbox(launch: { argv: string[]; env: Record<string, string> }): Omit<SandboxOptions, "log"> {
   const spec = parseLaunch(launch.argv);
   if (spec.kind !== "npm") throw new Error("only npx servers can be inspected");
-  const paths = spec.args.map((arg) => hostPath(arg));
-  const caged = { ...spec, args: spec.args.map((arg, index) => paths[index] ?? arg) };
+  const plan = inspectionPlan(spec);
+  const mounts = plan.mounted.map((path) => {
+    // docker's --mount takes comma-separated fields: `mcpcage run` refuses such a path too (parseMount).
+    if (path.includes(",")) throw new Error(`paths containing commas are not supported (${path})`);
+    return { source: path, target: path, readOnly: true };
+  });
   return {
     // The id `mcpcage run` gives the entry once caged, so the image built now is the one it reuses.
-    serverId: serverIdFor(caged),
-    spec: caged,
-    mounts: [...new Set(paths.filter((path): path is string => path !== undefined))].map((path) => parseMount(path)),
+    serverId: serverIdFor(plan.spec),
+    spec: plan.spec,
+    mounts,
     // The values reach only the container, which has no network; they are never printed.
     env: Object.entries(launch.env).map(([name, value]) => `${name}=${value}`),
     allowNet: false,
@@ -177,6 +193,36 @@ export function inspectionSandbox(launch: { argv: string[]; env: Record<string, 
     keepImageUser: false,
     rebuild: false,
   };
+}
+
+/**
+ * The server as an inspection starts it, its existing path arguments made absolute, and which of
+ * them are mounted: every one but those that sensitive.ts refuses, which `wrap` and `--fix` refuse
+ * too, and which an inspection leaves out rather than open to a server nobody has looked at yet.
+ * The server is still given the argument.
+ */
+function inspectionPlan(spec: NpmLaunch): { spec: NpmLaunch; mounted: string[]; skipped: SkippedPath[] } {
+  const paths = spec.args.map((arg) => hostPath(arg));
+  const mounted: string[] = [];
+  const skipped: SkippedPath[] = [];
+  for (const path of new Set(paths.filter((path): path is string => path !== undefined))) {
+    const reason = sensitivePath(path, { home: homedir(), platform: process.platform, cage: cageHome() });
+    if (reason === undefined) mounted.push(path);
+    else skipped.push({ path, reason });
+  }
+  return { spec: { ...spec, args: spec.args.map((arg, index) => paths[index] ?? arg) }, mounted, skipped };
+}
+
+type NpmLaunch = Extract<LaunchSpec, { kind: "npm" }>;
+
+/** The npx launch of a command line, or undefined for one that `mcpcage run` would not start. */
+function npmLaunch(argv: string[]): NpmLaunch | undefined {
+  try {
+    const spec = parseLaunch(argv);
+    return spec.kind === "npm" ? spec : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** A server that runs on this machine with the user's permissions: npx outside mcpcage, or `mcpcage run --no-sandbox`. */
@@ -249,6 +295,7 @@ function serverLines(server: ServerReport, home: string): string[] {
   for (const path of server.broadAccess) details.push(`access: ${printable(path)}: ${broadAccessKind(path, home) ?? "a broad path"}`);
   if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(printable).join(", ")}`);
   if (server.installScripts) details.push(installLine(server.installScripts));
+  for (const skipped of server.inspection?.skipped ?? []) details.push(`inspected without ${printable(tilde(skipped.path, home))}: ${printable(skipped.reason)}`);
   const findings: string[] = [];
   if (server.inspection?.error !== undefined) {
     details.push(`could not inspect: ${printable(server.inspection.error)}`);

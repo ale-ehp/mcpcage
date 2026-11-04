@@ -36,10 +36,10 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
    entries of a file after writing a backup next to it; everything else in the file is kept.
 2. **mcpcage and the container.** The server's process, files and network live behind Docker's
    isolation. mcpcage only parses newline-delimited JSON from it and never executes what it sends.
-   `--inspect` starts a server in the same cage, with its path arguments mounted read-only, only to
-   read its tool list. It reads that list with the same limits as the proxy: a line over 16 MiB is
-   dropped, and more than 10,000 tools, or a definition nested more than 256 levels deep, is
-   reported as refused, not read.
+   `--inspect` starts a server in the same cage, with its path arguments mounted read-only as
+   written and the sensitive ones left out, only to read its tool list. It reads that list with the
+   same limits as the proxy: a line over 16 MiB is dropped, and more than 10,000 tools, or a
+   definition nested more than 256 levels deep, is reported as refused, not read.
 3. **Build time and run time.** Building the image needs the npm registry; running it does not.
    Packages are fetched once, recorded by integrity hash and reused from the lockfile.
 4. **The report and the secrets it finds.** `protect` names the environment variables, headers
@@ -68,10 +68,8 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   project is open. The server can still change every other file there, code you later run
   included, and create such settings where none existed (a new nested repository, a project MCP
   configuration): a server that only needs to read should get a read-only mount.
-- **Sensitive paths during `protect --inspect`.** To list a server's tools, `--inspect` mounts its
-  path arguments read-only, without network, the sensitive ones included. In that time a server
-  could copy what it reads there into its tool descriptions or its error output, and the report
-  prints parts of both.
+- **Sensitive paths during `protect --inspect`.** Inspection never mounts them, and mounts every
+  other path argument read-only; the report names the paths a server was inspected without.
 - **Misuse of granted capabilities.** A filesystem server with a writable mount can still
   overwrite files in that mount when asked to, and create files that git, an editor or a build
   later reads as settings or runs as code; only the git and editor settings that already exist stay
