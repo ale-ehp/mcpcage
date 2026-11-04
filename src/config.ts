@@ -2,9 +2,9 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { isJsonObject } from "./jsonc.js";
 import { parseLaunch } from "./launch.js";
-import { cageHome } from "./paths.js";
-import { sensitivePath } from "./sensitive.js";
+import { sensitivePath, thisMachine } from "./sensitive.js";
 
 /** One MCP server entry, as Claude Desktop, Claude Code, Cursor, VS Code, Copilot, Windsurf and Devin store it. */
 export interface ServerEntry {
@@ -42,9 +42,58 @@ export function wrapConfig(file: string, options: { dryRun: boolean; command?: s
 }
 
 /**
+ * Variables of a server entry's `env` that act on the host once the entry starts mcpcage. A client
+ * starts an entry's command with the entry's `env` added to its environment: after `wrap` that
+ * command is mcpcage, so the `env` configures mcpcage's own process on the host, and the node,
+ * docker and npm it starts there, before any cage exists. `container` variables were written for the
+ * server, which keeps them: they become `--env NAME=value` arguments, whose value reaches the
+ * container only, and leave `env`. `drop` variables are not passed at all. Names are compared
+ * without case, as Windows compares them.
+ */
+export const HOST_ENV: ReadonlyArray<{ name: RegExp; to: "container" | "drop"; what: (name: string) => string }> = [
+  // Node reads them when it starts mcpcage: NODE_OPTIONS can preload a module (--import, --require)
+  // that runs on the host before mcpcage has read its first argument, and Node keeps adding more.
+  // NODE_ENV is the exception (see hostVariable).
+  { name: /^NODE_/i, to: "container", what: () => "can make Node run code on your machine before the cage starts" },
+  // The dynamic loaders of Linux and macOS read them in every program started on the host, node and
+  // docker included: LD_PRELOAD and DYLD_INSERT_LIBRARIES load a library of their choice into each.
+  { name: /^LD_/i, to: "container", what: () => "can load code into mcpcage on your machine before the cage starts" },
+  { name: /^DYLD_/i, to: "container", what: () => "can load code into mcpcage on your machine before the cage starts" },
+  // The docker command mcpcage runs reads them: DOCKER_HOST and DOCKER_CONTEXT send the build and the
+  // run, with the value of every --env, to another daemon; DOCKER_CONFIG chooses its plugins and
+  // credential helpers. A DOCKER_HOST of unix:// or npipe:// only names a local socket (see hostVariable).
+  {
+    name: /^DOCKER_/i,
+    to: "container",
+    what: (name) => `${/^DOCKER_(HOST|CONTEXT)$/i.test(name) ? "chooses" : "configures"} the Docker that builds and runs the cage`,
+  },
+  // npm reads them, in both spellings, when mcpcage runs it on the host to pack a local package.
+  { name: /^npm_config_/i, to: "container", what: () => "configures npm, which mcpcage runs on your machine" },
+  // The cage sets its own HOME, and the home directory is where the sensitive places are looked for:
+  // pointed at an empty directory, it would make ~/.ssh an ordinary path for mcpcage.
+  { name: /^(HOME|USERPROFILE)$/i, to: "drop", what: () => "changes the home directory mcpcage protects" },
+  // mcpcage's store is the user's choice, not a server's: pointed at an empty store, trust on first
+  // use approves whatever the server lists, and the audit log lands where `audit` never looks.
+  { name: /^MCPCAGE_HOME$/i, to: "drop", what: () => "moves mcpcage's pins and audit log, so approvals start over" },
+];
+
+/** What a variable of an entry's `env` would do on the host once the entry starts mcpcage, or undefined for one meant only for the server. */
+export function hostVariable(name: string, value: unknown): { to: "container" | "drop"; what: string } | undefined {
+  // A local socket, the usual way to reach Docker: it chooses no other daemon than the user's own.
+  if (/^DOCKER_HOST$/i.test(name) && typeof value === "string" && /^(?:unix|npipe):\/\//i.test(value)) return undefined;
+  // Node never reads NODE_ENV: it is the application's own setting, which many servers are given
+  // (NODE_ENV=production), so it stays an ordinary variable instead of a false alarm on each of them.
+  if (/^NODE_ENV$/i.test(name)) return undefined;
+  const rule = HOST_ENV.find((candidate) => candidate.name.test(name));
+  return rule === undefined ? undefined : { to: rule.to, what: rule.what(name) };
+}
+
+/**
  * One entry rewritten to start through `mcpcage run`, or why it cannot be. Environment variables
  * become explicit `--env NAME` flags, because nothing from the host reaches the container unless it
- * is named. A path the server is given and that exists here becomes a writable mount at the same
+ * is named, and stay in `env`, so their values (credentials, often) never appear in the arguments.
+ * Those that would act on the host (HOST_ENV) leave `env`: into the cage as `--env NAME=value`, or
+ * not at all. A path the server is given and that exists here becomes a writable mount at the same
  * path, because the server is expected to work there: a filesystem server pointed at ~/notes would
  * otherwise find nothing inside the cage. Every other path, and the network, stay closed.
  * A `~/` argument becomes the absolute path that is mounted: inside the cage HOME is /tmp, so a
@@ -72,14 +121,89 @@ export function wrapEntry(entry: ServerEntry, options: { command: string }): { e
   // The server's own arguments end the list, after npx's flags and the package, which is never mounted.
   const npxPart = args.slice(0, args.length - serverArgs.length);
   const paths = serverArgs.map((arg) => hostPath(arg));
+  const machine = thisMachine();
   for (const path of paths) {
-    const reason = path === undefined ? undefined : sensitivePath(path, { home: homedir(), platform: process.platform, cage: cageHome(), path: process.env.PATH });
+    const reason = path === undefined ? undefined : sensitivePath(path, machine);
     if (reason !== undefined) return { skip: `needs ${path}, which mcpcage will not mount: ${reason}` };
   }
-  const envFlags = Object.keys(entry.env ?? {}).flatMap((variable) => ["--env", variable]);
+  const envFlags: string[] = [];
+  const env: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(isJsonObject(entry.env) ? entry.env : {})) {
+    const host = hostVariable(name, value);
+    if (host === undefined) {
+      envFlags.push("--env", name);
+      env[name] = value;
+    } else if (host.to === "container") {
+      envFlags.push("--env", `${name}=${String(value)}`);
+    }
+  }
   const mountFlags = [...new Set(paths.filter((path): path is string => path !== undefined))].flatMap((path) => ["--mount", `${path}:rw`]);
   const server = serverArgs.map((arg, index) => paths[index] ?? arg);
-  return { entry: { ...entry, command: options.command, args: ["run", ...envFlags, ...mountFlags, "--", entry.command, ...npxPart, ...server] } };
+  const wrapped: ServerEntry = { ...entry, command: options.command, args: ["run", ...envFlags, ...mountFlags, "--", entry.command, ...npxPart, ...server] };
+  if (isJsonObject(entry.env)) wrapped.env = env as Record<string, string>;
+  return { entry: wrapped };
+}
+
+/**
+ * A wrapped entry whose `env` sets variables that act on the host (HOST_ENV), rewritten as
+ * wrapEntry writes them: each moves to an `--env NAME=value` right after `run`, in place of an
+ * `--env NAME` that read it from mcpcage's own environment, or is dropped with that flag. The other
+ * arguments stay as they are. Undefined when the entry's `env` sets none.
+ */
+export function moveHostEnv(entry: ServerEntry): ServerEntry | undefined {
+  if (!isWrapped(entry) || !isJsonObject(entry.env)) return undefined;
+  const host = Object.entries(entry.env).flatMap(([name, value]) => {
+    const found = hostVariable(name, value);
+    return found === undefined ? [] : [{ name, value, to: found.to }];
+  });
+  if (host.length === 0) return undefined;
+  const names = new Set(host.map((variable) => variable.name));
+  const args = entry.args ?? [];
+  const separator = args.indexOf("--");
+  const own = args.slice(1, separator === -1 ? args.length : separator);
+  const kept: string[] = [];
+  for (let index = 0; index < own.length; index++) {
+    const arg = own[index]!;
+    if (arg === "--env" && names.has(own[index + 1]!)) index++;
+    else if (!(typeof arg === "string" && arg.startsWith("--env=") && names.has(arg.slice("--env=".length)))) kept.push(arg);
+  }
+  const moved = host.flatMap((variable) => (variable.to === "container" ? ["--env", `${variable.name}=${String(variable.value)}`] : []));
+  const env = Object.fromEntries(Object.entries(entry.env).filter(([name]) => !names.has(name))) as Record<string, string>;
+  return { ...entry, args: ["run", ...moved, ...kept, ...(separator === -1 ? [] : args.slice(separator))], env };
+}
+
+/**
+ * Each `--env NAME=value` (or `--env=NAME=value`) among mcpcage's own arguments, the ones before
+ * `--`: `index` is the argument that holds it, `prefix` what comes before NAME in that argument.
+ */
+export function envValues(args: unknown[]): Array<{ index: number; prefix: string; name: string; value: string }> {
+  const found: Array<{ index: number; prefix: string; name: string; value: string }> = [];
+  const separator = args.indexOf("--");
+  const end = separator === -1 ? args.length : separator;
+  for (let index = 0; index < end; index++) {
+    const arg = args[index];
+    let prefix: string;
+    let pair: unknown;
+    if (arg === "--env") {
+      prefix = "";
+      pair = args[++index];
+    } else if (typeof arg === "string" && arg.startsWith("--env=")) {
+      prefix = "--env=";
+      pair = arg.slice(prefix.length);
+    } else {
+      continue;
+    }
+    const equals = typeof pair === "string" && index < end ? pair.indexOf("=") : -1;
+    if (equals > 0) found.push({ index, prefix, name: (pair as string).slice(0, equals), value: (pair as string).slice(equals + 1) });
+  }
+  return found;
+}
+
+/** A wrapped command line as it can be printed: the value of each `--env NAME=value` left out. */
+export function withoutEnvValues(args: string[]): string[] {
+  const shown = [...args];
+  for (const { index, prefix, name } of envValues(args)) shown[index] = `${prefix}${name}=***`;
+  return shown;
 }
 
 /** The absolute path an argument names on this machine, when it exists here: `/x` as written, `~/x` expanded. */
@@ -104,7 +228,10 @@ export function serverType(entry: ServerEntry): ServerType {
   return "other";
 }
 
-/** Restores the original commands that `wrapConfig` replaced. */
+/**
+ * Restores the original commands that `wrapConfig` replaced. The values `wrap` moved into
+ * `--env NAME=value` go back to `env`, where the server finds them again.
+ */
 export function unwrapConfig(file: string, options: { dryRun: boolean }): WrapOutcome {
   return transform(file, options.dryRun, (name, entry, skip) => {
     if (!isWrapped(entry)) return skip(name, "not wrapped");
@@ -112,7 +239,10 @@ export function unwrapConfig(file: string, options: { dryRun: boolean }): WrapOu
     const separator = args.indexOf("--");
     const original = args.slice(separator + 1);
     if (separator === -1 || original.length === 0) return skip(name, "unexpected mcpcage arguments");
-    return { ...entry, command: original[0], args: original.slice(1) };
+    const restored: ServerEntry = { ...entry, command: original[0], args: original.slice(1) };
+    const moved = envValues(args);
+    if (moved.length > 0) restored.env = { ...(isJsonObject(entry.env) ? entry.env : {}), ...Object.fromEntries(moved.map((variable) => [variable.name, variable.value])) };
+    return restored;
   });
 }
 

@@ -2,14 +2,14 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 import { claudeCodeSections, type ClientId, type ConfigLocation } from "./clients.js";
-import { hostPath, isWrapped, replaceFile, serverType, wrapEntry, type ServerEntry, type ServerType } from "./config.js";
+import { envValues, hostPath, hostVariable, isWrapped, moveHostEnv, replaceFile, serverType, wrapEntry, type ServerEntry, type ServerType } from "./config.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, tooDeep, type ToolDefinition } from "./manifest.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
 import type { SandboxOptions } from "./sandbox.js";
-import { sensitivePath } from "./sensitive.js";
+import { accountHome, sensitivePath, thisMachine } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
 
 /*
@@ -38,6 +38,11 @@ export interface ServerReport {
   secrets: string[];
   /** Arguments and --mount paths, as written, that open the whole disk, the whole home directory or a directory with credentials. */
   broadAccess: string[];
+  /**
+   * For npx entries and wrapped ones: the variables of its `env` that act on this machine once the
+   * entry starts mcpcage (see HOST_ENV in config.ts), by name, with what each does. Never values.
+   */
+  hostEnv: Array<{ name: string; what: string }>;
   installScripts?: InstallScripts;
   /** `skipped`: the path arguments the inspection did not mount, because they are sensitive (see sensitive.ts). */
   inspection?: { tools: number; findings: Finding[]; error?: string; skipped?: SkippedPath[] };
@@ -121,12 +126,14 @@ async function describeServer(
     protectedByMcpcage: isWrapped(entry) && !withoutSandbox(entry),
     secrets: [...new Set([...secretNames(entry), ...shown.secrets])],
     broadAccess: type === "remote" ? [] : broadPaths(stringArgs(entry), options.home),
+    hostEnv: type === "npx" || type === "mcpcage" ? hostEnvOf(entry) : [],
   };
   const launch = npxCommand(entry, type);
   const npm = launch ? npmPackage(launch) : undefined;
   if (npm) server.packageSpec = npm.local ? `local package ${npm.spec}` : npm.spec;
-  // Install scripts matter where they would run: an npx server outside the cage.
-  if (isUncaged(server) && npm && !npm.local) {
+  // Install scripts matter where they would run: an npx server outside the cage. A caged one whose
+  // env acts on the host still installs in the cage, with the scripts disabled.
+  if ((type === "npx" || (type === "mcpcage" && !server.protectedByMcpcage)) && npm && !npm.local) {
     let lookup = lookups.get(npm.spec);
     if (!lookup) {
       lookup = installScripts(npm.spec, { offline: options.offline, cacheDir: options.cacheDir, runner: options.npmRunner });
@@ -139,7 +146,9 @@ async function describeServer(
 }
 
 async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEntry, hidden: string[]): Promise<NonNullable<ServerReport["inspection"]>> {
-  const env = stringValues(entry.env);
+  // A wrapped entry gives the server some of its variables as `--env NAME=value`: the cage gets them too.
+  const moved = isWrapped(entry) ? envValues(stringArgs(entry)) : [];
+  const env = { ...stringValues(entry.env), ...Object.fromEntries(moved.map((variable) => [variable.name, variable.value])) };
   // Reported whether the server lists its tools or not: one that needs the path left out may not start.
   const npm = npmLaunch(argv);
   const skipped = npm ? inspectionPlan(npm).skipped : [];
@@ -206,7 +215,7 @@ function inspectionPlan(spec: NpmLaunch): { spec: NpmLaunch; mounted: string[]; 
   const mounted: string[] = [];
   const skipped: SkippedPath[] = [];
   for (const path of new Set(paths.filter((path): path is string => path !== undefined))) {
-    const reason = sensitivePath(path, { home: homedir(), platform: process.platform, cage: cageHome() });
+    const reason = sensitivePath(path, thisMachine());
     if (reason === undefined) mounted.push(path);
     else skipped.push({ path, reason });
   }
@@ -225,9 +234,21 @@ function npmLaunch(argv: string[]): NpmLaunch | undefined {
   }
 }
 
-/** A server that runs on this machine with the user's permissions: npx outside mcpcage, or `mcpcage run --no-sandbox`. */
+/**
+ * A server that runs on this machine with the user's permissions: npx outside mcpcage, or
+ * `mcpcage run --no-sandbox`; or a caged one whose env runs on this machine, in mcpcage, first.
+ */
 export function isUncaged(server: ServerReport): boolean {
-  return server.type === "npx" || (server.type === "mcpcage" && !server.protectedByMcpcage);
+  return server.type === "npx" || (server.type === "mcpcage" && (!server.protectedByMcpcage || server.hostEnv.length > 0));
+}
+
+/** The variables of an entry's env that act on the host once it starts mcpcage, with what each does. */
+function hostEnvOf(entry: ServerEntry): ServerReport["hostEnv"] {
+  if (!isJsonObject(entry.env)) return [];
+  return Object.entries(entry.env).flatMap(([name, value]) => {
+    const host = hostVariable(name, value);
+    return host === undefined ? [] : [{ name, what: host.what }];
+  });
 }
 
 /** `mcpcage run --no-sandbox -- ...`: pinned and audited, but started on the host without isolation. */
@@ -295,6 +316,8 @@ function serverLines(server: ServerReport, home: string): string[] {
   for (const path of server.broadAccess) details.push(`access: ${printable(path)}: ${broadAccessKind(path, home) ?? "a broad path"}`);
   if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(printable).join(", ")}`);
   if (server.installScripts) details.push(installLine(server.installScripts));
+  // Before what --inspect found, whose signs belong under its own line.
+  for (const variable of server.hostEnv) details.push(`env ${printable(variable.name)}: ${variable.what}`);
   for (const skipped of server.inspection?.skipped ?? []) details.push(`inspected without ${printable(tilde(skipped.path, home))}: ${printable(skipped.reason)}`);
   const findings: string[] = [];
   if (server.inspection?.error !== undefined) {
@@ -317,7 +340,8 @@ function status(server: ServerReport): string {
     case "npx":
       return "NOT CAGED";
     case "mcpcage":
-      return server.protectedByMcpcage ? "caged" : "mcpcage --no-sandbox: pinning and audit only, no isolation";
+      if (!server.protectedByMcpcage) return "mcpcage --no-sandbox: pinning and audit only, no isolation";
+      return server.hostEnv.length > 0 ? "caged, but its env runs on your machine" : "caged";
     case "remote":
       return "remote, nothing to cage";
     case "docker":
@@ -350,7 +374,7 @@ function summary(report: ProtectReport): string[] {
   const present = report.files.filter((file) => file.exists).length;
   const uncaged = count(isUncaged);
   const elsewhere = count((server) => server.type !== "npx" && server.type !== "mcpcage");
-  const caged = count((server) => server.type === "mcpcage" && server.protectedByMcpcage);
+  const caged = count((server) => server.type === "mcpcage" && !isUncaged(server));
   const scripts = count((server) => server.installScripts?.status === "found");
   const run = `  ${many(uncaged, "runs", "run")} on your machine with your permissions and no cage.`;
   const lines = [
@@ -378,7 +402,8 @@ function summary(report: ProtectReport): string[] {
 
 export interface FixedFile {
   file: string;
-  changed: Array<{ name: string; label?: string; after: ServerEntry }>;
+  /** `envOnly`: an entry already caged whose env moved off the host; its image stays the same. */
+  changed: Array<{ name: string; label?: string; after: ServerEntry; envOnly?: boolean }>;
   skipped: Array<{ name: string; label?: string; reason: string }>;
   /** Why the whole file was left as it is. */
   refused?: string;
@@ -402,9 +427,10 @@ export interface FixOptions {
 }
 
 /**
- * Rewrites the report's npx servers to start through `mcpcage run`, file by file. Each file is read
- * again right before it changes; only its server entries change, in the file's own style, with a
- * backup next to it and an atomic replace.
+ * Rewrites the report's npx servers to start through `mcpcage run`, and moves the env that would
+ * run on this machine out of the caged ones (see moveHostEnv), file by file. Each file is read again
+ * right before it changes; only its server entries change, in the file's own style, with a backup
+ * next to it and an atomic replace.
  */
 export function fixConfigs(options: FixOptions): FixOutcome {
   const home = options.home ?? homedir();
@@ -412,7 +438,7 @@ export function fixConfigs(options: FixOptions): FixOutcome {
   for (const file of options.report.files) {
     if (!file.exists || file.error !== undefined) continue;
     const servers = options.report.servers.filter((server) => server.file === file.file);
-    const targets = servers.filter((server) => server.type === "npx");
+    const targets = servers.filter((server) => server.type === "npx" || (server.type === "mcpcage" && server.protectedByMcpcage && server.hostEnv.length > 0));
     // Already wrapped, so there is nothing to rewrite: only the person who chose --no-sandbox can drop it.
     const onHost = servers.filter((server) => server.type === "mcpcage" && !server.protectedByMcpcage);
     if (targets.length > 0 || onHost.length > 0) files.push(fixFile(file, targets, onHost, options, home));
@@ -437,16 +463,20 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   }
   const text = bytes.toString("utf8");
 
+  // The variables each rewrite takes out of an entry's env, which a rewrite by hand must take out too.
+  const removed = new Map<ServerEntry, string[]>();
   for (const server of targets) {
     const servers = valueAt(config, server.label === undefined ? [file.key] : ["projects", server.label, "mcpServers"]);
     const entry = isJsonObject(servers) && Object.hasOwn(servers, server.name) ? servers[server.name] : undefined;
-    const wrapped = isJsonObject(servers) && isJsonObject(entry) ? wrapEntry(entry as ServerEntry, { command: options.command }) : { skip: "it is no longer in the file" };
+    const wrapped = !isJsonObject(servers) || !isJsonObject(entry) ? { skip: "it is no longer in the file" } : rewrite(entry as ServerEntry, options.command);
     if ("skip" in wrapped) {
       fixed.skipped.push({ name: server.name, label: server.label, reason: wrapped.skip });
       continue;
     }
     (servers as Record<string, unknown>)[server.name] = wrapped.entry;
-    fixed.changed.push({ name: server.name, label: server.label, after: wrapped.entry });
+    fixed.changed.push({ name: server.name, label: server.label, after: wrapped.entry, ...(server.type === "mcpcage" ? { envOnly: true } : {}) });
+    const before = isJsonObject((entry as ServerEntry).env) ? Object.keys((entry as ServerEntry).env!) : [];
+    removed.set(wrapped.entry, before.filter((name) => !Object.hasOwn(wrapped.entry.env ?? {}, name)));
   }
   for (const server of onHost) {
     fixed.skipped.push({ name: server.name, label: server.label, reason: "it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand" });
@@ -455,9 +485,11 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   if (fixed.changed.length === 0) return fixed;
 
   // When the file cannot be rewritten, the exact command each server should run instead.
-  const byHand = fixed.changed.map(
-    (change) => `    ${printable(change.name)}${change.label === undefined ? "" : ` (project ${printable(change.label)})`}: ${printable(shownCommand(change.after, "mcpcage").line)}`,
-  );
+  const byHand = fixed.changed.flatMap((change) => {
+    const line = `    ${printable(change.name)}${change.label === undefined ? "" : ` (project ${printable(change.label)})`}: ${printable(shownCommand(change.after, "mcpcage").line)}`;
+    const names = removed.get(change.after) ?? [];
+    return names.length === 0 ? [line] : [line, `      and remove from its "env": ${names.map(printable).join(", ")}`];
+  });
   if (byHand.some((line) => line.includes(MASK))) byHand.push(`    (${MASK} stands for the value already in the file, which is not shown)`);
   if (hasComments(text)) {
     fixed.refused = "it has comments";
@@ -479,6 +511,13 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const change of fixed.changed) options.log(`  ${options.dryRun ? "cage" : "caged"} ${printable(change.name)} in ${where(change.label)}`);
   if (fixed.backup) options.log(`  backup: ${printable(file.scope === "user" ? tilde(fixed.backup, home) : fixed.backup)}`);
   return fixed;
+}
+
+/** An npx entry wrapped, or a caged entry with its env moved off the host; or why it stays as it is. */
+function rewrite(entry: ServerEntry, command: string): { entry: ServerEntry } | { skip: string } {
+  if (serverType(entry) !== "mcpcage") return wrapEntry(entry, { command });
+  const moved = moveHostEnv(entry);
+  return moved === undefined ? { skip: "its env no longer runs on your machine" } : { entry: moved };
 }
 
 /** JSON in the file's own style: its indentation unit, line endings, final newline and byte order mark. */
@@ -539,17 +578,29 @@ function shownCommand(entry: ServerEntry, type: ServerType): { line: string; sec
     return { line: masked.shown || `(${String(entry.type)} server)`, secrets: masked.hidden.length > 0 ? [field] : [], hidden: masked.hidden };
   }
   if (typeof entry.command !== "string" || entry.command === "") return { line: NO_COMMAND, secrets: [], hidden: [] };
-  const masked = maskArgs(stringArgs(entry));
+  const masked = maskArgs(stringArgs(entry), type === "mcpcage");
   return { line: [entry.command, ...masked.shown].map((part) => (part === "" || /\s/.test(part) ? `"${part}"` : part)).join(" "), ...masked };
 }
 
-/** `--api-key sk-...`, `--token=...`, `API_KEY=...`, `Authorization: Bearer ...` and credentials in addresses, masked. */
-function maskArgs(args: string[]): { shown: string[]; secrets: string[]; hidden: string[] } {
+/**
+ * `--api-key sk-...`, `--token=...`, `API_KEY=...`, `Authorization: Bearer ...` and credentials in
+ * addresses, masked. In a wrapped entry, every `--env NAME=value` of mcpcage's own is masked: it is a
+ * value of the env, moved there by `wrap`, and it counts as a secret when it looks like one.
+ */
+function maskArgs(args: string[], wrapped = false): { shown: string[]; secrets: string[]; hidden: string[] } {
   const shown = [...args];
   const secrets: string[] = [];
   const hidden: string[] = [];
+  const env = new Map(wrapped ? envValues(args).map((variable) => [variable.index, variable]) : []);
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
+    const variable = env.get(index);
+    if (variable !== undefined) {
+      shown[index] = `${variable.prefix}${variable.name}=${MASK}`;
+      hidden.push(variable.value);
+      if (SECRET_NAME.test(variable.name) && looksLikeSecret(variable.value)) secrets.push(variable.name);
+      continue;
+    }
     const next = args[index + 1];
     if (/^--?[\w.-]+$/.test(arg) && SECRET_NAME.test(arg) && next !== undefined && !next.startsWith("-") && looksLikeSecret(next)) {
       shown[index + 1] = MASK;
@@ -641,13 +692,14 @@ function broadPaths(args: string[], home: string): string[] {
 /**
  * Plain words for a path that opens the whole disk, the whole home directory or more, or a directory
  * with credentials, as sensitive.ts decides for every mount; undefined for an ordinary one. A home
- * directory written like C:\Users\me means Windows paths. This machine's PATH counts only for paths
- * of this machine's kind: it is written in that syntax.
+ * directory written like C:\Users\me means Windows paths. This machine's PATH and the account's own
+ * home directory (which counts whatever HOME says) count only for paths of this machine's kind: they
+ * are written in that syntax.
  */
 export function broadAccessKind(path: string, home: string): string | undefined {
   const platform = /^[A-Za-z]:/.test(home) ? "win32" : process.platform === "win32" ? "linux" : process.platform;
-  const pathEnv = platform === process.platform ? process.env.PATH : undefined;
-  return sensitivePath(expandHome(path, home), { home, platform, cage: cageHome(), path: pathEnv });
+  const here = platform === process.platform;
+  return sensitivePath(expandHome(path, home), { home, account: here ? accountHome() : undefined, platform, cage: cageHome(), path: here ? process.env.PATH : undefined });
 }
 
 function expandHome(path: string, home: string): string {

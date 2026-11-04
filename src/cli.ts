@@ -9,7 +9,7 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
 import { discoverConfigs } from "./clients.js";
-import { unwrapConfig, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
+import { unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
@@ -322,7 +322,8 @@ async function protect(argv: string[]): Promise<number> {
   const changed = outcome.files.flatMap((file) => file.changed);
   const status = changed.length < uncaged ? 1 : 0;
   // A failed build is reported and leaves the configuration caged: the image is built at the next start.
-  return values["no-build"] ? status : Math.max(status, buildImages(changed));
+  // An entry that was caged already, and only had its env moved, keeps the image it has.
+  return values["no-build"] ? status : Math.max(status, buildImages(changed.filter((change) => !change.envOnly)));
 }
 
 /** `--inspect`: the server starts in its cage (no network, its paths read-only) only to list its tools. */
@@ -351,7 +352,9 @@ function claudeCodeIsRunning(): boolean {
 function report(outcome: WrapOutcome, command: string, dryRun: boolean): void {
   console.log(`${outcome.file} (${outcome.key})${dryRun ? " [dry run]" : ""}`);
   for (const change of outcome.changed) {
-    console.log(`  ${command === "wrap" ? "caged" : "restored"} ${change.name}: ${[change.after.command, ...(change.after.args ?? [])].join(" ")}`);
+    // The values wrap moved from the env into mcpcage's arguments are not printed, as no env value is.
+    const args = change.after.args ?? [];
+    console.log(`  ${command === "wrap" ? "caged" : "restored"} ${change.name}: ${[change.after.command, ...(command === "wrap" ? withoutEnvValues(args) : args)].join(" ")}`);
   }
   for (const skipped of outcome.skipped) console.log(`  skipped ${skipped.name}: ${skipped.reason}`);
   if (outcome.backup) console.log(`  backup: ${outcome.backup}`);

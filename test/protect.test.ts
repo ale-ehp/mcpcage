@@ -1,7 +1,9 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
+import { dirname, isAbsolute, join, relative } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
 import { discoverConfigs, type ClientId } from "../src/clients.js";
@@ -11,9 +13,10 @@ import { hasComments, parseJsonc } from "../src/jsonc.js";
 import { parseLaunch, serverIdFor } from "../src/launch.js";
 import { tooDeep } from "../src/manifest.js";
 import { installScripts } from "../src/npm-scripts.js";
+import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs } from "../src/protect.js";
 import { runArgs } from "../src/sandbox.js";
-import { fakeServer, fakeUserEnv, hostileServer, mcpcageWithEnv, root } from "./helpers.js";
+import { cli, fakeServer, fakeUserEnv, hostileServer, mcpcageWithEnv, root } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
 const noNpm = () => ({ status: 0, stdout: "", stderr: "" });
@@ -381,6 +384,97 @@ describe("wrapping one entry", () => {
     expect(wrapEntry({ command: "npx", args: ["--registry", "x", "pkg"] }, { command: "mcpcage" })).toEqual({ skip: "unsupported npx flag --registry" });
     expect(wrapEntry({ serverUrl: "https://x" }, { command: "mcpcage" })).toEqual({ skip: "remote server: nothing runs locally to cage" });
   });
+
+  it("moves the env that would act on the host into the cage as NAME=value, drops HOME and MCPCAGE_HOME, and keeps the rest as before", () => {
+    const env = {
+      API_KEY: "sk-live-0123456789abcdef",
+      NODE_OPTIONS: "--import ./preload.mjs",
+      LD_PRELOAD: "/tmp/hook.so",
+      DYLD_INSERT_LIBRARIES: "/tmp/hook.dylib",
+      DOCKER_HOST: "tcp://203.0.113.7:2375",
+      DOCKER_CONTEXT: "elsewhere",
+      npm_config_registry: "https://registry.example.com/",
+      NPM_CONFIG_USERCONFIG: "/tmp/npmrc",
+      HOME: "/tmp/decoy",
+      USERPROFILE: "C:\\decoy",
+      MCPCAGE_HOME: "/tmp/empty-store",
+      PATH: "/opt/homebrew/bin:/usr/bin:/bin",
+    };
+    expect(wrapEntry({ command: "npx", args: ["-y", "pkg"], env }, { command: "mcpcage" })).toEqual({
+      entry: {
+        command: "mcpcage",
+        args: [
+          "run",
+          "--env", "API_KEY",
+          "--env", "NODE_OPTIONS=--import ./preload.mjs",
+          "--env", "LD_PRELOAD=/tmp/hook.so",
+          "--env", "DYLD_INSERT_LIBRARIES=/tmp/hook.dylib",
+          "--env", "DOCKER_HOST=tcp://203.0.113.7:2375",
+          "--env", "DOCKER_CONTEXT=elsewhere",
+          "--env", "npm_config_registry=https://registry.example.com/",
+          "--env", "NPM_CONFIG_USERCONFIG=/tmp/npmrc",
+          "--env", "PATH",
+          "--", "npx", "-y", "pkg",
+        ],
+        // A credential keeps its value out of the arguments; PATH is what lets the client find node.
+        env: { API_KEY: env.API_KEY, PATH: env.PATH },
+      },
+    });
+    // A unix:// or npipe:// DOCKER_HOST only names the local socket: it stays like any other variable.
+    for (const socket of ["unix:///var/run/docker.sock", "npipe:////./pipe/docker_engine"]) {
+      expect(wrapEntry({ command: "npx", args: ["-y", "pkg"], env: { DOCKER_HOST: socket } }, { command: "mcpcage" })).toEqual({
+        entry: { command: "mcpcage", args: ["run", "--env", "DOCKER_HOST", "--", "npx", "-y", "pkg"], env: { DOCKER_HOST: socket } },
+      });
+    }
+  });
+
+  it("keeps NODE_ENV as an ordinary variable, which Node never reads, and moves NODE_OPTIONS next to it", () => {
+    const env = { NODE_ENV: "production", NODE_OPTIONS: "--max-old-space-size=4096" };
+    expect(wrapEntry({ command: "npx", args: ["-y", "pkg"], env }, { command: "mcpcage" })).toEqual({
+      entry: { command: "mcpcage", args: ["run", "--env", "NODE_ENV", "--env", "NODE_OPTIONS=--max-old-space-size=4096", "--", "npx", "-y", "pkg"], env: { NODE_ENV: "production" } },
+    });
+  });
+
+  it("never lets an entry's NODE_OPTIONS run code on the host when the client starts mcpcage", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-preload-"));
+    const marker = join(dir, "ran-on-the-host");
+    const preload = join(dir, "preload.mjs");
+    writeFileSync(preload, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "ran");\n`);
+    const entry = { command: "npx", args: ["-y", "pkg"], env: { NODE_OPTIONS: `--import ${pathToFileURL(preload).href}` } };
+    const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
+    // What a client does: start the entry's command with the entry's env added to its own.
+    const start = (added: Record<string, string> | undefined) =>
+      spawnSync(process.execPath, [cli, "--version"], { encoding: "utf8", env: { ...process.env, ...added } });
+
+    // The control: with the env as it was, the preload runs on the host, before mcpcage reads anything.
+    const before = start(entry.env);
+    expect(before.stdout.trim(), before.stderr).toBe(version);
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+
+    const wrapped = wrapEntry(entry, { command: "mcpcage" });
+    if (!("entry" in wrapped)) throw new Error(wrapped.skip);
+    const after = start(wrapped.entry.env);
+    expect(after.status, after.stderr).toBe(0);
+    expect(after.stdout.trim()).toBe(version);
+    expect(existsSync(marker)).toBe(false);
+    // The server still gets it, in the cage only.
+    expect(wrapped.entry.args).toEqual(["run", "--env", `NODE_OPTIONS=${entry.env.NODE_OPTIONS}`, "--", "npx", "-y", "pkg"]);
+  });
+
+  it("makes a relative MCPCAGE_HOME absolute, so a server given that store is refused", () => {
+    const store = mkdtempSync(join(tmpdir(), "mcpcage-store-"));
+    vi.stubEnv("MCPCAGE_HOME", relative(process.cwd(), store));
+    try {
+      expect(isAbsolute(cageHome())).toBe(true);
+      expect(cageHome()).toBe(store);
+      expect(wrapEntry({ command: "npx", args: ["-y", "rogue", store] }, { command: "mcpcage" })).toEqual({
+        skip: `needs ${store}, which mcpcage will not mount: mcpcage's own pins and audit logs in ${store}`,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 describe("what a server can reach", () => {
@@ -401,6 +495,14 @@ describe("what a server can reach", () => {
     expect(broadAccessKind("~/.ssh", home)).toBe("your SSH keys in ~/.ssh");
     expect(broadAccessKind("$HOME/.aws/credentials", home)).toBe("your AWS credentials in ~/.aws");
     expect(broadAccessKind("%USERPROFILE%\\.ssh", "C:\\Users\\me")).toBe("your SSH keys in ~\\.ssh");
+  });
+
+  it("counts the account's own home directory too, whatever HOME says", () => {
+    const account = userInfo().homedir;
+    const decoy = mkdtempSync(join(tmpdir(), "mcpcage-decoy-home-"));
+    expect(broadAccessKind(join(account, ".ssh"), decoy)).toBe(`your SSH keys in ${join(account, ".ssh")}`);
+    expect(broadAccessKind(account, decoy)).toBe("your whole home directory");
+    expect(broadAccessKind("~/.ssh", decoy)).toBe("your SSH keys in ~/.ssh");
   });
 
   it("reports secrets by name only, masks them in command lines and never takes placeholders for secrets", async () => {
@@ -868,6 +970,131 @@ describe("mcpcage protect", () => {
     expect(fix.code).toBe(1);
     expect(readFileSync(cursor)).toEqual(original);
     expect(existsSync(`${cursor}.mcpcage.bak`)).toBe(false);
+  });
+
+  it("does not count as caged a server whose env runs on this machine, and --fix moves that env into the cage", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-host-env-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    // Values that must never be printed.
+    const preload = "--import /tmp/never-printed-preload.mjs";
+    const store = "/tmp/never-printed-store";
+    const daemon = "tcp://203.0.113.7:2376";
+    const tuned = {
+      command: "/opt/mcpcage",
+      args: ["run", "--env", "NODE_OPTIONS", "--env", "MCPCAGE_HOME", "--env", "API_KEY", "--", "npx", "-y", "@acme/tuned-mcp"],
+      env: { NODE_OPTIONS: preload, MCPCAGE_HOME: store, API_KEY: "${input:key}" },
+    };
+    // Only names the local socket: caged as it is.
+    const local = { command: "/opt/mcpcage", args: ["run", "--env", "DOCKER_HOST", "--", "npx", "-y", "@acme/local-mcp"], env: { DOCKER_HOST: "unix:///var/run/docker.sock" } };
+    const fresh = { command: "npx", args: ["-y", "@acme/fresh-mcp"], env: { DOCKER_HOST: daemon, HOME: "/tmp/never-printed-home" } };
+    writeJsonFile(cursor, { mcpServers: { tuned, local, fresh } });
+    const original = readFileSync(cursor);
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1" });
+    const indent = " ".repeat(16);
+
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    for (const value of [preload, store, daemon, "/tmp/never-printed-home"]) expect(`${scan.stdout}${scan.stderr}`).not.toContain(value);
+    expect(scan.stdout).toMatch(/^ {2}tuned {9}\/opt\/mcpcage run --env NODE_OPTIONS --env MCPCAGE_HOME --env API_KEY -- npx -y @acme\/tuned-mcp +caged, but its env runs on your machine$/m);
+    expect(scan.stdout).toContain(
+      [
+        "caged, but its env runs on your machine",
+        `${indent}env NODE_OPTIONS: can make Node run code on your machine before the cage starts`,
+        `${indent}env MCPCAGE_HOME: moves mcpcage's pins and audit log, so approvals start over`,
+        "  local ",
+      ].join("\n"),
+    );
+    expect(scan.stdout).toMatch(/^ {2}local {9}\/opt\/mcpcage run --env DOCKER_HOST -- npx -y @acme\/local-mcp +caged$/m);
+    // A server not caged yet gets the same lines, after the ones it had.
+    expect(scan.stdout).toContain(
+      [
+        "NOT CAGED",
+        `${indent}install scripts: unknown (offline, not in cache)`,
+        `${indent}env DOCKER_HOST: chooses the Docker that builds and runs the cage`,
+        `${indent}env HOME: changes the home directory mcpcage protects`,
+      ].join("\n"),
+    );
+    expect(scan.stdout).toContain("  2 run on your machine with your permissions and no cage.");
+    expect(scan.stdout).toContain("  1 already runs through mcpcage.");
+    expect(scan.code).toBe(1);
+
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", "/opt/mcpcage");
+    for (const value of [preload, store, daemon, "/tmp/never-printed-home"]) expect(`${fix.stdout}${fix.stderr}`).not.toContain(value);
+    expect(fix.stdout).toContain(`\nPlan\n  cage tuned in ${tilde(cursor, home)}\n  cage fresh in ${tilde(cursor, home)}\n`);
+    expect(fix.stdout).toContain(`  caged tuned in ${tilde(cursor, home)}\n  caged fresh in ${tilde(cursor, home)}\n  backup: ${tilde(cursor, home)}.mcpcage.bak\n`);
+    expect(fix.code, fix.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(cursor, "utf8")).mcpServers).toEqual({
+      // In place of the --env that read it from mcpcage's environment: the value goes to the cage only.
+      tuned: { command: "/opt/mcpcage", args: ["run", "--env", `NODE_OPTIONS=${preload}`, "--env", "API_KEY", "--", "npx", "-y", "@acme/tuned-mcp"], env: { API_KEY: "${input:key}" } },
+      local,
+      fresh: { command: "/opt/mcpcage", args: ["run", "--env", `DOCKER_HOST=${daemon}`, "--", "npx", "-y", "@acme/fresh-mcp"], env: {} },
+    });
+    expect(readFileSync(`${cursor}.mcpcage.bak`)).toEqual(original);
+
+    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(again.stdout).toMatch(/^ {2}tuned {9}\/opt\/mcpcage run --env NODE_OPTIONS=\*\*\* --env API_KEY -- npx -y @acme\/tuned-mcp +caged$/m);
+    expect(again.stdout).not.toContain(`${indent}env `);
+    expect(again.stdout).toContain("  0 run on your machine with your permissions and no cage.");
+    expect(again.stdout).toContain("  3 already run through mcpcage.");
+    expect(`${again.stdout}${again.stderr}`).not.toContain(preload);
+    expect(again.code).toBe(0);
+  });
+
+  it("shows no env line for NODE_ENV and counts a caged server whose only variable it is as caged", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-node-env-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    writeJsonFile(cursor, {
+      mcpServers: {
+        prod: { command: "/opt/mcpcage", args: ["run", "--env", "NODE_ENV", "--", "npx", "-y", "@acme/prod-mcp"], env: { NODE_ENV: "production" } },
+        plain: { command: "npx", args: ["-y", "@acme/plain-mcp"], env: { NODE_ENV: "production" } },
+      },
+    });
+
+    const scan = mcpcageWithEnv(fakeUserEnv(home, cage), "protect", "--project", project, "--offline");
+    expect(scan.stdout).toMatch(/^ {2}prod {10}\/opt\/mcpcage run --env NODE_ENV -- npx -y @acme\/prod-mcp +caged$/m);
+    expect(scan.stdout).toMatch(/^ {2}plain {9}npx -y @acme\/plain-mcp +NOT CAGED$/m);
+    expect(scan.stdout).not.toMatch(/^ {16}env /m);
+    expect(scan.stdout).toContain("  1 runs on your machine with your permissions and no cage."); // plain, which is npx
+    expect(scan.stdout).toContain("  1 already runs through mcpcage.");
+  });
+
+  it("--fix says which env variables to take out by hand when it cannot rewrite the file", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-host-env-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const vscode = locationsFor(home, project)("vscode", "user");
+    writeText(
+      vscode,
+      `{
+  // Servers for every workspace.
+  "servers": {
+    "tuned": { "type": "stdio", "command": "npx", "args": ["-y", "@acme/tuned-mcp"], "env": { "NODE_OPTIONS": "--import /tmp/never-printed.mjs", "API_KEY": "\${input:key}" } }
+  }
+}
+`,
+    );
+    const original = readFileSync(vscode);
+
+    const fix = mcpcageWithEnv(fakeUserEnv(home, cage), "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", "/opt/mcpcage");
+    expect(fix.stdout).toContain(
+      [
+        `  not changed: ${tilde(vscode, home)} has comments, which rewriting it would lose. Edit it by hand so that each server runs the command shown ("command" is its first word, "args" the rest):`,
+        "    tuned: /opt/mcpcage run --env NODE_OPTIONS=*** --env API_KEY -- npx -y @acme/tuned-mcp",
+        '      and remove from its "env": NODE_OPTIONS',
+        "    (*** stands for the value already in the file, which is not shown)",
+      ].join("\n"),
+    );
+    expect(`${fix.stdout}${fix.stderr}`).not.toContain("never-printed");
+    expect(readFileSync(vscode)).toEqual(original);
   });
 
   it("--fix refuses to change anything without a terminal unless --yes is given", () => {

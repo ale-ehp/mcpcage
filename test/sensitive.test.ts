@@ -50,6 +50,18 @@ describe("paths mcpcage will not mount", () => {
     expect(sensitivePath("/srv/data", options)).toBeUndefined();
   });
 
+  it("counts the account's own home directory when HOME names another, and writes its places in full", () => {
+    const options = { home: "/tmp/decoy", account: "/Users/me", platform: "darwin" as const };
+    expect(sensitivePath("/Users/me/.ssh/id_ed25519", options)).toBe("your SSH keys in /Users/me/.ssh");
+    expect(sensitivePath("/Users/me", options)).toBe("your whole home directory");
+    expect(sensitivePath("/Users/me/.mcpcage", options)).toBe("mcpcage's own pins and audit logs in /Users/me/.mcpcage");
+    // `~` stays what HOME says.
+    expect(sensitivePath("~/.ssh", options)).toBe("your SSH keys in ~/.ssh");
+    expect(sensitivePath("/Users/me/Projects/notes", options)).toBeUndefined();
+    // The same directory twice is one home directory.
+    expect(sensitivePath("/Users/me/.aws", { ...mac, account: "/Users/me" })).toBe("your AWS credentials in ~/.aws");
+  });
+
   it("follows symlinks: a link in an ordinary directory that leads to the SSH keys is the SSH keys", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-sensitive-"));
     const home = join(top, "home");

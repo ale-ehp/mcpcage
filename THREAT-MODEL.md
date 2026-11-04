@@ -26,6 +26,7 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 | A server that makes the client act for it | `sampling/createMessage` to run the model on the server's prompt, `elicitation/create` to put the server's question to the user | Both are a way in for a prompt injection and a way out for data, so they are refused by default with an error to the server, like any request mcpcage does not know, and recorded. `ping` and `roots/list` pass, and so do notifications. `--allow-server-requests` lets every request through, with a warning on stderr. |
 | A server that asks to call tools outside its manifest | a call routed to a tool the user never saw | Calls to tools that are not approved never reach the server. |
 | A server written into a client configuration without the user's knowledge | SANDWORM_MODE adding entries to Claude Code, Cursor and Windsurf configs | `mcpcage protect` reads every configuration file the clients document and lists each server with how it starts, what it can reach and whether it is caged; `--fix` cages the npx ones. |
+| A server entry whose `env` configures mcpcage instead of the server | `NODE_OPTIONS=--import ./x.mjs`, `LD_PRELOAD`, a `DOCKER_HOST` on another machine, `HOME` pointed at an empty directory, `MCPCAGE_HOME` pointed at an empty store | A client starts the entry's command with its `env`, and after `wrap` that command is mcpcage, on the host. `wrap` and `protect --fix` move `NODE_*`, `LD_*`, `DYLD_*`, `DOCKER_*` (except a `unix://` or `npipe://` `DOCKER_HOST`) and `npm_config_*` into the cage as `--env NAME=value`, and drop `HOME`, `USERPROFILE` and `MCPCAGE_HOME`. `protect` names each such variable and counts a caged entry that still has one as running on the host. The home directory whose places are never mounted is the account's own, from the system's user database, as well as the one `HOME` names, and a relative `MCPCAGE_HOME` is made absolute, so it is never mounted either. |
 | Someone editing the audit trail after the fact | removing the record of a call | The hash chain makes edits, reordering and deletions inside a file detectable. |
 
 ## Trust boundaries
@@ -103,6 +104,10 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 - **Servers not started with `npx`.** `uvx`, `node`, `bun` or a binary run on the host as before;
   `protect` reports them as not caged and cannot fix them yet.
 - **The Docker daemon itself.** Whoever controls it controls the containers.
+- **What stays in a server entry's `env`.** `PATH` stays, because it is often what lets the client
+  find `node`: whoever can write the entry still chooses which `node`, `docker` and `npm` mcpcage
+  runs, as they chose the `npx` it replaced. A value moved into `--env NAME=value` is written in the
+  arguments, so it shows in the machine's process list while the server runs.
 - **`--no-sandbox`.** It keeps pinning and audit but provides no isolation at all. `protect` counts
   such entries as exposed.
 - **Configuration files mcpcage will not rewrite.** A file with comments (VS Code's `mcp.json`) is

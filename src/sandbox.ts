@@ -8,7 +8,7 @@ import { sha256 } from "./canonical.js";
 import type { LaunchSpec } from "./launch.js";
 import { cageHome, serverDir } from "./paths.js";
 import { readJson, writeJson } from "./pinstore.js";
-import { sensitivePath } from "./sensitive.js";
+import { sensitivePath, thisMachine } from "./sensitive.js";
 
 /**
  * Base images, pinned by digest so a build today and a build next month start from the same bytes.
@@ -207,11 +207,12 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS):
 /**
  * The path a --mount value names and what it would open, when it is the whole disk, the home
  * directory or a directory with credentials (see sensitive.ts); undefined for an ordinary path.
- * `run` refuses such a value unless --allow-sensitive-mount is given.
+ * `run` refuses such a value unless --allow-sensitive-mount is given. The account's own home counts
+ * whatever HOME says: a client sets HOME for mcpcage from the server entry it starts.
  */
 export function sensitiveMount(value: string): { path: string; reason: string } | undefined {
   const { path } = mountPath(value);
-  const reason = sensitivePath(path, { home: homedir(), platform: process.platform, cage: cageHome(), path: process.env.PATH });
+  const reason = sensitivePath(path, thisMachine());
   return reason === undefined ? undefined : { path, reason };
 }
 

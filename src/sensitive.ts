@@ -1,5 +1,7 @@
 import { realpathSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
 import { posix, win32 } from "node:path";
+import { cageHome } from "./paths.js";
 
 /*
  * The paths mcpcage will not mount into a cage. A server that can reach the whole disk, the home
@@ -16,12 +18,37 @@ import { posix, win32 } from "node:path";
 export interface SensitiveOptions {
   /** The user's home directory: what `~` stands for, and where most credentials are kept. */
   home: string;
+  /**
+   * The account's own home directory, from the system's user database, when it may differ from
+   * `home`: its places count as well, though `~` stays `home`. HOME is only a variable, and whoever
+   * starts mcpcage sets it.
+   */
+  account?: string;
   /** Path syntax (`C:\` on Windows), case (ignored on macOS and Windows), and the macOS keychains. */
   platform: NodeJS.Platform;
   /** mcpcage's own directory, when MCPCAGE_HOME moves it out of ~/.mcpcage. */
   cage?: string;
   /** The PATH, as process.env.PATH writes it: each of its directories holds programs the user runs. */
   path?: string;
+}
+
+/**
+ * The account's own home directory. `os.homedir()` follows HOME (USERPROFILE on Windows), which a
+ * client sets for mcpcage from a server entry's `env`: with HOME pointed at an empty directory, the
+ * real ~/.ssh was an ordinary path. The user database says where the account's home is, whatever
+ * HOME says; an account it does not know (some containers) falls back to HOME.
+ */
+export function accountHome(): string {
+  try {
+    return userInfo().homedir;
+  } catch {
+    return homedir();
+  }
+}
+
+/** The options for a path of this machine, as `run` and `wrap` check it: `~` is HOME, and the account's home counts too. */
+export function thisMachine(): SensitiveOptions {
+  return { home: homedir(), account: accountHome(), platform: process.platform, cage: cageHome(), path: process.env.PATH };
 }
 
 /** What other MCP clients keep in their directories, and why a cage must not write there. */
@@ -201,7 +228,8 @@ interface Place {
  * Inside the home directory only those places count: ~/Projects/x is ordinary, ~/.config holds
  * gcloud's credentials. `~` stands for the home directory and `..` is resolved; so are symlinks, for
  * a path of this machine, which makes a link that leads into ~/.ssh count as ~/.ssh. Case does not
- * matter on macOS and Windows.
+ * matter on macOS and Windows. The account's home directory, when it is not `home`, counts like the
+ * home directory, with its places written in full.
  */
 export function sensitivePath(path: string, options: SensitiveOptions): string | undefined {
   const windows = options.platform === "win32";
@@ -215,6 +243,10 @@ export function sensitivePath(path: string, options: SensitiveOptions): string |
   if (!syntax.isAbsolute(written)) return undefined;
   const targets = spell(written);
   const homes = syntax.isAbsolute(options.home) ? spell(options.home) : [];
+  // The account's home, when HOME names another directory: it holds the real keys whatever HOME says.
+  const account = options.account !== undefined && syntax.isAbsolute(options.account) ? spell(options.account) : [];
+  const other = account.some((spelling) => homes.some((home) => home.key === spelling.key)) ? [] : account;
+  const mine = [...homes, ...other];
   const inside = (spelling: Spelling, dir: Spelling) =>
     spelling.key !== dir.key && spelling.key.startsWith(dir.key.endsWith(syntax.sep) ? dir.key : `${dir.key}${syntax.sep}`);
   const any = (test: (target: Spelling) => boolean) => targets.some(test);
@@ -227,10 +259,10 @@ export function sensitivePath(path: string, options: SensitiveOptions): string |
   };
 
   const isDisk = (spelling: Spelling) => syntax.parse(spelling.path).root === spelling.path;
-  const isHome = (spelling: Spelling) => homes.some((home) => home.key === spelling.key);
+  const isHome = (spelling: Spelling) => mine.some((home) => home.key === spelling.key);
   const allHomes = windows ? [] : ALL_HOMES.flatMap((where) => spell(where));
   const holdsHomes = (spelling: Spelling) =>
-    homes.some((home) => inside(home, spelling)) || allHomes.some((all) => all.key === spelling.key) || (windows && /^[a-z]:\\users$/.test(spelling.key));
+    mine.some((home) => inside(home, spelling)) || allHomes.some((all) => all.key === spelling.key) || (windows && /^[a-z]:\\users$/.test(spelling.key));
   if (any(isDisk)) return "the whole disk";
   if (any(isHome)) return "your whole home directory";
   if (any(holdsHomes)) return "your whole home directory and more";
@@ -243,11 +275,13 @@ export function sensitivePath(path: string, options: SensitiveOptions): string |
       places.push({ spellings: spell(place.path), what: place.what, shown: place.path });
     }
   }
-  if (homes.length > 0) {
-    for (const place of IN_HOME) {
-      if (place.platform !== undefined && place.platform !== options.platform) continue;
-      const parts = place.path.split("/");
-      places.push({ spellings: spell(syntax.join(options.home, ...parts)), what: place.what, shown: ["~", ...parts].join(syntax.sep) });
+  for (const place of IN_HOME) {
+    if (place.platform !== undefined && place.platform !== options.platform) continue;
+    const parts = place.path.split("/");
+    if (homes.length > 0) places.push({ spellings: spell(syntax.join(options.home, ...parts)), what: place.what, shown: ["~", ...parts].join(syntax.sep) });
+    if (other.length > 0) {
+      const spellings = spell(syntax.join(options.account!, ...parts));
+      places.push({ spellings, what: place.what, shown: shown(spellings[0]!) });
     }
   }
   if (options.cage !== undefined && syntax.isAbsolute(options.cage)) {

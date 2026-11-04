@@ -1,9 +1,14 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-/** Root of everything mcpcage stores. MCPCAGE_HOME overrides it (tests, CI, shared machines). */
+/**
+ * Root of everything mcpcage stores. MCPCAGE_HOME overrides it (tests, CI, shared machines). A
+ * relative value is made absolute here, once: as written it named a different store from every
+ * directory mcpcage was started in, and the check that keeps the store out of every mount only
+ * knows absolute paths, so a server could be given its own pins. An empty value is no value.
+ */
 export function cageHome(): string {
-  return process.env.MCPCAGE_HOME ?? join(homedir(), ".mcpcage");
+  return resolve(process.env.MCPCAGE_HOME || join(homedir(), ".mcpcage"));
 }
 
 // A server id names a directory of the store. One given on the command line was used as given, so

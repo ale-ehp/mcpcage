@@ -375,6 +375,19 @@ describe("client configuration", () => {
     });
   });
 
+  it("puts back on unwrap the env values that wrap moved into the arguments", () => {
+    const env = { NODE_OPTIONS: "--max-old-space-size=4096", MCPCAGE_HOME: "/tmp/elsewhere", API_KEY: "x" };
+    const file = write({ mcpServers: { tuned: { command: "npx", args: ["-y", "pkg"], env } } });
+    wrapConfig(file, { dryRun: false });
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.tuned).toEqual({
+      command: "mcpcage", args: ["run", "--env", "NODE_OPTIONS=--max-old-space-size=4096", "--env", "API_KEY", "--", "npx", "-y", "pkg"], env: { API_KEY: "x" },
+    });
+    unwrapConfig(file, { dryRun: false });
+    // MCPCAGE_HOME was mcpcage's to ignore, not the server's: it stays in the backup only.
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.tuned).toEqual({ command: "npx", args: ["-y", "pkg"], env: { API_KEY: "x", NODE_OPTIONS: env.NODE_OPTIONS } });
+    expect(JSON.parse(readFileSync(`${file}.mcpcage.bak`, "utf8")).mcpServers.tuned.env).toEqual(env);
+  });
+
   it("never replaces a backup: the next one is named after the time, then given a random suffix", () => {
     // The clock stands still, so the second and the third rewrite ask for the same name with the time.
     vi.useFakeTimers({ toFake: ["Date"] });

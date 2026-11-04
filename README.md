@@ -137,8 +137,19 @@ Desktop's), shell and login startup files (`~/.zshrc`, `~/Library/LaunchAgents`)
 configuration and any repository's `.git`, a project's `.vscode` or `.mcp.json`, and the programs
 you run (`~/.local/bin`, `~/.npm`, `/usr/local`, every directory on your PATH). A server given one
 is left as it is, uncaged, and the reason is printed; `mcpcage run` refuses such a `--mount` unless
-you add `--allow-sensitive-mount`. Images are built right away, so the client's first start does
-not wait for a build.
+you add `--allow-sensitive-mount`. Your home directory there is the one your account has on the
+system, and the one `HOME` names when it is another. Images are built right away, so the client's
+first start does not wait for a build.
+
+A server's `env` stays in its entry, and each variable reaches the cage by name (`--env NAME`), so
+a credential never appears in the arguments. Once the entry starts mcpcage, though, the client gives
+that `env` to mcpcage itself, on your machine. So a variable that would configure the programs
+there moves into the cage as `--env NAME=value` and leaves `env`: `NODE_*` (`NODE_OPTIONS` can make
+Node run code before mcpcage starts), `LD_*` and `DYLD_*`, `DOCKER_*` (another Docker daemon would
+build and run the cage; a `unix://` or `npipe://` `DOCKER_HOST` only names the local socket and
+stays) and `npm_config_*`. `HOME`, `USERPROFILE` and `MCPCAGE_HOME` are dropped: the cage has its
+own `HOME`, and where mcpcage keeps its pins is your choice, not a server's. `PATH` stays, because it
+is often what lets the client find `node`.
 
 Inside a writable mount, the git and editor settings that exist when the server starts (`.git`,
 `.vscode`, `.idea`, `.cursor`, `.claude`, `.devin`, `.windsurf`, `.mcp.json`, at any depth) are
@@ -236,7 +247,9 @@ Devin also imports the servers in Cursor, Windsurf and Claude Code files (its `r
 setting, on by default), so caging those files covers Devin too.
 
 For each server the report says which client and file it comes from, how it starts (`npx`, `uvx`,
-`docker`, remote, something else), whether it already runs through mcpcage, whether its package
+`docker`, remote, something else), whether it already runs through mcpcage, which variables of its
+`env` would act on your machine once the client starts mcpcage with them (named, never shown; a
+caged server with one counts as running on your machine), whether its package
 declares install scripts (`npm view`, cached for a week; `--offline` uses the cache only), whether
 the configuration holds a secret in clear text (named, never shown, masked in command lines too)
 and whether an argument opens the whole disk, the whole home directory or a directory with
@@ -247,7 +260,8 @@ tools, or a definition nested more than 256 levels deep, is reported as refused 
 It never mounts a sensitive path: the server is inspected without it, and the report says so
 (`inspected without ~/.ssh: your SSH keys in ~/.ssh`).
 `--fix` prints the plan, asks for the word `yes` (or takes `--yes`), rewrites only the server
-entries of each file in the file's own style, leaves a server that needs a sensitive path as it is
+entries of each file in the file's own style, moves into the cage the `env` of a caged server that
+would act on your machine (as `wrap` does), leaves a server that needs a sensitive path as it is
 (with the reason), keeps a backup (`<file>.mcpcage.bak`) and replaces the file atomically.
 
 **The cage.** Each server runs with:

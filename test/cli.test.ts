@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuditLog } from "../src/audit.js";
@@ -211,6 +211,31 @@ describe("cli", () => {
     expect(refused.stderr).toContain(`mcpcage: --mount ${project}:rw: ${join(project, ".vscode")} is a symlink`);
     // Read-only, the same directory needs nothing on top of it.
     expect(mcpcageWithEnv(env, "run", "--mount", project, ...server).stderr).toContain("Docker is required");
+  });
+
+  it("refuses a mount of the account's own ~/.ssh when HOME names another directory", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
+    const decoy = join(top, "decoy-home");
+    const cage = join(top, "cage");
+    mkdirSync(decoy);
+    // A client sets HOME from the server entry's env; the account's home stays where the keys are.
+    const keys = join(userInfo().homedir, ".ssh");
+    const env = fakeUserEnv(decoy, cage, { PATH: join(top, "no-docker-here") });
+
+    const refused = mcpcageWithEnv(env, "run", "--mount", `${keys}:rw`, "--", "npx", "-y", "something");
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toBe(`mcpcage: --mount ${keys}: your SSH keys in ${keys}. Pass --allow-sensitive-mount if you really want this.\n`);
+    expect(existsSync(cage)).toBe(false); // refused before anything else: nothing was mounted, nothing written
+  });
+
+  it("wrap prints the values it moved from the env into the arguments as ***", () => {
+    const home = freshHome();
+    const file = join(mkdtempSync(join(tmpdir(), "mcpcage-cli-")), "mcp.json");
+    writeFileSync(file, JSON.stringify({ mcpServers: { tuned: { command: "npx", args: ["-y", "pkg"], env: { NODE_OPTIONS: "--max-old-space-size=4096", API_KEY: "x" } } } }));
+    const result = mcpcage(home, "wrap", file, "--dry-run");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("caged tuned: mcpcage run --env NODE_OPTIONS=*** --env API_KEY -- npx -y pkg\n");
+    expect(result.stdout).not.toContain("4096");
   });
 
   it("refuses host commands unless --no-sandbox is explicit", () => {
