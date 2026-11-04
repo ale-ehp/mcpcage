@@ -155,7 +155,25 @@ function fakeMachine() {
   );
   writeJsonFile(files.devin, { mcpServers: { "devin-tool": { command: "npx", args: ["-y", "@acme/devin-tool"] } } });
   const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
-  return { top, home, project, cage, data, notes, files, env, installed: installed.command };
+  // The npx packages of the servers that run uncaged, whose install scripts protect looks up: notes-mcp
+  // too, for a --command other than the mcpcage its entry starts.
+  const packages = [
+    "@modelcontextprotocol/server-filesystem", "@modelcontextprotocol/server-github", "@acme/project-mcp@1.2.0", "@acme/project-tool",
+    "@modelcontextprotocol/server-memory", "@acme/vs-proj", "@acme/devin-tool", "notes-mcp",
+  ];
+  return { top, home, project, cage, data, notes, files, env, installed: installed.command, packages };
+}
+
+/**
+ * npm's answer about the install scripts of each package (none), kept in mcpcage's cache under
+ * `cage` as a lookup keeps it, so that protect reads it there instead of starting npm. For the tests
+ * that do not look at those lines: on the Windows PC each `npm view --offline` that protect starts
+ * (node.exe with npm's npm-cli.js) took 1.1 to 1.4 s, and the 13 of a --fix test, 8 in its first
+ * run and 5 in its second, took 14.8 of its 16.4 s alone and 23 to 29.5 s in a full run, against
+ * a 30 s timeout.
+ */
+function cachedLookups(cage: string, packages: string[]): void {
+  for (const spec of packages) writeJsonFile(join(cage, "cache", "npm-view", `${sha256(spec)}.json`), { spec, fetchedAt: new Date().toISOString(), scripts: {} });
 }
 
 /** Every file and directory under `dir` (mcpcage's own directory aside) with the hash of its content. */
@@ -1624,6 +1642,7 @@ describe("mcpcage protect", () => {
     const keys = { command: "npx", args: ["-y", "@acme/keys-mcp", "~/.ssh"] };
     writeJsonFile(files.cursor, { mcpServers: { ...JSON.parse(readFileSync(files.cursor, "utf8")).mcpServers, keys } });
     const original = Object.fromEntries(Object.entries(files).map(([name, file]) => [name, readFileSync(file)])) as Record<keyof typeof files, Buffer>;
+    cachedLookups(machine.cage, [...machine.packages, "@acme/keys-mcp"]);
 
     const result = mcpcageWithEnv(machine.env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed);
     expect(`${result.stdout}${result.stderr}`).not.toContain(TOKEN);
@@ -2236,6 +2255,7 @@ describe("mcpcage protect", () => {
 
   it("--fix refuses to change anything without a terminal unless --yes is given", () => {
     const machine = fakeMachine();
+    cachedLookups(machine.cage, machine.packages);
     const before = snapshot(machine.top, machine.cage);
     const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--command", "/opt/mcpcage");
     expect(result.code).toBe(1);
