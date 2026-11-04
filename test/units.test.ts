@@ -8,7 +8,7 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalJson } from "../src/canonical.js";
 import { isWrapped, moveHostEnv, unwrapConfig, unwrapEntry, wrapConfig, type ServerEntry } from "../src/config.js";
-import { parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
+import { isLocalPath, parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep, type Pin, type ToolDefinition } from "../src/manifest.js";
 import { approvePending, loadPin, pendingCount, savePending, savePin } from "../src/pinstore.js";
@@ -38,6 +38,16 @@ describe("launch parsing", () => {
     expect(parseLaunch(["npx", "./local-server"])).toMatchObject({ kind: "npm", localPath: "./local-server" });
     expect(parseLaunch(["uvx", "mcp-server-time"])).toEqual({ kind: "host", command: "uvx", args: ["mcp-server-time"] });
     expect(parseLaunch([], "mcp/time")).toEqual({ kind: "image", image: "mcp/time", args: [] });
+  });
+
+  it("takes a Windows path for a local package on Windows, and only there", () => {
+    for (const spec of [".\\server", "..\\server", "C:\\work\\server", "c:/work/server", "\\work\\server", "\\\\host\\share\\server"]) {
+      expect(parseLaunch(["npx", "-y", spec, "--dir", "x"], undefined, "win32")).toEqual({ kind: "npm", packageName: "", localPath: spec, args: ["--dir", "x"] });
+      expect(isLocalPath(spec, "linux")).toBe(false);
+    }
+    // The forms every system knows stay local on Windows too, and a name stays a name.
+    expect(["./server", "/work/server", "~/server", "server.tgz"].map((spec) => isLocalPath(spec, "win32"))).toEqual([true, true, true, true]);
+    expect(parseLaunch(["npx", "-y", "@scope/server@1.2.3"], undefined, "win32")).toMatchObject({ packageName: "@scope/server", versionRange: "1.2.3" });
   });
 
   it("rejects npx forms it cannot reproduce faithfully", () => {

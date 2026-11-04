@@ -10,9 +10,10 @@ const NPX_FLAGS_WITHOUT_VALUE = new Set(["-y", "--yes", "-q", "--quiet", "--no-i
 
 /**
  * Understands `npx [-y] <package>[@version] [args...]`, the form most MCP servers are configured
- * with. Anything else is a plain host command, which only `--no-sandbox` accepts.
+ * with. Anything else is a plain host command, which only `--no-sandbox` accepts. `platform` is the
+ * system the command line was written for (see isLocalPath).
  */
-export function parseLaunch(argv: string[], image?: string): LaunchSpec {
+export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Platform = process.platform): LaunchSpec {
   if (image) return { kind: "image", image, args: argv };
   const [command, ...rest] = argv;
   if (!command) throw new Error("missing the server command after `--`");
@@ -30,13 +31,21 @@ export function parseLaunch(argv: string[], image?: string): LaunchSpec {
   const spec = rest[index];
   if (!spec) throw new Error("npx needs a package name");
   const args = rest.slice(index + 1);
-  if (isLocalPath(spec)) return { kind: "npm", packageName: "", localPath: spec, args };
+  if (isLocalPath(spec, platform)) return { kind: "npm", packageName: "", localPath: spec, args };
   const { name, range } = splitPackageSpec(spec);
   return { kind: "npm", packageName: name, versionRange: range, args };
 }
 
-export function isLocalPath(spec: string): boolean {
-  return spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/") || spec.startsWith("~/") || spec.endsWith(".tgz");
+/**
+ * Whether npx would take `spec` for a package on disk rather than a name in the registry. On Windows
+ * a path is also written `.\x`, `..\x`, `C:\x` (or `C:/x`) and `\x`: taken for a name, the Docker
+ * tests' C:\Users\me\mcpcage\test\fixtures\abuse-server went to npm in the cage as
+ * `/app/C:\Users\me\mcpcage\test\fixtures\abuse-server@latest/package.json`, and the server never
+ * started. On macOS and Linux nothing changes: a backslash is an ordinary character there.
+ */
+export function isLocalPath(spec: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/") || spec.startsWith("~/") || spec.endsWith(".tgz")) return true;
+  return platform === "win32" && (/^\.{1,2}\\/.test(spec) || /^[A-Za-z]:[\\/]/.test(spec) || spec.startsWith("\\"));
 }
 
 /** `@scope/name@1.2.3` -> name `@scope/name`, range `1.2.3`. */
