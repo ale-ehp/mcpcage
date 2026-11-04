@@ -825,6 +825,29 @@ describe("tool results", () => {
     ]);
     expect(entries.filter((entry) => entry.event === "call-result").map((entry) => entry.id)).toEqual([3, 4]);
   });
+
+  it("points at hidden instructions in the description of a resource link, and passes the link on", async () => {
+    const home = freshHome();
+    const session = rawSession(home, "resource-link");
+    session.send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "raw", version: "0" } } });
+    await session.answer(1);
+    session.send({ method: "notifications/initialized" });
+    session.send({ id: 2, method: "tools/list" });
+    await session.answer(2);
+    session.send({ id: 3, method: "tools/call", params: { name: "echo", arguments: { text: "hi" } } });
+    await session.answer(3);
+    await session.close();
+
+    expect(session.received().find((message) => message.id === 3)).toMatchObject({
+      result: { content: [{ type: "text", text: "called echo" }, { type: "resource_link", description: expect.stringContaining("<IMPORTANT>") }] },
+    });
+    expect(session.stderr()).toContain(
+      'mcpcage: the result of "echo" carries 2 high-severity signs of hidden instructions (hidden-tag: "<IMPORTANT>", sensitive-path: "~/.ssh/id_rsa")',
+    );
+    expect(auditEntries(home, "hostile").filter((entry) => entry.event === "result-signs")).toEqual([
+      expect.objectContaining({ id: 3, tool: "echo", suspicious: { high: 2, medium: 0, low: 0 } }),
+    ]);
+  });
 });
 
 describe("audit log", () => {

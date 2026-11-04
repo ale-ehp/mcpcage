@@ -24,6 +24,11 @@ and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   the cursor each page returned, and none of its pages may redefine a tool pinned before. The limit
   of 10,000 tools, checked on each page alone, now also holds for what is pinned or pending, where
   pages and listings add up.
+- The signs of hidden instructions missed three places the model reads: the keys of a definition
+  (an argument named like an instruction), anything but a plain URI or JSON pointer under `$schema`,
+  `$id` and `$ref`, and the address, name, title and description of a `resource_link` or an
+  embedded resource in a tool's result. They are now read like any other text, a key counts toward
+  the 20,000 strings of the scan budget, and its path ends with `(key)`.
 
 ## [0.4.0] - 2026-11-04
 

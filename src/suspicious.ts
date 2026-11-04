@@ -318,18 +318,24 @@ export function scanResultText(text: string, field = "text"): Finding[] {
 
 /**
  * The texts of an answer to tools/call that reach the model, by JSON path: the text items of the
- * content (an isError result carries its error message there), the text of embedded resources,
- * structuredContent serialized, and the message of a JSON-RPC error. An empty text is left out:
- * there is nothing to scan.
+ * content (an isError result carries its error message there), what describes a resource link or an
+ * embedded resource and the text of the latter, structuredContent serialized, and the message of a
+ * JSON-RPC error. An empty text is left out: there is nothing to scan.
  */
 export function resultTexts(response: { result?: unknown; error?: unknown }): Array<[string, string]> {
   const result = (response.result ?? {}) as { content?: unknown; structuredContent?: unknown };
   const error = (response.error ?? {}) as { message?: unknown };
   const texts: Array<[string, string]> = [];
   for (const [index, item] of (Array.isArray(result.content) ? result.content : []).entries()) {
-    const { type, text, resource } = (item ?? {}) as { type?: unknown; text?: unknown; resource?: { text?: unknown } };
+    const { type, text, resource } = (item ?? {}) as { type?: unknown; text?: unknown; resource?: unknown };
     if (type === "text" && typeof text === "string") texts.push([`content[${index}].text`, text]);
-    else if (type === "resource" && typeof resource?.text === "string") texts.push([`content[${index}].resource.text`, resource.text]);
+    else if (type === "resource_link") texts.push(...describing(`content[${index}]`, item as object));
+    else if (type === "resource" && resource !== null && typeof resource === "object") {
+      texts.push(...describing(`content[${index}].resource`, resource));
+      // A blob is base64 the client decodes, not text the model reads.
+      const { text: embedded } = resource as { text?: unknown };
+      if (typeof embedded === "string") texts.push([`content[${index}].resource.text`, embedded]);
+    }
   }
   // Serialized only when it is shallow enough: JSON.stringify recurses (see scanResult).
   if (result.structuredContent !== undefined && !nestedDeeperThan(result.structuredContent, MAX_DEPTH)) {
@@ -337,6 +343,19 @@ export function resultTexts(response: { result?: unknown; error?: unknown }): Ar
   }
   if (typeof error.message === "string") texts.push(["error.message", error.message]);
   return texts.filter(([, text]) => text !== "");
+}
+
+/**
+ * The fields that describe a resource. A client shows them to the model with the resource, or in its
+ * place for a link (MCP 2025-06-18), so a server can write instructions there as in any text.
+ */
+const RESOURCE_FIELDS = ["uri", "name", "title", "description"];
+
+function* describing(path: string, resource: object): Generator<[string, string]> {
+  for (const field of RESOURCE_FIELDS) {
+    const value = (resource as Record<string, unknown>)[field];
+    if (typeof value === "string") yield [`${path}.${field}`, value];
+  }
 }
 
 /**
@@ -375,8 +394,10 @@ export function highestSeverity(findings: Finding[]): Severity | undefined {
 /** One aligned line per finding, indented to sit under the violation it explains. */
 export function describeFindings(findings: Finding[]): string[] {
   const places = findings.map((finding) => {
-    const { shown, clipped } = printable(finding.field, 60);
-    return `${shown}${clipped ? "..." : ""}: ${finding.snippet}`;
+    // A key that hides text is long, and its path ends with it: clipped, the path keeps saying it is a key.
+    const mark = finding.field.endsWith(KEY) ? KEY : "";
+    const { shown, clipped } = printable(finding.field.slice(0, finding.field.length - mark.length), 60 - mark.length);
+    return `${shown}${clipped ? "..." : ""}${mark}: ${finding.snippet}`;
   });
   const ruleWidth = findings.reduce((width, finding) => Math.max(width, finding.rule.length), 0);
   // Align the messages, without letting one long path push all of them off the screen.
@@ -435,12 +456,33 @@ function tidy(findings: Finding[]): Finding[] {
   );
 }
 
-// $schema, $id and $ref legitimately hold URLs; reporting them would bury the real signs.
+// $schema, $id and $ref legitimately hold URLs; reporting them would bury the real signs. Only a plain
+// reference is left out, though: anything else under these keys is text the model reads like the rest.
 const SCHEMA_KEYS = new Set(["$schema", "$id", "$ref"]);
+/** The longest URI or JSON pointer left unread under a schema key; real ones are far shorter. */
+const MAX_REFERENCE = 2048;
+
+/** A JSON pointer, or an absolute URI of the schemes a schema names itself and others with. */
+const REFERENCE = /^(?:#|(?:https?|urn):)/i;
 
 /**
- * Every string of a definition with its JSON path, without `_meta`, which the model never sees. One
- * at a time and with a stack instead of recursion, so a scan can stop early and no depth exhausts it.
+ * A reference as a schema writes one: a JSON pointer or an http, https or urn URI, short, on one line,
+ * with nothing invisible in it and no angle brackets, which a URI cannot hold and a hidden tag needs.
+ * Any other scheme is read: `file:///home/u/.ssh/id_rsa` points at a secret wherever it is written.
+ */
+function isPlainReference(value: unknown): boolean {
+  return (
+    typeof value === "string" && value.length <= MAX_REFERENCE && REFERENCE.test(value) && !/[\s<>]/.test(value) && !UNPRINTABLE.test(value)
+  );
+}
+
+/** What a key's path ends with, to tell it from the path of its value. */
+const KEY = " (key)";
+
+/**
+ * Every string of a definition with its JSON path, keys included, without `_meta`, which the model
+ * never sees. One at a time and with a stack instead of recursion, so a scan can stop early and no
+ * depth exhausts it.
  */
 function* strings(value: unknown): Generator<[string, string]> {
   const stack: Array<Iterator<[string, unknown]>> = [[["", value] as [string, unknown]].values()];
@@ -456,14 +498,21 @@ function* strings(value: unknown): Generator<[string, string]> {
   }
 }
 
-/** The values inside an array or an object with their paths, leaving out `_meta` at the top and the schema keys. */
+/**
+ * The values inside an array or an object with their paths, each key just before its value: the model
+ * reads a schema as JSON, so a property named like an instruction is read as one. Leaves out `_meta`
+ * at the top, key and value, and a plain reference under a schema key.
+ */
 function* children(path: string, value: object): Generator<[string, unknown]> {
   if (Array.isArray(value)) {
     for (const [index, item] of value.entries()) yield [`${path}[${index}]`, item];
     return;
   }
   for (const [key, inner] of Object.entries(value)) {
-    if (!((path === "" && key === "_meta") || SCHEMA_KEYS.has(key))) yield [path ? `${path}.${key}` : key, inner];
+    if (path === "" && key === "_meta") continue;
+    const inside = path ? `${path}.${key}` : key;
+    yield [`${inside}${KEY}`, key];
+    if (!(SCHEMA_KEYS.has(key) && isPlainReference(inner))) yield [inside, inner];
   }
 }
 
@@ -483,6 +532,7 @@ function* first<T>(items: Iterable<T>, count: number): Generator<T> {
  */
 function lengthGrowth(before: ToolDefinition, after: ToolDefinition): Finding[] {
   // Within the scan's budget: past it, scanTool has already said the definition is too much to read.
+  // A key's path ends with the key itself, so a renamed key is a new string, not a longer one.
   const previous = new Map(first(strings(before), MAX_STRINGS));
   const findings: Finding[] = [];
   for (const [field, text] of first(strings(after), MAX_STRINGS)) {
