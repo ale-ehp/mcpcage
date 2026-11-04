@@ -125,27 +125,32 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     }
     const forward: Message[] = [];
     for (const message of messages) {
-      if (message.method !== undefined && message.id !== undefined && message.id !== null) {
-        if (message.method === "tools/call") {
-          const tool = typeof message.params?.name === "string" ? message.params.name : "";
-          // Only a tool approved under that very name passes: looked up plainly, "constructor",
-          // "toString", "__proto__" and the other names every object inherits passed unlisted.
-          const reason = locked
-            ? `this session is locked because ${locked}`
-            : !pin
-              ? "no approved tool manifest yet (the client must list tools first)"
-              : !own(pin.tools, tool)
-                ? `tool "${tool}" is not in the approved manifest`
-                : undefined;
-          if (reason) {
-            audit.write("call-blocked", { id: message.id, tool, reason });
-            refuse(message.id, `mcpcage blocked tools/call: ${reason}. Run \`mcpcage diff ${serverId}\` to review.`);
-            continue;
-          }
-          const args = message.params?.arguments ?? {};
-          audit.write("call", { id: message.id, tool, args: sha256(canonicalJson(args)), argKeys: Object.keys(args).sort() });
-          fromClient.set(message.id, { method: message.method, tool, started: Date.now() });
-        } else if (message.method === "tools/list") {
+      // The id of a request, which the client waits to be answered; a message without one, or with a
+      // null one, is a notification, which nothing answers.
+      const id = message.method !== undefined && message.id !== undefined && message.id !== null ? message.id : undefined;
+      // Every call is filtered, a notification too: sent without an id, a call to a tool never approved
+      // reached the server, which can act on it as on any other.
+      if (message.method === "tools/call") {
+        const tool = typeof message.params?.name === "string" ? message.params.name : "";
+        // Only a tool approved under that very name passes: looked up plainly, "constructor",
+        // "toString", "__proto__" and the other names every object inherits passed unlisted.
+        const reason = locked
+          ? `this session is locked because ${locked}`
+          : !pin
+            ? "no approved tool manifest yet (the client must list tools first)"
+            : !own(pin.tools, tool)
+              ? `tool "${tool}" is not in the approved manifest`
+              : undefined;
+        if (reason) {
+          audit.write("call-blocked", { id: message.id, tool, reason });
+          if (id !== undefined) refuse(id, `mcpcage blocked tools/call: ${reason}. Run \`mcpcage diff ${serverId}\` to review.`);
+          continue;
+        }
+        const args = message.params?.arguments ?? {};
+        audit.write("call", { id: message.id, tool, args: sha256(canonicalJson(args)), argKeys: Object.keys(args).sort() });
+        if (id !== undefined) fromClient.set(id, { method: message.method, tool, started: Date.now() });
+      } else if (id !== undefined) {
+        if (message.method === "tools/list") {
           // A server issues cursors as non-empty strings (an empty nextCursor ends a listing). A request
           // without one, or with anything else, is taken as the start of a listing: it ends the listing
           // trusted on first use, so that no later page can continue it.
@@ -154,9 +159,9 @@ export function runProxy(options: ProxyOptions): Promise<number> {
             listings += 1;
             awaitedCursor = undefined;
           }
-          fromClient.set(message.id, { method: message.method, cursor, listing: listings, started: Date.now() });
+          fromClient.set(id, { method: message.method, cursor, listing: listings, started: Date.now() });
         } else {
-          fromClient.set(message.id, { method: message.method, started: Date.now() });
+          fromClient.set(id, { method: message.method!, started: Date.now() });
         }
       }
       forward.push(message);
