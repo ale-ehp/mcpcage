@@ -887,7 +887,7 @@ function maskArg(arg: string, nested = false): { shown: string; secrets: string[
 
 /**
  * An address with its credentials masked: the password, a user name that is really a token
- * (https://ghp_...@github.com), and query values with a credential name (SECRET_NAME or
+ * (https://ghp_...@github.com, https://ghp_...:x-oauth-basic@github.com), and query values with a credential name (SECRET_NAME or
  * SECRET_QUERY). `root@localhost` stays.
  */
 function maskUrl(text: string): { shown: string; hidden: string[] } {
@@ -911,7 +911,10 @@ function maskUrl(text: string): { shown: string; hidden: string[] } {
   if (password !== "" && !isPlaceholder(password)) {
     hidden.push(password, url.password);
     url.password = MASK;
-  } else if (password === "" && looksLikeSecret(username)) {
+  }
+  // A token as the user name, with a password after it or not: GitHub's own form is
+  // https://ghp_...:x-oauth-basic@github.com, which printed the token and masked x-oauth-basic.
+  if (looksLikeSecret(username)) {
     hidden.push(username, url.username);
     url.username = MASK;
   }

@@ -1106,6 +1106,25 @@ describe("client configurations where the environment moves them", () => {
   });
 });
 
+describe("a token as the user name of an address", () => {
+  it("masks it when a password follows it too, and leaves a plain user name", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-secrets-"));
+    const file = join(dir, "mcp.json");
+    writeJsonFile(file, {
+      mcpServers: {
+        github: { command: "npx", args: ["-y", "git-mcp", "https://ghp_0123456789abcdefghij:x-oauth-basic@github.com/x.git"] },
+        database: { command: "npx", args: ["-y", "db-mcp", "postgres://reader:hunter2hunter2@db.example.test/app"] },
+      },
+    });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm });
+    const text = renderReport(report, { home: dir });
+    for (const value of ["0123456789", "hunter2"]) expect(text).not.toContain(value);
+    expect(text).toContain("  github        npx -y git-mcp https://***:***@github.com/x.git ");
+    expect(text).toContain("  database      npx -y db-mcp postgres://reader:***@db.example.test/app ");
+  });
+});
+
 describe("install scripts", () => {
   const answer = (stdout: string, status = 0) => vi.fn((_args: string[]) => ({ status, stdout, stderr: "" }));
 
