@@ -198,16 +198,32 @@ async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEn
   const npm = npmLaunch(argv);
   const skipped = npm ? inspectionPlan(npm).skipped : [];
   const left = skipped.length > 0 ? { skipped } : {};
+  // The server may repeat a value it was given, in its error output or in its tools: no value reaches the report.
+  const values = [...Object.values(env), ...hidden];
   try {
     const tools = await inspect({ argv, env });
     // The proxy refuses such a listing whole, so the report does not read it either.
     const deep = tooDeep(tools);
     if (deep) throw new Error(`the definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep, which mcpcage refuses`);
-    return { tools: tools.length, findings: findingsIn(tools), ...left };
+    // Hidden in the definitions, before the scan quotes them: a snippet is clipped at 80 characters,
+    // and a rule can match part of a value (a ghp_ token is a base64 blob without its prefix), so
+    // masking the snippets afterwards would still print what the cut or the match left of it. A
+    // server that copied an environment value into a description had it printed in its snippet.
+    const shown = values.some((value) => value.length >= 4) ? tools.map((tool) => withoutValues(tool, values)) : tools;
+    return { tools: tools.length, findings: findingsIn(shown), ...left };
   } catch (error) {
-    // The server's own error output may repeat a value it was given: no value reaches the report.
-    return { tools: 0, findings: [], error: hideValues(oneLine((error as Error).message), [...Object.values(env), ...hidden]), ...left };
+    return { tools: 0, findings: [], error: hideValues(oneLine((error as Error).message), values), ...left };
   }
+}
+
+/** A definition with `values` hidden in every string and key; it is no deeper than MAX_DEPTH, so recursion is safe. */
+function withoutValues<T>(value: T, values: string[]): T {
+  if (typeof value === "string") return hideValues(value, values) as T;
+  if (Array.isArray(value)) return value.map((item: unknown) => withoutValues(item, values)) as T;
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [hideValues(key, values), withoutValues(inner, values)])) as T;
+  }
+  return value;
 }
 
 /** Every sign in every tool, worst first; each field starts with its tool's name, since a server has several. */
@@ -761,7 +777,9 @@ function isPlaceholder(text: string): boolean {
     /\$\{[^}]*\}/.test(text) || // ${VAR}, VS Code's ${env:VAR} and ${input:id}
     /<[^<>]*>/.test(text) || // <your token>
     /^your_/i.test(text) ||
-    /xxx/i.test(text) ||
+    // xxxxxxxx, sk-xxxx, ghp_XXXXXXXX, ****: only as the whole value, after a short prefix. Anywhere
+    // in it, "xxx" made `--api-key sk-live-xxx-0123456789` a placeholder, printed in clear.
+    /^(?:[a-z0-9]{1,8}[-_]){0,3}[x*.-]{3,}$/i.test(text) ||
     /change[_-]?me/i.test(text) ||
     /^todo/i.test(text) ||
     /^\$[A-Za-z_]\w*$/.test(text) || // $GITHUB_TOKEN
@@ -856,13 +874,16 @@ function maskUrl(text: string): { shown: string; hidden: string[] } {
     hidden.push(username, url.username);
     url.username = MASK;
   }
-  for (const name of [...new Set(url.searchParams.keys())]) {
-    const value = url.searchParams.get(name) ?? "";
-    if (SECRET_NAME.test(name) && looksLikeSecret(value)) {
-      hidden.push(value);
-      url.searchParams.set(name, MASK);
-    }
-  }
+  // Every value of every name, in their order: `?token=short&token=sk-live-...` printed the second
+  // token in clear, because only the first value of each name was looked at.
+  let masked = false;
+  const query = [...url.searchParams].map(([name, value]): [string, string] => {
+    if (!SECRET_NAME.test(name) || !looksLikeSecret(value)) return [name, value];
+    hidden.push(value);
+    masked = true;
+    return [name, MASK];
+  });
+  if (masked) url.search = new URLSearchParams(query).toString();
   return { shown: hidden.length > 0 ? url.toString() : text, hidden };
 }
 
