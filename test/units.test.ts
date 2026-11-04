@@ -931,6 +931,17 @@ describe("client configuration", () => {
     expect(JSON.parse(readFileSync(`${file}.mcpcage.bak`, "utf8")).mcpServers.tuned.env).toEqual(env);
   });
 
+  it("leaves as it is an entry whose env names a variable with = in it, which the cage would read as a value", () => {
+    // Found by the property-based test of wrap and unwrap: `--env A=B` gave the server A=B instead of
+    // the value of the variable named A=B, and unwrap added a variable A that was never there.
+    const original = { command: "npx", args: ["-y", "pkg"], env: { "A=B": "x", API_KEY: "y" } };
+    const file = write({ mcpServers: { odd: original } });
+    const outcome = wrapConfig(file, { dryRun: false, command });
+    expect(outcome.changed).toEqual([]);
+    expect(outcome.skipped).toEqual([{ name: "odd", reason: 'its env names a variable A=B, and the cage reads what follows "=" in a name as its value: rename it or remove it' }]);
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.odd).toEqual(original);
+  });
+
   it("never replaces a backup: the next one is named after the time, then given a random suffix", () => {
     // The clock stands still, so the second and the third rewrite ask for the same name with the time.
     vi.useFakeTimers({ toFake: ["Date"] });

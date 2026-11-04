@@ -300,6 +300,11 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
   // `--env __proto__` stayed.
   const env: Array<[string, unknown]> = [];
   for (const [name, value] of Object.entries(isJsonObject(entry.env) ? entry.env : {})) {
+    // `run` gives docker each `--env` as it is, and docker, as unwrap does, takes what follows the
+    // first "=" for the value. A name A=B with the value x was written `--env A=B`: the server got A
+    // set to B, where the entry as the client starts it gives A=B=x, which a process reads as A set to
+    // B=x (no environment holds a name with "="), and unwrap added a variable A. It stays as it is.
+    if (name.includes("=")) return { skip: `its env names a variable ${terminalSafe(name)}, and the cage reads what follows "=" in a name as its value: rename it or remove it` };
     const host = hostVariable(name, value);
     if (host === undefined) {
       envFlags.push("--env", name);
