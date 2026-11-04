@@ -15,7 +15,7 @@ import { parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, checkServerId, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, refuseTooMany, type Pending } from "./pinstore.js";
-import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, type Inspector } from "./protect.js";
+import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, writableMounts, writableWarning, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
@@ -63,6 +63,7 @@ Protect options:
   --yes                 with --fix: change the files without asking
   --no-build            with --fix: do not build the sandbox images now
   --command <path>      the mcpcage command written into configurations (default: mcpcage's full path)
+  --writable            with --fix, and with wrap: mount the paths servers are given writable, not read-only
 `;
 
 async function main(argv: string[]): Promise<number> {
@@ -215,6 +216,7 @@ async function wrap(command: "wrap" | "unwrap", argv: string[]): Promise<number>
       "dry-run": { type: "boolean", default: false },
       "no-build": { type: "boolean", default: false },
       command: { type: "string" },
+      writable: { type: "boolean", default: false },
     },
   });
   if (positionals.length === 0) throw new Error(`usage: mcpcage ${command} <config.json> [--dry-run]`);
@@ -222,7 +224,7 @@ async function wrap(command: "wrap" | "unwrap", argv: string[]): Promise<number>
   for (const file of positionals) {
     const outcome =
       command === "wrap"
-        ? wrapConfig(file, { dryRun: values["dry-run"], command: values.command })
+        ? wrapConfig(file, { dryRun: values["dry-run"], command: values.command, writable: values.writable })
         : unwrapConfig(file, { dryRun: values["dry-run"] });
     report(outcome, command, values["dry-run"]);
     if (command === "wrap" && !values["dry-run"] && !values["no-build"]) status = Math.max(status, buildImages(outcome.changed));
@@ -269,6 +271,7 @@ async function protect(argv: string[]): Promise<number> {
       yes: { type: "boolean", default: false },
       "no-build": { type: "boolean", default: false },
       command: { type: "string" },
+      writable: { type: "boolean", default: false },
     },
     strict: true,
   });
@@ -290,7 +293,7 @@ async function protect(argv: string[]): Promise<number> {
     planned.push(line);
     console.log(line);
   };
-  const plan = fixConfigs({ report, command, claudeCodeRunning, dryRun: true, home, log: logPlan });
+  const plan = fixConfigs({ report, command, claudeCodeRunning, dryRun: true, home, log: logPlan, writable: values.writable });
   const servers = plan.files.reduce((total, file) => total + file.changed.length, 0);
   const files = plan.files.filter((file) => file.changed.length > 0).length;
   if (servers === 0) {
@@ -312,7 +315,7 @@ async function protect(argv: string[]): Promise<number> {
   const logNew = (line: string) => {
     if (!planned.includes(line)) console.log(line);
   };
-  const outcome = fixConfigs({ report, command, claudeCodeRunning, dryRun: false, home, log: logNew });
+  const outcome = fixConfigs({ report, command, claudeCodeRunning, dryRun: false, home, log: logNew, writable: values.writable });
   const changed = outcome.files.flatMap((file) => file.changed);
   const status = changed.length < uncaged ? 1 : 0;
   // A failed build is reported and leaves the configuration caged: the image is built at the next start.
@@ -355,6 +358,8 @@ function report(outcome: WrapOutcome, command: string, dryRun: boolean): void {
     // The values wrap moved from the env into mcpcage's arguments are not printed, as no env value is.
     const args = change.after.args ?? [];
     print(`  ${command === "wrap" ? "caged" : "restored"} ${change.name}: ${[change.after.command, ...(command === "wrap" ? withoutEnvValues(args) : args)].join(" ")}`);
+    // Only --writable makes wrap write :rw: what that lets the server change is said for each mount.
+    if (command === "wrap") for (const path of writableMounts(change.after)) print(`    ${writableWarning(change.name, path)}`);
   }
   for (const skipped of outcome.skipped) print(`  skipped ${skipped.name}: ${skipped.reason}`);
   if (outcome.backup) print(`  backup: ${outcome.backup}`);

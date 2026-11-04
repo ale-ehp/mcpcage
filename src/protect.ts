@@ -354,6 +354,8 @@ function openedBy(entry: ServerEntry): string[] {
   if (values["keep-image-user"]) lines.push("runs as the image's own user, which may be root (--keep-image-user)");
   // The access lines name the paths.
   if (values["allow-sensitive-mount"]) lines.push("may mount the whole disk, your home directory or a directory with credentials (--allow-sensitive-mount)");
+  // wrap and --fix mount read-only: a :rw was chosen, and among the files it opens are some the host runs.
+  for (const path of writablePaths(values.mount)) lines.push(`writable: ${terminalSafe(path)}: the server can change files there that git, editors and build tools run`);
   // Docker reads 0 as no limit at all.
   if (Number.parseFloat(values.memory) <= 0) lines.push(`no memory limit (--memory ${terminalSafe(values.memory)})`);
   if (Number.parseFloat(values.cpus) <= 0) lines.push(`no CPU limit (--cpus ${terminalSafe(values.cpus)})`);
@@ -362,6 +364,27 @@ function openedBy(entry: ServerEntry): string[] {
 
 function runValues(own: string[]) {
   return parseArgs({ args: own, options: RUN_OPTIONS, strict: true }).values;
+}
+
+/** The paths of the `--mount` values that `run` mounts writable (`<path>:rw`), as written. */
+function writablePaths(mounts: string[]): string[] {
+  return mounts.filter((mount) => mount.endsWith(":rw")).map((mount) => mount.slice(0, -":rw".length));
+}
+
+/** The paths a wrapped entry mounts writable, read as `run` reads its options; none when `run` would refuse them. */
+export function writableMounts(entry: ServerEntry): string[] {
+  const args = stringArgs(entry);
+  const separator = args.indexOf("--");
+  try {
+    return writablePaths(runValues(args.slice(1, separator === -1 ? args.length : separator)).mount);
+  } catch {
+    return [];
+  }
+}
+
+/** The warning `wrap --writable` and `protect --fix --writable` print for each mount they make writable. */
+export function writableWarning(name: string, path: string): string {
+  return `WARNING ${terminalSafe(name)} can change files in ${terminalSafe(path)}, code and settings that git, editors and build tools run included (--writable)`;
 }
 
 /** The variables of an entry's env that act on the host once it starts mcpcage, with what each does. */
@@ -570,6 +593,8 @@ export interface FixOptions {
   log: (line: string) => void;
   /** Shown as ~ in messages (default: the user's home directory). */
   home?: string;
+  /** `--writable`: mount the paths of the servers it cages writable, as wrapEntry does with it. */
+  writable?: boolean;
 }
 
 /**
@@ -627,7 +652,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const server of targets) {
     const servers = valueAt(config, server.label === undefined ? [file.key] : ["projects", server.label, "mcpServers"]);
     const entry = isJsonObject(servers) && Object.hasOwn(servers, server.name) ? servers[server.name] : undefined;
-    const wrapped = !isJsonObject(servers) || !isJsonObject(entry) ? { skip: "it is no longer in the file" } : rewrite(entry as ServerEntry, options.command);
+    const wrapped = !isJsonObject(servers) || !isJsonObject(entry) ? { skip: "it is no longer in the file" } : rewrite(entry as ServerEntry, options.command, options.writable === true);
     if ("skip" in wrapped) {
       fixed.skipped.push({ name: server.name, label: server.label, reason: wrapped.skip });
       continue;
@@ -647,11 +672,14 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const skipped of fixed.skipped) options.log(`  not changed: ${terminalSafe(skipped.name)} in ${where(skipped.label)}: ${terminalSafe(skipped.reason)}`);
   if (fixed.changed.length === 0) return fixed;
 
+  // Said with the plan, before the question, for each mount --writable made writable. An entry that was
+  // caged already keeps the mounts it had, which the report names.
+  const warnings = (change: FixedFile["changed"][number]) => (options.writable && !change.envOnly ? writableMounts(change.after).map((path) => writableWarning(change.name, path)) : []);
   // When the file cannot be rewritten, the exact command each server should run instead.
   const byHand = fixed.changed.flatMap((change) => {
     const line = `    ${terminalSafe(change.name)}${change.label === undefined ? "" : ` (project ${terminalSafe(change.label)})`}: ${terminalSafe(shownCommand(change.after, "mcpcage").line)}`;
     const names = removed.get(change.after) ?? [];
-    return names.length === 0 ? [line] : [line, `      and remove from its "env": ${names.map(terminalSafe).join(", ")}`];
+    return [line, ...(names.length === 0 ? [] : [`      and remove from its "env": ${names.map(terminalSafe).join(", ")}`]), ...warnings(change).map((warning) => `      ${warning}`)];
   });
   if (byHand.some((line) => line.includes(MASK))) byHand.push(`    (${MASK} stands for the value already in the file, which is not shown)`);
   if (hasComments(text)) {
@@ -680,7 +708,10 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
     return fixed;
   }
   if (!options.dryRun) fixed.backup = replaceFile(file.file, bytes, serialize(config, text));
-  for (const change of fixed.changed) options.log(`  ${options.dryRun ? "cage" : "caged"} ${terminalSafe(change.name)} in ${where(change.label)}`);
+  for (const change of fixed.changed) {
+    options.log(`  ${options.dryRun ? "cage" : "caged"} ${terminalSafe(change.name)} in ${where(change.label)}`);
+    for (const warning of warnings(change)) options.log(`    ${warning}`);
+  }
   if (fixed.backup) options.log(`  backup: ${terminalSafe(file.scope === "user" ? tilde(fixed.backup, home) : fixed.backup)}`);
   return fixed;
 }
@@ -690,12 +721,12 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
  * only named mcpcage would start, wrapped as wrap would have wrapped it; or why it stays as it is.
  * What the command is, is looked at again: the file may have changed since the scan.
  */
-function rewrite(entry: ServerEntry, command: string): { entry: ServerEntry; envOnly?: boolean } | { skip: string } {
-  if (serverType(entry) !== "mcpcage") return wrapEntry(entry, { command });
+function rewrite(entry: ServerEntry, command: string, writable: boolean): { entry: ServerEntry; envOnly?: boolean } | { skip: string } {
+  if (serverType(entry) !== "mcpcage") return wrapEntry(entry, { command, writable });
   const found = mcpcageAt(entry as ServerEntry & { command: string }, command);
   if (found === "other program") {
     const inner = unwrapEntry(entry);
-    return "skip" in inner ? inner : wrapEntry(inner.entry, { command });
+    return "skip" in inner ? inner : wrapEntry(inner.entry, { command, writable });
   }
   if (found === "not found") return { skip: "its mcpcage can no longer be found" };
   const moved = moveHostEnv(entry);

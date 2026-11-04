@@ -16,7 +16,7 @@ import { tooDeep } from "../src/manifest.js";
 import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs } from "../src/protect.js";
-import { runArgs } from "../src/sandbox.js";
+import { parseMount, runArgs } from "../src/sandbox.js";
 import { cli, fakeServer, fakeUserEnv, hostileServer, mcpcageWithEnv, root } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
@@ -100,7 +100,7 @@ function fakeMachine() {
   writeJsonFile(files.claudeJson, {
     ...claudeJsonFiller(),
     mcpServers: {
-      notes: { type: "stdio", command: "mcpcage", args: ["run", "--mount", `${notes}:rw`, "--", "npx", "-y", "notes-mcp"], env: {} },
+      notes: { type: "stdio", command: "mcpcage", args: ["run", "--mount", notes, "--", "npx", "-y", "notes-mcp"], env: {} },
       time: { type: "stdio", command: "uvx", args: ["mcp-server-time"], env: {} },
     },
     projects: {
@@ -343,17 +343,44 @@ describe("JSON with comments", () => {
 });
 
 describe("wrapping one entry", () => {
-  it("mounts the existing paths a server is given, writable, and leaves the package itself alone", () => {
+  it("mounts the existing paths a server is given, read-only, and leaves the package itself alone", () => {
     const data = mkdtempSync(join(tmpdir(), "mcpcage-data-"));
     const local = mkdtempSync(join(tmpdir(), "mcpcage-package-"));
-    const wrapped = wrapEntry({ command: "npx", args: ["-y", local, data, "/definitely/not/here", "relative/dir"], env: { API_KEY: "x" } }, { command: "/opt/mcpcage" });
+    const entry = { command: "npx", args: ["-y", local, data, "/definitely/not/here", "relative/dir"], env: { API_KEY: "x" } };
+    const wrapped = wrapEntry(entry, { command: "/opt/mcpcage" });
     expect(wrapped).toEqual({
+      entry: {
+        command: "/opt/mcpcage",
+        args: ["run", "--env", "API_KEY", "--mount", data, "--", "npx", "-y", local, data, "/definitely/not/here", "relative/dir"],
+        env: { API_KEY: "x" },
+      },
+    });
+    // Writable only when asked for (--writable), as every path was before.
+    expect(wrapEntry(entry, { command: "/opt/mcpcage", writable: true })).toEqual({
       entry: {
         command: "/opt/mcpcage",
         args: ["run", "--env", "API_KEY", "--mount", `${data}:rw`, "--", "npx", "-y", local, data, "/definitely/not/here", "relative/dir"],
         env: { API_KEY: "x" },
       },
     });
+  });
+
+  it("mounts a path that ends in :rw or :ro read-only as it is written, never the path without that ending", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-data-"));
+    const notes = join(top, "notes");
+    mkdirSync(notes);
+    mkdirSync(`${notes}:rw`);
+    mkdirSync(`${notes}:ro`);
+    const wrapped = wrapEntry({ command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", `${notes}:rw`, `${notes}:ro`] }, { command: "mcpcage" });
+    expect(wrapped).toEqual({
+      entry: { command: "mcpcage", args: ["run", "--mount", `${notes}:rw:ro`, "--mount", `${notes}:ro:ro`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", `${notes}:rw`, `${notes}:ro`] },
+    });
+    // As `run` reads them: each directory as it is named, read-only; notes itself is not mounted.
+    expect(parseMount(`${notes}:rw:ro`)).toEqual({ source: `${notes}:rw`, target: `${notes}:rw`, readOnly: true });
+    expect(parseMount(`${notes}:ro:ro`)).toEqual({ source: `${notes}:ro`, target: `${notes}:ro`, readOnly: true });
+    const writable = wrapEntry({ command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", `${notes}:rw`] }, { command: "mcpcage", writable: true });
+    expect(writable).toMatchObject({ entry: { args: ["run", "--mount", `${notes}:rw:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", `${notes}:rw`] } });
+    expect(parseMount(`${notes}:rw:rw`)).toEqual({ source: `${notes}:rw`, target: `${notes}:rw`, readOnly: false });
   });
 
   it("gives a ~/ argument as the absolute path it mounts, because HOME is /tmp inside the cage", () => {
@@ -365,7 +392,7 @@ describe("wrapping one entry", () => {
       expect(wrapped).toEqual({
         entry: {
           command: "mcpcage",
-          args: ["run", "--mount", `${join(home, "notes")}:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", join(home, "notes"), "~/missing"],
+          args: ["run", "--mount", join(home, "notes"), "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", join(home, "notes"), "~/missing"],
         },
       });
     } finally {
@@ -1231,7 +1258,7 @@ describe("mcpcage protect", () => {
     expect(out).toContain("                install scripts: unknown (offline, not in cache)\n");
     expect(line("remote")).toMatch(/^  remote {8}https:\/\/mcp\.example\.com\/mcp {39}remote, nothing to cage$/);
     expect(out).toContain("Claude Code  ~/.claude.json (user)\n");
-    expect(line("notes")).toMatch(new RegExp(`^  notes {9}mcpcage run --mount ${machine.notes}:rw -- npx -y notes-mcp +caged$`));
+    expect(line("notes")).toMatch(new RegExp(`^  notes {9}mcpcage run --mount ${machine.notes} -- npx -y notes-mcp +caged$`));
     expect(line("time")).toMatch(/^  time {10}uvx mcp-server-time +uvx, not supported yet$/);
     expect(out).toContain(`Claude Code  ~/.claude.json (project ${project})\n  proj-npx `);
     expect(line("proj-npx")).toMatch(/NOT CAGED$/);
@@ -1302,7 +1329,7 @@ describe("mcpcage protect", () => {
       globalShortcut: "Alt+Space",
     });
     expect(JSON.parse(readFileSync(files.cursor, "utf8")).mcpServers).toEqual({
-      files: { command: installed, args: ["run", "--mount", `${data}:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", data] },
+      files: { command: installed, args: ["run", "--mount", data, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", data] },
       keys,
     });
     expect(JSON.parse(readFileSync(files.mcpJson, "utf8")).mcpServers["project-tool"]).toEqual({
@@ -1379,7 +1406,7 @@ describe("mcpcage protect", () => {
     expect(dry.stdout).toBe(
       [
         `${file} (mcpServers) [dry run]`,
-        `  caged notes: mcpcage run --mount ${notes}:rw -- npx -y @modelcontextprotocol/server-filesystem ${notes}`,
+        `  caged notes: mcpcage run --mount ${notes} -- npx -y @modelcontextprotocol/server-filesystem ${notes}`,
         "  skipped root: needs /, which mcpcage will not mount: the whole disk",
         "",
       ].join("\n"),
@@ -1391,7 +1418,42 @@ describe("mcpcage protect", () => {
     expect(wrapped.stdout).toContain("  skipped root: needs /, which mcpcage will not mount: the whole disk\n");
     expect(JSON.parse(readFileSync(file, "utf8")).mcpServers).toEqual({
       root: servers.root,
-      notes: { command: "mcpcage", args: ["run", "--mount", `${notes}:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", notes] },
+      notes: { command: "mcpcage", args: ["run", "--mount", notes, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", notes] },
+    });
+  });
+
+  it("wrap --writable mounts the paths writable, as wrap did before, and warns once for each", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-wrap-writable-"));
+    const home = join(top, "home");
+    const cage = join(top, "cage");
+    const notes = join(top, "notes");
+    const docs = join(top, "docs");
+    for (const dir of [home, cage, notes, docs]) mkdirSync(dir, { recursive: true });
+    const file = join(top, "mcp.json");
+    writeJsonFile(file, {
+      mcpServers: {
+        notes: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", notes, docs] },
+        memory: { command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"] },
+      },
+    });
+    const env = fakeUserEnv(home, cage);
+
+    const wrapped = mcpcageWithEnv(env, "wrap", "--no-build", "--writable", file);
+    expect(wrapped.code, wrapped.stderr).toBe(0);
+    expect(wrapped.stdout).toBe(
+      [
+        `${file} (mcpServers)`,
+        `  caged notes: mcpcage run --mount ${notes}:rw --mount ${docs}:rw -- npx -y @modelcontextprotocol/server-filesystem ${notes} ${docs}`,
+        `    WARNING notes can change files in ${notes}, code and settings that git, editors and build tools run included (--writable)`,
+        `    WARNING notes can change files in ${docs}, code and settings that git, editors and build tools run included (--writable)`,
+        "  caged memory: mcpcage run -- npx -y @modelcontextprotocol/server-memory",
+        `  backup: ${file}.mcpcage.bak`,
+        "",
+      ].join("\n"),
+    );
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.notes).toEqual({
+      command: "mcpcage",
+      args: ["run", "--mount", `${notes}:rw`, "--mount", `${docs}:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", notes, docs],
     });
   });
 
@@ -1615,6 +1677,74 @@ describe("mcpcage protect", () => {
     expect(again.code).toBe(0);
   });
 
+  it("names each writable mount of a caged entry, counts its cage as opened, and --fix --writable is what writes one", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-writable-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    const notes = join(top, "notes");
+    const docs = join(top, "docs");
+    const reference = join(top, "reference");
+    const data = join(top, "data");
+    for (const dir of [home, project, cage, notes, docs, reference, data]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    const filesystem = ["npx", "-y", "@modelcontextprotocol/server-filesystem"];
+    const entries = {
+      notes: { command: "mcpcage", args: ["run", "--mount", `${notes}:rw`, "--", ...filesystem, notes] },
+      docs: { command: "mcpcage", args: ["run", `--mount=${docs}:rw`, "--mount", reference, "--", ...filesystem, docs, reference] },
+      reader: { command: "mcpcage", args: ["run", "--mount", reference, "--", ...filesystem, reference] },
+      fresh: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", data] },
+    };
+    writeJsonFile(cursor, { mcpServers: entries });
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: fakeMcpcage().path });
+    const indent = " ".repeat(16);
+    const what = "the server can change files there that git, editors and build tools run";
+
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(scan.stderr).toBe("");
+    expect(scan.stdout).toMatch(new RegExp(`^ {2}notes {9}mcpcage run --mount ${notes}:rw -- .* {2}caged, with the cage opened\n${indent}writable: ${notes}: ${what}\n {2}docs `, "m"));
+    // Written with `=`, read as `run` reads it; the read-only mount next to it is not named.
+    expect(scan.stdout).toMatch(new RegExp(`^ {2}docs {10}mcpcage run --mount=${docs}:rw --mount ${reference} -- .* {2}caged, with the cage opened\n${indent}writable: ${docs}: ${what}\n {2}reader `, "m"));
+    expect(scan.stdout).toMatch(new RegExp(`^ {2}reader {8}mcpcage run --mount ${reference} -- .* {2}caged\n {2}fresh `, "m"));
+    expect(scan.stdout.match(/writable: /g)).toHaveLength(2);
+    expect(scan.stdout).toContain("  1 already runs through mcpcage.\n  2 run through mcpcage with the cage opened by their options.\n");
+
+    // A writable mount is an option someone wrote: --fix leaves it. --writable mounts the new one writable, and says so in the plan.
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--writable", "--command", "mcpcage");
+    expect(fix.stderr).toBe("");
+    expect(fix.stdout).toContain(
+      `\nPlan\n  cage fresh in ${tilde(cursor, home)}\n    WARNING fresh can change files in ${data}, code and settings that git, editors and build tools run included (--writable)\n\n`,
+    );
+    expect(fix.stdout.match(/WARNING/g)).toHaveLength(1);
+    const after = JSON.parse(readFileSync(cursor, "utf8")).mcpServers;
+    for (const name of ["notes", "docs", "reader"] as const) expect(after[name]).toEqual(entries[name]);
+    expect(after.fresh).toEqual({ command: "mcpcage", args: ["run", "--mount", `${data}:rw`, "--", ...filesystem, data] });
+    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(again.stdout).toContain(`${indent}writable: ${data}: ${what}\n`);
+    expect(again.stdout).toContain("  1 already runs through mcpcage.\n  3 run through mcpcage with the cage opened by their options.\n");
+    expect(again.code).toBe(0);
+  });
+
+  it("--fix mounts the paths read-only without --writable, and prints no warning", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-read-only-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    const data = join(top, "data");
+    for (const dir of [home, project, cage, data]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    writeJsonFile(cursor, { mcpServers: { fresh: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", data] } } });
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: fakeMcpcage().path });
+
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", "mcpcage");
+    expect(fix.stdout).toContain(`\nPlan\n  cage fresh in ${tilde(cursor, home)}\n\n`);
+    expect(fix.stdout).not.toContain("WARNING");
+    expect(JSON.parse(readFileSync(cursor, "utf8")).mcpServers.fresh).toEqual({ command: "mcpcage", args: ["run", "--mount", data, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", data] });
+    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(again.stdout).toMatch(/^ {2}fresh {9}mcpcage run --mount .* {2}caged$/m);
+    expect(again.stdout).not.toContain("writable: ");
+  });
+
   it("counts a wrapped entry as caged only when it starts the mcpcage --fix writes, and --fix cages what a look-alike starts", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-look-alike-"));
     const home = join(top, "home");
@@ -1805,13 +1935,22 @@ describe("mcpcage protect", () => {
     expect(plan.files.map((fixed) => fixed.changed.map((change) => change.name))).toEqual([["user-npx", "proj-npx"]]);
     expect(planned).toEqual(["  cage user-npx in ~/.claude.json", `  cage proj-npx in ~/.claude.json (project ${project})`]);
     expect(readFileSync(file, "utf8")).toBe(text); // a dry run writes nothing
+    // With --writable, the commands to write by hand say what each writable mount lets the server change.
+    const byHand: string[] = [];
+    fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: true, dryRun: true, log: (line) => byHand.push(line), home, writable: true });
+    expect(byHand.slice(0, 3)).toEqual([
+      "    user-npx: /opt/mcpcage run --env ACME_TOKEN -- npx -y @acme/user-mcp",
+      `    proj-npx (project ${project}): /opt/mcpcage run --mount ${data}:rw -- npx -y @acme/project-mcp@1.2.0 ${data}`,
+      `      WARNING proj-npx can change files in ${data}, code and settings that git, editors and build tools run included (--writable)`,
+    ]);
+    expect(byHand[3]).toMatch(/^ {2}not changed: Claude Code is running/);
 
     const logged: string[] = [];
     const outcome = fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: false, dryRun: false, log: (line) => logged.push(line), home });
     const after = readFileSync(file, "utf8");
     const parsed = JSON.parse(after);
     expect(parsed.mcpServers["user-npx"]).toEqual({ ...userEntry, command: "/opt/mcpcage", args: ["run", "--env", "ACME_TOKEN", "--", "npx", "-y", "@acme/user-mcp"] });
-    expect(parsed.projects[project].mcpServers["proj-npx"]).toEqual({ ...projectEntry, command: "/opt/mcpcage", args: ["run", "--mount", `${data}:rw`, "--", "npx", "-y", "@acme/project-mcp@1.2.0", data] });
+    expect(parsed.projects[project].mcpServers["proj-npx"]).toEqual({ ...projectEntry, command: "/opt/mcpcage", args: ["run", "--mount", data, "--", "npx", "-y", "@acme/project-mcp@1.2.0", data] });
     parsed.mcpServers["user-npx"] = userEntry;
     parsed.projects[project].mcpServers["proj-npx"] = projectEntry;
     expect(parsed).toEqual(original); // nothing else changed

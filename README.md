@@ -121,15 +121,16 @@ or put `mcpcage run` in front of a server command yourself:
   "mcpServers": {
     "filesystem": {
       "command": "mcpcage",
-      "args": ["run", "--mount", "/Users/me/notes:rw", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/Users/me/notes"]
+      "args": ["run", "--mount", "/Users/me/notes", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/Users/me/notes"]
     }
   }
 }
 ```
 
 `wrap` and `protect --fix` add that `--mount` for you: every path a server is given as an argument
-and that exists on your machine is mounted read-write at the same path, and `~/` is expanded,
-because inside the cage HOME is `/tmp`. The exception is a path that would undo the cage: the whole
+and that exists on your machine is mounted read-only at the same path, and `~/` is expanded,
+because inside the cage HOME is `/tmp`; with `--writable` they are mounted writable (`:rw`), with
+a warning for each (see below). The exception is a path that would undo the cage: the whole
 disk, your home directory, a directory with credentials or system files (`~/.ssh`, `~/.aws`,
 `~/.config/gh`, `/etc`, the Docker sockets, mcpcage's own `~/.mcpcage`...), or a place your machine
 runs commands from: other clients' MCP and agent configurations (`~/.cursor`, `~/.claude`, Claude
@@ -152,14 +153,21 @@ stays), `OPENSSL_*` and `GCONV_PATH` (they can load a library into Node or the C
 own `HOME`, and where mcpcage keeps its pins is your choice, not a server's. `PATH` stays, because it
 is often what lets the client find `node`.
 
-Inside a writable mount, the git and editor settings that exist when the server starts (`.git`,
-`.vscode`, `.idea`, `.cursor`, `.claude`, `.devin`, `.windsurf`, `.mcp.json`, at any depth) are
-mounted read-only on top, because git and editors run the commands they name as soon as you open
-the project. So is the repository a `.git` file points to (a worktree, a submodule), and the
-directories that lead to each of them are held in place, so the server cannot move a setting away
-and put its own where it was. The server can still change every other file there, code you later run included, and
-create such settings where none existed (a new nested repository, a project MCP configuration):
-give a server that only needs to read a read-only mount, without `:rw`.
+**Writable mounts are your choice.** A server that can write in a directory can change what your
+machine later runs from it: the code you run and build, and the files that git, editors and build
+tools read as settings and run commands from, such as git hooks wherever `core.hooksPath` points,
+files a git configuration includes, repositories under any name, the `.env` file a client loads
+into a server's environment, or a new nested repository. No list of names covers them all, so
+mounts are read-only unless you write `:rw` or pass `--writable` to `wrap` or `protect --fix`, and
+`protect` names every writable mount of a caged server (`writable: <path>`) and counts that server
+as caged with its cage opened. As a best effort inside a writable mount, the git and editor
+settings that exist when the server starts (`.git`, `.vscode`, `.idea`, `.cursor`, `.claude`,
+`.devin`, `.windsurf`, `.mcp.json`, at any depth) are mounted read-only on top, and so is the
+repository a `.git` file points to (a worktree, a submodule). The directories that lead to each of
+them are held in place, so the server cannot move a setting away and put its own where it was: each
+is a mount point of its own, so renaming one fails with `EBUSY`, and moving a file from one held
+directory into another, or between a held directory and the rest of the mount, fails with `EXDEV`,
+as between two filesystems.
 
 ## How it works
 
@@ -265,14 +273,16 @@ It never mounts a sensitive path: the server is inspected without it, and the re
 `--fix` prints the plan, asks for the word `yes` (or takes `--yes`), rewrites only the server
 entries of each file in the file's own style, moves into the cage the `env` of a caged server that
 would act on your machine (as `wrap` does), leaves a server that needs a sensitive path as it is
-(with the reason), keeps a backup (`<file>.mcpcage.bak`) and replaces the file atomically.
+(with the reason), keeps a backup (`<file>.mcpcage.bak`) and replaces the file atomically. The
+paths it mounts are read-only unless you pass `--writable`; the options of a server caged already,
+a writable mount included, stay as they are written.
 
 **The cage.** Each server runs with:
 
 | Control | Setting |
 |---|---|
 | Network | `--network none` (opt in with `--allow-net`) |
-| Filesystem | read-only root, `noexec` tmpfs at `/tmp`, no host paths unless `--mount` (read-only by default; in a writable one, existing git and editor settings stay read-only) |
+| Filesystem | read-only root, `noexec` tmpfs at `/tmp`, no host paths unless `--mount` (read-only unless `:rw`; in a writable one, existing git and editor settings stay read-only as a best effort) |
 | User | `65532:65532` (nonroot) |
 | Privileges | `--cap-drop ALL`, `no-new-privileges` |
 | Resources | 512 MB memory and no swap, 1 CPU, 128 processes (configurable) |
@@ -319,8 +329,9 @@ question you are refused), `--strict`, `--id`, `--memory`, `--cpus`, `--keep-ima
 `--image`), `--rebuild`, `--no-sandbox`.
 
 Protect options: `--project <dir>` (default: the current directory), `--inspect`, `--offline`,
-`--fix`, `--yes`, `--no-build`, `--command <path>`. Without `--fix` the exit code is 1 when at
-least one npx server runs uncaged, so it can gate a script.
+`--fix`, `--yes`, `--no-build`, `--command <path>`, `--writable` (with `--fix`, and with `wrap`:
+mount the paths servers are given writable instead of read-only). Without `--fix` the exit code is
+1 when at least one npx server runs uncaged, so it can gate a script.
 
 ## Limitations
 

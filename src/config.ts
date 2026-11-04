@@ -59,13 +59,14 @@ export interface WrapOutcome {
  * Rewrites every npx-launched stdio server so the client starts it through `mcpcage run`. An entry
  * whose command is only named mcpcage (see mcpcageAt) is no cage: what it would start is wrapped as
  * an npx entry is, as `protect --fix` does. It was skipped as "already wrapped" for its name alone.
+ * `writable` mounts the paths the servers are given writable (see wrapEntry).
  */
-export function wrapConfig(file: string, options: { dryRun: boolean; command?: string }): WrapOutcome {
+export function wrapConfig(file: string, options: { dryRun: boolean; command?: string; writable?: boolean }): WrapOutcome {
   const command = options.command ?? "mcpcage";
   return transform(file, options.dryRun, (name, entry, skip) => {
     const original = isWrapped(entry) && mcpcageAt(entry, command) === "other program" ? unwrapEntry(entry) : { entry };
     if ("skip" in original) return skip(name, original.skip);
-    const wrapped = wrapEntry(original.entry, { command });
+    const wrapped = wrapEntry(original.entry, { command, writable: options.writable });
     return "skip" in wrapped ? skip(name, wrapped.skip) : wrapped.entry;
   });
 }
@@ -138,15 +139,18 @@ export function hostVariable(name: string, value: unknown): { to: "container" | 
  * become explicit `--env NAME` flags, because nothing from the host reaches the container unless it
  * is named, and stay in `env`, so their values (credentials, often) never appear in the arguments.
  * Those that would act on the host (HOST_ENV) leave `env`: into the cage as `--env NAME=value`, or
- * not at all. A path the server is given and that exists here becomes a writable mount at the same
- * path, because the server is expected to work there: a filesystem server pointed at ~/notes would
- * otherwise find nothing inside the cage. Every other path, and the network, stay closed.
- * A `~/` argument becomes the absolute path that is mounted: inside the cage HOME is /tmp, so a
- * server that expands `~` itself would look in /tmp. A server given the whole disk, the home
- * directory or a directory with credentials (see sensitive.ts) is not caged at all: that mount would
- * undo the cage, so the entry stays as it is and the reason is given.
+ * not at all. A path the server is given and that exists here is mounted at the same path, because
+ * the server is expected to work there: a filesystem server pointed at ~/notes would otherwise find
+ * nothing inside the cage. Every other path, and the network, stay closed. The mount is read-only
+ * unless `writable` is given (`--writable`): a server that can write in a project can change files
+ * that git, editors and build tools there read and run on the host, more of them than any list of
+ * names kept read-only covers (see withSettingsReadOnly), so write access is the user's explicit
+ * choice. A `~/` argument becomes the absolute path that is mounted: inside the cage HOME is
+ * /tmp, so a server that expands `~` itself would look in /tmp. A server given the whole disk, the
+ * home directory or a directory with credentials (see sensitive.ts) is not caged at all: that mount
+ * would undo the cage, so the entry stays as it is and the reason is given.
  */
-export function wrapEntry(entry: ServerEntry, options: { command: string }): { entry: ServerEntry } | { skip: string } {
+export function wrapEntry(entry: ServerEntry, options: { command: string; writable?: boolean }): { entry: ServerEntry } | { skip: string } {
   const type = serverType(entry);
   if (type === "remote") return { skip: "remote server: nothing runs locally to cage" };
   if (!entry.command) return { skip: "no command" };
@@ -192,7 +196,10 @@ export function wrapEntry(entry: ServerEntry, options: { command: string }): { e
       envFlags.push("--env", `${name}=${value}`);
     }
   }
-  const mountFlags = [...new Set(paths.filter((path): path is string => path !== undefined))].flatMap((path) => ["--mount", `${path}:rw`]);
+  // `run` reads a final :rw or :ro as the mode: a path that ends so itself gets an explicit :ro, or
+  // a directory named notes:rw would make the directory notes writable.
+  const mode = (path: string) => (options.writable ? `${path}:rw` : /:(?:rw|ro)$/.test(path) ? `${path}:ro` : path);
+  const mountFlags = [...new Set(paths.filter((path): path is string => path !== undefined))].flatMap((path) => ["--mount", mode(path)]);
   const server = serverArgs.map((arg, index) => paths[index] ?? arg);
   const wrapped: ServerEntry = { ...entry, command: options.command, args: ["run", ...envFlags, ...mountFlags, "--", entry.command, ...npxPart, ...server] };
   if (isJsonObject(entry.env)) wrapped.env = Object.fromEntries(env) as Record<string, string>;

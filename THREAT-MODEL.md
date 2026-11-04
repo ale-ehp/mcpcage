@@ -54,8 +54,9 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   can break the isolation. gVisor or microVM runtimes are on the roadmap for stronger isolation.
 - **What you mount or allow.** A server can use what it is given: a `--mount`, `--allow-net`.
   Mounts are read-only unless `:rw` is written explicitly. `wrap` and `protect --fix` mount the
-  paths a server is configured with read-write, because the server is expected to work there, but
-  never the whole disk, the home directory, a directory with credentials or system files
+  paths a server is configured with, because the server is expected to work there: read-only, and
+  writable only with `--writable`, which prints a warning for each such mount. They never mount
+  the whole disk, the home directory, a directory with credentials or system files
   (`~/.ssh`, `~/.aws`, `~/.config/gh`, `/etc`, the Docker sockets, mcpcage's own `~/.mcpcage`...),
   nor a place the machine runs commands from: other clients' MCP and agent configurations
   (`~/.cursor`, `~/.claude`...), shell and login startup files, git's configuration and any
@@ -63,13 +64,23 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   programs on the PATH and where they are installed (`~/.local/bin`, `~/.npm`, `/usr/local`...): a
   server that needs one is left uncaged, with the reason, and the report names the path. `mcpcage
   run` refuses such a `--mount` unless `--allow-sensitive-mount` is given; with it, the server can
-  use that path like any other. Inside a writable mount, the git and editor settings that exist at
-  start (`.git`, `.vscode`, `.idea`, `.cursor`, `.claude`, `.devin`, `.windsurf`, `.mcp.json`, at
-  any depth) stay read-only, because git and editors run the commands they name as soon as the
-  project is open; so does the repository a `.git` file points to, and the directories that lead
-  to each of them are held in place, so that none can be moved away and replaced. The server can still change every other file there, code you later run
-  included, and create such settings where none existed (a new nested repository, a project MCP
-  configuration): a server that only needs to read should get a read-only mount.
+  use that path like any other.
+- **Writable mounts.** A server with a writable mount (`:rw`, or `--writable` in `wrap` and
+  `protect --fix`) can change what the host later runs from it: the code you run and build, and the
+  files that git, editors and build tools read as settings and run commands from. Among them: the
+  hooks of a directory that `core.hooksPath` names (husky's `.husky/_`), a file that a git
+  configuration includes (`include.path`), a repository under any name (a bare `proj.git`), the
+  `.env` file a client loads into a server's environment (VS Code's `envFile`), and a new nested
+  repository or project MCP configuration where none existed. No list of names covers all of them,
+  so write access is an explicit choice, and `protect` names each writable mount of a caged server
+  and counts it as caged with its cage opened. As a best effort, the git and editor settings that
+  exist at start (`.git`, `.vscode`, `.idea`, `.cursor`, `.claude`, `.devin`, `.windsurf`,
+  `.mcp.json`, at any depth) stay read-only, because git and editors run the commands they name as
+  soon as the project is open; so does the repository a `.git` file points to. The directories that
+  lead to each of them are held in place, each a mount point of its own, so that none can be moved
+  away and replaced: renaming one fails with `EBUSY`, and moving a file from one held directory into
+  another, or between a held directory and the rest of the mount, fails with `EXDEV`, as between two
+  filesystems. A server that only needs to read should get a read-only mount.
 - **Two cages writing in one directory.** The git and editor settings of a writable mount are
   found at start, then mounted read-only by Docker. Two cages of servers with write access to the
   same directory, running at once, give one of them a moment to swap a setting for a symlink before
@@ -79,9 +90,9 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 - **Sensitive paths during `protect --inspect`.** Inspection never mounts them, and mounts every
   other path argument read-only; the report names the paths a server was inspected without.
 - **Misuse of granted capabilities.** A filesystem server with a writable mount can still
-  overwrite files in that mount when asked to, and create files that git, an editor or a build
-  later reads as settings or runs as code; only the git and editor settings that already exist stay
-  read-only. mcpcage records the call but does not judge it.
+  overwrite files in that mount when asked to, and change or create files that git, an editor or a
+  build later reads as settings or runs as code (see Writable mounts). mcpcage records the call but
+  does not judge it.
 - **Prompt injection through tool results.** Data a tool returns can still steer the model. The
   cage limits what a misled model can reach through that server, not what it decides.
 - **The highlighter is a set of fixed rules, not a verdict.** A paraphrased instruction can avoid
