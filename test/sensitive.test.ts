@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
-import { sensitivePath } from "../src/sensitive.js";
+import { describe, expect, it, vi } from "vitest";
+import { discoverConfigs } from "../src/clients.js";
+import { clientPlaces, sensitivePath, thisMachine } from "../src/sensitive.js";
 
 describe("paths mcpcage will not mount", () => {
   const mac = { home: "/Users/me", platform: "darwin" as const };
@@ -229,5 +230,84 @@ describe("paths mcpcage will not mount", () => {
     expect(sensitivePath("c:/users/ME/.SSH/id_rsa", windows)).toBe("your SSH keys in ~\\.ssh");
     expect(sensitivePath("C:\\Users", windows)).toBe("your whole home directory and more");
     expect(sensitivePath("C:\\Users\\me\\Documents", windows)).toBeUndefined();
+  });
+});
+
+describe("client configurations where the environment moves them", () => {
+  const vscode = "the MCP servers and settings of VS Code";
+
+  it("counts VS Code under an absolute XDG_CONFIG_HOME on Linux, its profiles and what holds it", () => {
+    const options = { home: "/home/me", platform: "linux" as const, clients: clientPlaces({ platform: "linux", home: "/home/me", env: { XDG_CONFIG_HOME: "/xdg" } }) };
+    expect(sensitivePath("/xdg/Code/User/mcp.json", options)).toBe(`${vscode} in /xdg/Code/User`);
+    expect(sensitivePath("/xdg/Code/User/profiles/work/mcp.json", options)).toBe(`${vscode} in /xdg/Code/User`);
+    expect(sensitivePath("/xdg/Code - Insiders/User", options)).toBe(`${vscode} in /xdg/Code - Insiders/User`);
+    expect(sensitivePath("/xdg", options)).toBe(`${vscode} in /xdg, which holds /xdg/Code/User`);
+    expect(sensitivePath("/xdg/other-tool", options)).toBeUndefined();
+    // The places of the home directory keep their words.
+    expect(sensitivePath("/home/me/.cursor/mcp.json", options)).toBe("the MCP servers, settings and extensions of Cursor in ~/.cursor");
+    // Without the places of this environment, the same file is ordinary: they come only through the option.
+    expect(sensitivePath("/xdg/Code/User/mcp.json", { home: "/home/me", platform: "linux" })).toBeUndefined();
+  });
+
+  it("counts GitHub Copilot under COPILOT_HOME, and never the home directory or what holds it", () => {
+    const at = (copilot: string) => ({ home: "/Users/me", platform: "darwin" as const, clients: clientPlaces({ platform: "darwin", home: "/Users/me", env: { COPILOT_HOME: copilot } }) });
+    const copilot = "the MCP servers and settings of GitHub Copilot CLI";
+    expect(sensitivePath("/srv/copilot/mcp-config.json", at("/srv/copilot"))).toBe(`${copilot} in /srv/copilot`);
+    expect(sensitivePath("/srv/copilot/session-state", at("/srv/copilot"))).toBe(`${copilot} in /srv/copilot`);
+    expect(sensitivePath("/srv", at("/srv/copilot"))).toBe(`${copilot} in /srv, which holds /srv/copilot`);
+    expect(sensitivePath("/srv/data", at("/srv/copilot"))).toBeUndefined();
+    // COPILOT_HOME at the home directory, or above it: its file counts, the rest of the home stays as it was.
+    for (const where of ["/Users/me", "/Users", "/"]) {
+      const options = at(where);
+      expect(sensitivePath("/Users/me/Projects/notes", options), where).toBeUndefined();
+      expect(sensitivePath("/Users/me", options), where).toBe("your whole home directory");
+    }
+    expect(sensitivePath("/Users/me/mcp-config.json", at("/Users/me"))).toBe(`${copilot} in ~/mcp-config.json`);
+    // A relative COPILOT_HOME names no directory of its own.
+    expect(sensitivePath(resolve("copilot", "mcp-config.json"), at("copilot"))).toBeUndefined();
+  });
+
+  it("counts the Windows clients under another APPDATA, and Devin under the usual one", () => {
+    const windows = { home: "C:\\Users\\me", platform: "win32" as const };
+    const options = { ...windows, clients: clientPlaces({ platform: "win32", home: windows.home, env: { APPDATA: "D:\\Roaming" } }) };
+    expect(sensitivePath("D:\\Roaming\\Claude\\claude_desktop_config.json", options)).toBe("the MCP servers and settings of Claude Desktop in D:\\Roaming\\Claude");
+    expect(sensitivePath("d:/roaming/code/user/mcp.json", options)).toBe(`${vscode} in D:\\Roaming\\Code\\User`);
+    expect(sensitivePath("D:\\Roaming\\devin", options)).toBe("the MCP servers and settings of Devin in D:\\Roaming\\devin");
+    expect(sensitivePath("D:\\Roaming", options)).toBe("the MCP servers and settings of Claude Desktop in D:\\Roaming, which holds D:\\Roaming\\Claude");
+    expect(sensitivePath("D:\\Roaming\\Notes", options)).toBeUndefined();
+    // On Windows Devin keeps its file under %APPDATA%, where discovery looks for it, even with APPDATA as usual.
+    expect(sensitivePath("C:\\Users\\me\\AppData\\Roaming\\devin\\mcp_config.json", windows)).toBe("the MCP servers and settings of Devin in ~\\AppData\\Roaming\\devin");
+  });
+
+  it("counts every user file discovery lists for the same environment, VS Code profiles included", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-relocated-"));
+    const home = join(top, "home");
+    const xdg = join(top, "xdg");
+    const profile = join(xdg, "Code", "User", "profiles", "work", "mcp.json");
+    mkdirSync(join(profile, ".."), { recursive: true });
+    writeFileSync(profile, "{}\n");
+    const machines = [
+      { platform: "linux" as const, home, env: { XDG_CONFIG_HOME: xdg, COPILOT_HOME: join(top, "copilot") } },
+      { platform: "darwin" as const, home, env: { COPILOT_HOME: join(top, "copilot") } },
+      { platform: "win32" as const, home: "C:\\Users\\me", env: { APPDATA: "D:\\Roaming", COPILOT_HOME: "E:\\copilot" } },
+    ];
+    for (const machine of machines) {
+      const user = discoverConfigs({ ...machine, project: machine.platform === "win32" ? "C:\\work" : join(top, "work") }).filter((location) => location.scope === "user");
+      if (machine.platform === "linux") expect(user.map((location) => location.file)).toContain(profile);
+      const options = { home: machine.home, platform: machine.platform, clients: clientPlaces(machine) };
+      for (const location of user) expect(sensitivePath(location.file, options), `${machine.platform} ${location.file}`).toBeDefined();
+    }
+  });
+
+  it("takes the places from this machine's environment", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-relocated-"));
+    const copilot = join(top, "copilot");
+    vi.stubEnv("COPILOT_HOME", copilot);
+    try {
+      expect(thisMachine().clients).toContainEqual({ path: copilot, what: "the MCP servers and settings of GitHub Copilot CLI" });
+      expect(sensitivePath(join(copilot, "mcp-config.json"), thisMachine())).toMatch(/^the MCP servers and settings of GitHub Copilot CLI in /);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

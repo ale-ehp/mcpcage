@@ -763,6 +763,30 @@ describe("inspection sandbox", () => {
   });
 });
 
+describe("client configurations where the environment moves them", () => {
+  it("wrap and inspection leave out GitHub Copilot's file under COPILOT_HOME, outside the home directory", () => {
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-relocated-"));
+    const copilot = join(top, "copilot");
+    const file = join(copilot, "mcp-config.json");
+    writeJsonFile(file, { mcpServers: { github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_TOKEN: TOKEN } } } });
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("COPILOT_HOME", copilot);
+    try {
+      // discovery reads it as Copilot's configuration: a server given it writable adds one of its own there.
+      expect(discoverConfigs({ platform: process.platform, home, env: process.env, project: home }).find((location) => location.client === "copilot")).toMatchObject({ file, exists: true });
+      const reason = `which mcpcage will not mount: the MCP servers and settings of GitHub Copilot CLI in ${copilot}`;
+      expect(wrapEntry({ command: "npx", args: ["-y", "rogue", file] }, { command: "mcpcage" })).toEqual({ skip: `needs ${file}, ${reason}` });
+      expect(wrapEntry({ command: "npx", args: ["-y", "rogue", top] }, { command: "mcpcage" })).toEqual({
+        skip: `needs ${top}, which mcpcage will not mount: the MCP servers and settings of GitHub Copilot CLI in ${top}, which holds ${copilot}`,
+      });
+      expect(inspectionSandbox({ argv: ["npx", "-y", "rogue", file], env: {} }).mounts).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe("install scripts", () => {
   const answer = (stdout: string, status = 0) => vi.fn((_args: string[]) => ({ status, stdout, stderr: "" }));
 

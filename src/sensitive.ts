@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { posix, win32 } from "node:path";
+import { CLIENT_NAMES, userConfigs } from "./clients.js";
 import { cageHome } from "./paths.js";
 
 /*
@@ -30,6 +31,11 @@ export interface SensitiveOptions {
   cage?: string;
   /** The PATH, as process.env.PATH writes it: each of its directories holds programs the user runs. */
   path?: string;
+  /**
+   * Other clients' configuration files and directories where the environment puts them, which may
+   * be outside the places below (see clientPlaces). Each counts with all it holds.
+   */
+  clients?: ReadonlyArray<{ path: string; what: string }>;
 }
 
 /**
@@ -46,9 +52,34 @@ export function accountHome(): string {
   }
 }
 
-/** The options for a path of this machine, as `run` and `wrap` check it: `~` is HOME, and the account's home counts too. */
+/**
+ * The options for a path of this machine, as `run` and `wrap` check it: `~` is HOME, the account's
+ * home counts too, and so do the client configurations `protect` finds with this environment.
+ */
 export function thisMachine(): SensitiveOptions {
-  return { home: homedir(), account: accountHome(), platform: process.platform, cage: cageHome(), path: process.env.PATH };
+  const home = homedir();
+  return {
+    home,
+    account: accountHome(),
+    platform: process.platform,
+    cage: cageHome(),
+    path: process.env.PATH,
+    clients: clientPlaces({ platform: process.platform, home, env: process.env }),
+  };
+}
+
+/**
+ * The clients' user configurations, where `protect` finds them with this environment (see
+ * userConfigs): each file, and the client's own directory when the file is in one. The places in
+ * the home directory below are only where the clients keep them by default: VS Code under an
+ * absolute XDG_CONFIG_HOME on Linux, GitHub Copilot under COPILOT_HOME and the Windows clients
+ * under another APPDATA were ordinary paths, mounted writable by `wrap`.
+ */
+export function clientPlaces(options: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv }): Array<{ path: string; what: string }> {
+  return userConfigs(options).flatMap((config) => {
+    const what = settingsOf(CLIENT_NAMES[config.client]);
+    return config.dir === undefined ? [{ path: config.file, what }] : [{ path: config.dir, what }, { path: config.file, what }];
+  });
 }
 
 /** What other MCP clients keep in their directories, and why a cage must not write there. */
@@ -105,6 +136,7 @@ const IN_HOME: ReadonlyArray<{ path: string; what: string; platform?: NodeJS.Pla
   { path: "AppData/Roaming/Code", what: settingsOf("VS Code"), platform: "win32" },
   { path: "AppData/Roaming/Code - Insiders", what: settingsOf("VS Code Insiders"), platform: "win32" },
   { path: "AppData/Roaming/Cursor", what: settingsOf("Cursor"), platform: "win32" },
+  { path: "AppData/Roaming/devin", what: settingsOf("Devin"), platform: "win32" },
 
   // What runs when a shell or a session starts: a line added there runs as the user, outside any
   // cage, the next time a terminal opens or the user logs in.
@@ -223,8 +255,9 @@ interface Place {
  * A path counts when it is the root of the disk, the home directory, a directory that holds it
  * (/Users, /home or another parent) or /root, and when it is, is inside or holds one of the places
  * above: /etc, /var/run, the system's programs, the credentials, client configurations, startup
- * files and programs in the home directory, mcpcage's own directory, a directory on the PATH. It
- * also counts when it is, or is inside, a directory named like those in BY_NAME, at any depth.
+ * files and programs in the home directory, mcpcage's own directory, a directory on the PATH, a
+ * client configuration where the environment moves it. It also counts when it is, or is inside, a
+ * directory named like those in BY_NAME, at any depth.
  * Inside the home directory only those places count: ~/Projects/x is ordinary, ~/.config holds
  * gcloud's credentials. `~` stands for the home directory and `..` is resolved; so are symlinks, for
  * a path of this machine, which makes a link that leads into ~/.ssh count as ~/.ssh. Case does not
@@ -283,6 +316,15 @@ export function sensitivePath(path: string, options: SensitiveOptions): string |
       const spellings = spell(syntax.join(options.account!, ...parts));
       places.push({ spellings, what: place.what, shown: shown(spellings[0]!) });
     }
+  }
+  // Where the environment moves other clients' configurations. The home directory and what holds it
+  // count already as themselves: COPILOT_HOME set to the home directory makes its file count, not
+  // every path in the home directory.
+  for (const client of options.clients ?? []) {
+    if (!syntax.isAbsolute(client.path)) continue;
+    const place = spell(client.path);
+    if (place.some((spelling) => isDisk(spelling) || isHome(spelling) || holdsHomes(spelling))) continue;
+    places.push({ spellings: place, what: client.what, shown: shown(place[0]!) });
   }
   if (options.cage !== undefined && syntax.isAbsolute(options.cage)) {
     const cage = spell(options.cage);
