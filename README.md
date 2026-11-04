@@ -186,10 +186,29 @@ repository a `.git` file points to (a worktree, a submodule). The directories th
 them are held in place, so the server cannot move a setting away and put its own where it was: each
 is a mount point of its own, so renaming one fails with `EBUSY`, and moving a file from one held
 directory into another, or between a held directory and the rest of the mount, fails with `EXDEV`,
-as between two filesystems. On macOS and Windows, where `.GIT` and `.git` name the same file, a
-read-only mount on a file cannot stop the server from writing it under another case of its name, so
-`mcpcage run` refuses a writable mount that holds a setting that is a file (the `.git` file of a
-worktree or a submodule, `.mcp.json`): mount it read-only, or a narrower directory.
+as between two filesystems. On macOS, where `.GIT` and `.git` name the same file, a read-only mount
+on a file cannot stop the server from writing it under another case of its name, so `mcpcage run`
+refuses a writable mount that holds a setting that is a file (the `.git` file of a worktree or a
+submodule, `.mcp.json`): mount it read-only, or a narrower directory. On Windows the same holds for
+a directory (see below), so there a writable mount that holds any of these settings is refused.
+
+**On Windows** the cage is a Linux container, where a folder has another path: the drive letter in
+lowercase, then the names with `/`. `C:\Users\me\notes` is mounted at `/c/Users/me/notes`, spelled
+as Windows keeps it on disk (each name in its case, long names for 8.3 short ones such as
+`C:\PROGRA~1`), and the server is given that path for each of its arguments that names a mounted
+folder or a path inside one; `mcpcage run` prints where each folder is in the cage. The paths in
+tool calls are not translated: a filesystem server lists `/c/Users/me/notes`
+(`list_allowed_directories`), and the model has to use that path, because one written
+`C:\Users\me\notes\todo.md` names nothing in the cage (server-filesystem answers "Windows-style
+path received on a POSIX host"). Network shares and device paths (`\\server\share`, `\\?\...`,
+`\\.\...`) have no place there: `run` refuses them, `wrap` and `protect --fix` leave a server given
+one as it is, and `protect --inspect` inspects it without that path. Docker Desktop lets a server in
+a writable folder reach a read-only one inside it under another case of its name: in a test on
+Windows 10, a server wrote `.GIT/config` around a read-only `.git` and changed the repository's
+`.git\config` on the host. So on Windows mcpcage puts no read-only mount inside a writable one: a
+writable mount that holds any of git's or the editors' settings (a repository's `.git` included)
+refuses to start, and so does a read-only folder you mount inside a writable one. Mount a narrower
+folder that holds no git or editor settings, or mount the folder read-only.
 
 ## How it works
 
@@ -378,8 +397,8 @@ In short:
   with comments; it prints what to put there instead.
 - Paths given to `--mount` must be shared with the Docker VM (on Colima and Docker Desktop, your
   home directory is shared by default).
-- Tested on macOS with Colima and Docker 29. On Windows only the discovery of configuration files
-  is tested.
+- Tested on macOS with Colima and Docker 29, and on Windows 10 with Docker Desktop 4.49 (Linux
+  containers), where server-filesystem ran in the cage with read-only and writable folders.
 
 ## Roadmap
 

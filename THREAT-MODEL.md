@@ -83,12 +83,29 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   filesystems. On macOS and Windows, which compare names without case, a read-only mount covers only
   the spelling it is placed on: the server could write `.GIT` or `.MCP.JSON` and change the file
   underneath, so a writable mount that holds a setting that is a file (a `.git` file, `.mcp.json`)
-  is refused, and paths are compared as spelled on disk and without case. A server that only needs
-  to read should get a read-only mount.
+  is refused, and paths are compared as spelled on disk and without case. On Windows a directory is
+  no better covered (see Paths on Windows), so there a writable mount that holds any setting is
+  refused. A server that only needs to read should get a read-only mount.
 - **Two cages writing in one directory.** The git and editor settings of a writable mount are
   found at start, then mounted read-only by Docker. Two cages of servers with write access to the
   same directory, running at once, give one of them a moment to swap a setting for a symlink before
   the other's mounts are made: that other cage then gets, read-only, the place the link names.
+- **Paths on Windows.** The cage is a Linux container: a folder `C:\Users\me\notes` is mounted at
+  `/c/Users/me/notes`, and the server is given that path for each of its arguments that names a
+  mounted folder or a path inside one. Each folder is spelled as Windows keeps it on disk, because
+  the container compares mount points with case. Tool calls are not translated: the model has to use
+  the paths the server lists (`list_allowed_directories`); a call that names `C:\...` names nothing
+  in the cage, so the mapping opens nothing beyond the mounts. Network shares and device paths
+  (`\\server\share`, `\\?\...`) are never mounted. Docker Desktop shares a folder so that its names
+  are found under any case, and a mount point covers only the spelling it is placed on: in a test on
+  Windows 10, a server wrote `.GIT/config` through the writable mount around a read-only `.git` and
+  changed the repository's `.git\config` on the host, and wrote `SUB/x.txt` next to a read-only
+  `sub` mounted inside a writable folder. So on Windows mcpcage relies on no read-only mount inside a
+  writable one: a writable mount that holds any of git's or the editors' settings, and a read-only
+  mount given inside a writable one, refuse the start, and the settings it keeps read-only elsewhere
+  are kept so on Windows only by keeping them out of writable mounts. A writable folder inside a
+  read-only one is fine: what the server reaches through the read-only one, under any spelling, is
+  read-only.
 - **Hard links.** The checks read paths. A hard link to a credential file, made elsewhere on the
   disk before anything was caged, is another path to the same file, and does not count as the file.
 - **Sensitive paths during `protect --inspect`.** Inspection never mounts them, and mounts every
