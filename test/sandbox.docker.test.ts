@@ -96,4 +96,12 @@ describe.skipIf(!docker.ok)("caged npm server (real Docker)", () => {
     expect(prepared.stdout).toContain("mcpcage-probe@1.0.0");
     expect(fake.ran()).toBe("");
   }, 600_000);
+
+  it.skipIf(standardDocker === undefined)("starts the cage with the docker of a standard place, whatever comes first on the PATH", async () => {
+    const fake = fakePrograms();
+    const report = await probe(["--env", "PATH"], { PATH: fake.path });
+    expect(report.uid).toBe(65532);
+    expect(report.env).toContain("PATH");
+    expect(fake.ran()).toBe("");
+  }, 120_000);
 });

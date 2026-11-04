@@ -153,6 +153,8 @@ async function run(argv: string[]): Promise<number> {
 
   let command: string;
   let args: string[];
+  /** docker's own environment for a caged server (see dockerProgram); the host command gets mcpcage's. */
+  let env: NodeJS.ProcessEnv | undefined;
   if (values["no-sandbox"]) {
     if (spec.kind === "image") throw new Error("--image always runs in a container; drop --no-sandbox");
     command = spec.kind === "host" ? spec.command : server[0]!;
@@ -182,6 +184,7 @@ async function run(argv: string[]): Promise<number> {
     });
     command = prepared.command;
     args = prepared.args;
+    env = prepared.env;
     auditLog.write("sandbox", {
       mode: "docker",
       image: prepared.record.image,
@@ -200,6 +203,7 @@ async function run(argv: string[]): Promise<number> {
     serverId,
     command,
     args,
+    env,
     strict: values.strict,
     allowServerRequests: values["allow-server-requests"],
     audit: auditLog,
@@ -327,7 +331,7 @@ async function protect(argv: string[]): Promise<number> {
 /** `--inspect`: the server starts in its cage (no network, its paths read-only) only to list its tools. */
 const inspectInCage: Inspector = async (launch) => {
   const prepared = prepareSandbox({ ...inspectionSandbox(launch), log: (message) => console.error(message) });
-  return listTools(prepared.command, prepared.args, process.env, 30_000, launch.redact);
+  return listTools(prepared.command, prepared.args, prepared.env, 30_000, launch.redact);
 };
 
 /** Desktop apps start servers with a minimal PATH, so configurations get mcpcage's full path when it is found. */

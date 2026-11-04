@@ -54,8 +54,11 @@ export interface ServerRecord {
 }
 
 export interface Prepared {
+  /** docker, where dockerProgram found it. */
   command: string;
   args: string[];
+  /** The environment to run it with (see dockerProgram). */
+  env: NodeJS.ProcessEnv;
   record: ServerRecord;
 }
 
@@ -76,7 +79,8 @@ export function prepareSandbox(options: SandboxOptions): Prepared {
   }
   const record = options.spec.kind === "npm" ? prepareNpmImage(options) : prepareImage(options);
   writeJson(join(serverDir(options.serverId), "server.json"), record);
-  return { command: "docker", args: runArgs(options, record.imageId), record };
+  const program = dockerProgram();
+  return { command: program.file, args: runArgs(options, record.imageId), env: program.env, record };
 }
 
 export function runArgs(options: Pick<SandboxOptions, "serverId" | "spec" | "mounts" | "env" | "allowNet" | "memory" | "cpus" | "keepImageUser">, image: string): string[] {
@@ -100,7 +104,16 @@ export function runArgs(options: Pick<SandboxOptions, "serverId" | "spec" | "mou
     "-e", "HOME=/tmp",
   ];
   if (!options.keepImageUser) args.push("--user", NONROOT);
-  for (const variable of options.env) args.push("-e", variable);
+  for (const variable of options.env) {
+    // docker takes the value of `-e NAME` from its own environment, and its PATH is not mcpcage's (see
+    // dockerProgram): the server is given mcpcage's PATH, as it is any other variable of mcpcage's,
+    // or keeps the image's own when mcpcage has none.
+    if (process.platform === "win32" ? /^path$/i.test(variable) : variable === "PATH") {
+      if (process.env.PATH !== undefined) args.push("-e", `${variable}=${process.env.PATH}`);
+      continue;
+    }
+    args.push("-e", variable);
+  }
   for (const mount of options.mounts) {
     args.push("--mount", `type=bind,source=${mount.source},target=${mount.target}${mount.readOnly ? ",readonly" : ""}`);
   }

@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { dockerProgram, npmProgram } from "../src/sandbox.js";
+import { dockerProgram, npmProgram, runArgs } from "../src/sandbox.js";
 import { fakePrograms, isProgram, STANDARD_PLACES, standardDocker } from "./fake-programs.js";
 import { freshHome, mcpcageWithEnv } from "./helpers.js";
 
@@ -74,5 +74,21 @@ describe("docker and npm on the host, whatever an entry's PATH puts first", () =
     const version = spawnSync(npm.file, [...npm.args, "--version"], { encoding: "utf8", env: npm.env });
     expect(version.status, version.stderr).toBe(0);
     expect(fake.ran()).toBe("");
+  });
+});
+
+describe("a server's --env PATH", () => {
+  const base = { serverId: "x", spec: { kind: "npm" as const, packageName: "p", args: [] }, mounts: [], allowNet: false, memory: "512m", cpus: "1", keepImageUser: false };
+
+  it("is mcpcage's PATH, which docker, run with a PATH of its own, would not give the server", () => {
+    process.env.PATH = "/one/bin:/two/bin";
+    const args = runArgs({ ...base, env: ["PATH", "OTHER", "PATHS"] }, "img");
+    expect(args).toContain("PATH=/one/bin:/two/bin");
+    expect(args).not.toContain("PATH");
+    expect(args).toContain("OTHER");
+    expect(args).toContain("PATHS");
+    // Without one, the server keeps the image's own.
+    delete process.env.PATH;
+    expect(runArgs({ ...base, env: ["PATH", "OTHER"] }, "img").filter((arg) => /^PATH\b/.test(arg))).toEqual([]);
   });
 });
