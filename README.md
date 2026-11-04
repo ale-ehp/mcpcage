@@ -455,8 +455,8 @@ MCPCAGE_FUZZ_RUNS=20000 npx vitest run test/*.fuzz.test.ts   # the property-base
 ```
 
 The property-based tests (`test/*.fuzz.test.ts`, with fast-check) throw generated input at what
-reads untrusted data or decides what is safe: the proxy, pins, the rules, command lines and
-configuration files. `npm test` runs each a few hundred times from a fixed seed; a failure
+reads untrusted data or decides what is safe: the proxy, pins, the rules, command lines,
+configuration files and Windows paths. `npm test` runs each a few hundred times from a fixed seed; a failure
 prints the seed and the smallest failing case, and `MCPCAGE_FUZZ_SEED=<seed>` runs the same cases
 again.
 
