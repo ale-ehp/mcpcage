@@ -76,6 +76,8 @@ export interface ServerReport {
   foreignPath?: ForeignPath;
   /** For a wrapped entry that starts mcpcage: the variables of its env that move the client configurations `run` refuses to mount (see movedPlaces). */
   movedPlaces: string[];
+  /** For npx entries and wrapped ones, on Windows: the names of its env that Windows takes for one variable (see EnvEffects). */
+  twice?: string[][];
   /**
    * For npx entries and wrapped ones with an `envFile` (VS Code): the file as written, and what its
    * variables do on this machine, as those of `env` above; `effects` is missing when the file could
@@ -449,7 +451,7 @@ export function writableWarning(name: string, path: string): string {
  */
 function effectsOf(variables: unknown, installed: boolean): EnvEffects {
   const effects = envEffects(variables);
-  return installed ? effects : { hostEnv: effects.hostEnv, movedPlaces: [] };
+  return installed ? effects : { hostEnv: effects.hostEnv, movedPlaces: [], ...(effects.twice === undefined ? {} : { twice: effects.twice }) };
 }
 
 /** An envFile that acts on the host, or that could not be read, so what it sets is unknown. */
@@ -581,6 +583,7 @@ function status(server: ServerReport): string {
       const fromFile = server.envFile?.effects;
       if (server.hostEnv.length > 0 || (fromFile?.hostEnv.length ?? 0) > 0) return "caged, but its env runs on your machine";
       if (server.envFile !== undefined && fromFile === undefined) return "caged, but what its envFile sets is unknown";
+      if (server.twice !== undefined || fromFile?.twice !== undefined) return "caged, but its env sets one variable twice";
       if (server.foreignPath !== undefined || fromFile?.foreignPath !== undefined) return "caged, but its PATH picks other programs";
       if (server.movedPlaces.length > 0 || (fromFile?.movedPlaces.length ?? 0) > 0) return "caged, but its env moves what run refuses to mount";
       if (server.batch !== undefined) return `some clients cannot start a ${server.batch}: --fix rewrites it as node with mcpcage's cli.js`;
@@ -601,6 +604,9 @@ function status(server: ServerReport): string {
 /** What the variables of an entry's env, or of its envFile, do on the host, one line each: `from` says which. */
 function effectLines(from: "env" | "envFile", effects: EnvEffects): string[] {
   const lines = effects.hostEnv.map((variable) => `${from} ${terminalSafe(variable.name)}: ${variable.what}`);
+  for (const names of effects.twice ?? []) {
+    lines.push(`${from} ${names.map(terminalSafe).join(", ")}: one variable for Windows, set twice, so which value the client gives mcpcage is not known`);
+  }
   if (effects.foreignPath !== undefined) lines.push(...pathLines(from, effects.foreignPath));
   for (const name of effects.movedPlaces) lines.push(`${from} ${terminalSafe(name)}: ${MOVED_PLACE}`);
   return lines;

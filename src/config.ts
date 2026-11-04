@@ -110,6 +110,12 @@ export interface EnvEffects {
   foreignPath?: ForeignPath;
   /** The variables that move the client configurations `run` refuses to mount (see movedPlaces). */
   movedPlaces: string[];
+  /**
+   * On Windows, the names that Windows takes for one variable, as written, a list for each: Path and
+   * PATH. A client gives the program it starts only one value of them, which one depends on the client
+   * (the MCP SDK's, through Node, the first in sorted order), so what the entry sets is not known.
+   */
+  twice?: string[][];
 }
 
 /** What a set of variables (an entry's `env`, or what its `envFile` sets) does on the host once the entry starts mcpcage. */
@@ -124,12 +130,26 @@ export function envEffects(variables: unknown): EnvEffects {
   // On Windows APPDATA and LOCALAPPDATA act on the host as Windows' places, which wrap moves into
   // the cage: named once, as such, not again as places that only the user can change.
   const moved = movedPlaces(variables).filter((name) => !hostEnv.some((variable) => variable.name === name));
-  return { hostEnv, ...(path === undefined ? {} : { foreignPath: path }), movedPlaces: moved };
+  const twice = sameVariable(variables);
+  return { hostEnv, ...(path === undefined ? {} : { foreignPath: path }), movedPlaces: moved, ...(twice.length === 0 ? {} : { twice }) };
 }
 
-/** Whether any of them acts on the host. */
+/**
+ * On Windows, the names of a set of variables that Windows takes for one, which it compares without
+ * case, a list for each. protect read the PATH an entry sets from the first of them written: an entry
+ * with { "Path": <the user's>, "PATH": <another> } was counted caged, and the MCP SDK's client gave
+ * mcpcage the other, whose docker.exe it ran. None elsewhere, where Path and PATH are two variables.
+ */
+function sameVariable(variables: unknown): string[][] {
+  if (process.platform !== "win32" || !isJsonObject(variables)) return [];
+  const byName = new Map<string, string[]>();
+  for (const name of Object.keys(variables)) byName.set(name.toUpperCase(), [...(byName.get(name.toUpperCase()) ?? []), name]);
+  return [...byName.values()].filter((names) => names.length > 1);
+}
+
+/** Whether any of them acts on the host, or what the entry sets there is not known. */
 export function actsOnHost(effects: EnvEffects): boolean {
-  return effects.hostEnv.length > 0 || effects.foreignPath !== undefined || effects.movedPlaces.length > 0;
+  return effects.hostEnv.length > 0 || effects.foreignPath !== undefined || effects.movedPlaces.length > 0 || (effects.twice?.length ?? 0) > 0;
 }
 
 /**
@@ -152,6 +172,12 @@ export function envReason(env: EnvEffects, envFile: { path?: string; effects?: E
     return `${what}, so what it sets is unknown: check that file, or move what it sets into its "env"`;
   }
   const sources: Array<[string, EnvEffects | undefined, string]> = [["env", env, 'its "env"'], ["envFile", fromFile, file]];
+  for (const [from, effects, where] of sources) {
+    const names = effects?.twice?.[0];
+    if (names !== undefined) {
+      return `its ${from} sets ${listOf(names)}, which Windows takes for one variable, so which value the client gives mcpcage is not known: keep one of them in ${where} by hand`;
+    }
+  }
   for (const [from, effects, where] of sources) {
     if (effects?.foreignPath !== undefined) return `its ${from} sets a PATH that picks other programs than yours: check that PATH, or remove it from ${where} by hand`;
   }

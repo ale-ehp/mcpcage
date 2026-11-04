@@ -174,7 +174,9 @@ you to check or remove that `PATH`.
 A `PATH` made of your own directories, such as the `/opt/homebrew/bin:/usr/bin:/bin` of many Claude
 Desktop configurations, is fine. The same goes for `COPILOT_HOME` and `XDG_CONFIG_HOME` set to
 another place than yours: `mcpcage run` looks for the clients' configurations, which it refuses to
-mount, where they say. VS Code also adds the variables of the
+mount, where they say. On Windows, which compares the names of variables without case, an `env` that
+sets one variable twice (`Path` and `PATH`) is not counted as caged either: a client gives only one
+of the two values, and which one depends on the client. VS Code also adds the variables of the
 file an entry's `envFile` names to that environment: `protect` reads it as it reads `env` (a regular
 file, up to 1 MiB), names what in it would act on your machine (`envFile NODE_OPTIONS: ...`), and
 does not count the entry as caged when something does, or when the file cannot be read

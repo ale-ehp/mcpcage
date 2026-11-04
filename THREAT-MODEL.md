@@ -170,7 +170,10 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   the entry's `PATH` leaves out (the report still names such a `--mount`). `COPILOT_HOME` and
   `XDG_CONFIG_HOME` stay too: an entry that sets one to another place than the user's is named and
   not counted as caged, because `run` would look there for the client configurations it refuses to
-  mount. On Windows `APPDATA` and `LOCALAPPDATA` move into the cage with Windows' other places.
+  mount. On Windows `APPDATA` and `LOCALAPPDATA` move into the cage with Windows' other places,
+  and an `env` that sets one variable under two spellings (`Path` and `PATH`) is named and not
+  counted as caged: Windows takes them for one variable, and a client gives only one of the two
+  values, which one depending on the client (Node keeps the first in sorted order).
   An `envFile` stays as well, since VS Code loads it: `protect` reads it where it can name it
   (`${workspaceFolder}` only in a project's own configuration) and calls any other unknown, which
   keeps the entry from counting as caged. A value

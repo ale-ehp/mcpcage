@@ -17,7 +17,7 @@ import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs, writableMounts } from "../src/protect.js";
 import { offDrive, parseMount, runArgs } from "../src/sandbox.js";
-import { idleProgram, onWindows } from "./fake-programs.js";
+import { idleProgram, onWindows, onWindowsUntilDone } from "./fake-programs.js";
 import { asStored, cli, fakeServer, fakeUserEnv, hostileServer, literal, mcpcageWithEnv, native, root, stubHome, written, writtenEntry } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
@@ -3397,6 +3397,99 @@ describe("what a wrapped entry's PATH picks", () => {
     const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
     const byHand = `its env sets a PATH that picks other programs than yours: check that PATH, or remove it from its "env" by hand`;
     expect(fix.stdout).toContain(`\nPlan\n${picked.map((name) => `  not changed: ${name} in ${where}: ${byHand}\n`).join("")}  nothing that mcpcage can change by itself.\n`);
+    expect(fix.code).toBe(1);
+    expect(readFileSync(cursor)).toEqual(original);
+  });
+});
+
+describe("an entry's env that sets one variable twice for Windows", () => {
+  // Windows takes Path and PATH for one variable, and a client gives the program it starts only one
+  // of them: the MCP SDK's, through Node, the first in sorted order, PATH. protect read the PATH an
+  // entry sets from the first key written: an entry with { Path: <yours>, PATH: <another> } was
+  // counted caged, and mcpcage ran the docker.exe of the other. Which value a client gives is not
+  // known, for any variable.
+  const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+  const indent = " ".repeat(16);
+  const line = (from: string, names: string) => `${indent}${from} ${names}: one variable for Windows, set twice, so which value the client gives mcpcage is not known`;
+  const byHand = (from: string, names: string, where: string) =>
+    `its ${from} sets ${names}, which Windows takes for one variable, so which value the client gives mcpcage is not known: keep one of them in ${where} by hand`;
+
+  it("is not counted as caged on Windows, its names are said, and --fix leaves it to the user", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-twice-"));
+    const file = join(dir, "mcp.json");
+    const own = idleProgram(join(dir, "bin"), "mcpcage");
+    // The absolute directories of this process's PATH, all of them the user's.
+    const yours = (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir)).join(delimiter);
+    const twice = { Path: yours, PATH: join(dir, "other-bin") };
+    const dotenv = join(dir, "notes.env");
+    writeText(dotenv, `PATH=${join(dir, "other-bin")}\nPath=${yours}\n`);
+    const run = (...names: string[]) => ["run", ...names.flatMap((name) => ["--env", name]), "--", "npx", "-y", "@acme/notes-mcp"];
+    writeJsonFile(file, {
+      mcpServers: {
+        caged: { command: own, args: run("Path", "PATH"), env: twice },
+        // Any variable, not only PATH.
+        named: { command: own, args: run("API_KEY", "api_key"), env: { API_KEY: "${input:first}", api_key: "${input:second}" } },
+        filed: { command: own, args: run(), envFile: dotenv },
+        fresh: { command: "npx", args: ["-y", "@acme/fresh-mcp"], env: twice },
+        plain: { command: own, args: run("PATH"), env: { PATH: yours } },
+      },
+    });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const scan = () => scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, ownCommand: own });
+    const report = await onWindowsUntilDone(scan);
+    const text = renderReport(report, { home: dir });
+    for (const name of ["caged", "named", "filed"]) expect(lineOf(text, name)).toMatch(/ {2}caged, but its env sets one variable twice$/);
+    expect(lineOf(text, "fresh")).toMatch(/ {2}NOT CAGED$/);
+    expect(lineOf(text, "plain")).toMatch(/ {2}caged$/);
+    expect(text).toContain(`${lineOf(text, "caged")}\n${line("env", "Path, PATH")}\n`);
+    expect(text).toContain(`${lineOf(text, "named")}\n${line("env", "API_KEY, api_key")}\n`);
+    expect(text).toContain(`${lineOf(text, "filed")}\n${line("envFile", "PATH, Path")}\n`);
+    expect(text).toContain("  4 run on your machine with your permissions and no cage.");
+
+    const plan: string[] = [];
+    onWindows(() => fixConfigs({ report, command: own, claudeCodeRunning: false, dryRun: true, home: dir, log: (logged) => plan.push(logged) }));
+    const where = tilde(file, dir);
+    expect(plan).toEqual([
+      `  not changed: caged in ${where}: ${byHand("env", "Path and PATH", 'its "env"')}`,
+      `  not changed: named in ${where}: ${byHand("env", "API_KEY and api_key", 'its "env"')}`,
+      `  not changed: filed in ${where}: ${byHand("envFile", "PATH and Path", dotenv)}`,
+      `  not changed: fresh in ${where}: ${byHand("env", "Path and PATH", 'its "env"')}`,
+    ]);
+    // On macOS and Linux they are two variables, and the PATH is the one named PATH.
+    if (process.platform !== "win32") {
+      const elsewhere = renderReport(await scan(), { home: dir });
+      expect(lineOf(elsewhere, "named")).toMatch(/ {2}caged$/);
+      expect(lineOf(elsewhere, "caged")).toMatch(/ {2}caged, but its PATH picks other programs$/);
+    }
+  });
+
+  it.runIf(process.platform === "win32")("is not counted as caged by the installed mcpcage on Windows, and --fix leaves the file as it is", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-twice-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const installed = fakeMcpcage();
+    const yours = installed.path;
+    const twice = { Path: yours, PATH: join(top, "other-bin") };
+    const cursor = locationsFor(home, project)("cursor", "user");
+    writeJsonFile(cursor, {
+      mcpServers: {
+        caged: { command: installed.command, args: ["run", "--env", "Path", "--env", "PATH", "--", "npx", "-y", "@acme/notes-mcp"], env: twice },
+        fresh: { command: "npx", args: ["-y", "@acme/fresh-mcp"], env: twice },
+      },
+    });
+    const original = readFileSync(cursor);
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
+    expect(lineOf(scan.stdout, "caged")).toMatch(/ {2}caged, but its env sets one variable twice$/);
+    expect(scan.stdout).toContain(`${lineOf(scan.stdout, "caged")}\n${line("env", "Path, PATH")}\n`);
+    expect(scan.stdout).toContain("  2 run on your machine with your permissions and no cage.");
+    expect(scan.code).toBe(1);
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    const where = tilde(cursor, home);
+    expect(fix.stdout).toContain(`  not changed: caged in ${where}: ${byHand("env", "Path and PATH", 'its "env"')}\n`);
+    expect(fix.stdout).toContain(`  not changed: fresh in ${where}: ${byHand("env", "Path and PATH", 'its "env"')}\n`);
     expect(fix.code).toBe(1);
     expect(readFileSync(cursor)).toEqual(original);
   });

@@ -83,3 +83,14 @@ export function onWindows<T>(run: () => T, node = process.execPath): T {
     Object.defineProperty(process, "execPath", execPath);
   }
 }
+
+/** onWindows for a run that waits, a scan of several servers: as on Windows until it has settled. */
+export async function onWindowsUntilDone<T>(run: () => Promise<T>): Promise<T> {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+  try {
+    return await run();
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+}
