@@ -446,7 +446,9 @@ describe("settings in a writable mount", () => {
     expect(settings([rw(dir)], { entries: 100_000, mounts: 9 })).toHaveLength(10);
   });
 
-  it.skipIf(process.getuid?.() === 0)("refuses to start when a directory cannot be looked through", () => {
+  // root reads any directory, whatever its mode. chmod takes no permission away on Windows (it sets the
+  // read-only attribute only), and an administrator, as the tests run there, reads through any ACL.
+  it.skipIf(process.getuid?.() === 0 || process.platform === "win32")("refuses to start when a directory cannot be looked through", () => {
     const dir = project();
     mkdirSync(join(dir, "locked"));
     chmodSync(join(dir, "locked"), 0o000);
@@ -599,7 +601,8 @@ describe("settings in a writable mount", () => {
       writeFileSync(file, "gitdir: ../meta\n");
       writeFileSync(join(dir, "meta", "commondir"), "\n");
       expect(() => settings([rw(dir)])).toThrow(`${join(dir, "meta", "commondir")} does not say where a git repository is in the form git writes (<path>)`);
-      if (process.getuid?.() === 0) return;
+      // Unreadable only where a mode can make it so, to a user other than root (see above).
+      if (process.getuid?.() === 0 || process.platform === "win32") return;
       chmodSync(file, 0o000);
       try {
         expect(() => settings([rw(dir)])).toThrow(`--mount ${dir}:rw: cannot read ${file}, which says where a git repository is (EACCES). Fix or remove it, or mount ${dir} read-only by dropping :rw.`);

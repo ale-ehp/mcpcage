@@ -17,6 +17,15 @@ export function native(path: string): string {
   return path.split("/").join(sep);
 }
 
+/**
+ * The permission bits statSync shows once chmod has set `mode`. Windows keeps only whether the owner
+ * may write the file: 0o666, or 0o444 for a read-only file.
+ */
+export function asStored(mode: number): number {
+  if (process.platform !== "win32") return mode;
+  return mode & 0o200 ? 0o666 : 0o444;
+}
+
 /** `text` in a regular expression, matched as it is: a Windows path is full of backslashes. */
 export function literal(text: string): string {
   return text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");

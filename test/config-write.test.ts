@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { unwrapConfig, wrapConfig } from "../src/config.js";
+import { asStored } from "./helpers.js";
 
 // The last step of a rewrite, the rename over the configuration, fails on demand, as it can on a
 // full disk or when mcpcage is killed: the client must still find its whole old file.
@@ -45,10 +46,10 @@ describe("wrap and unwrap replace the configuration atomically", () => {
     const { dir, file, bytes } = configFile(0o640);
     const outcome = wrapConfig(file, { dryRun: false, command: "/opt/mcpcage" });
     expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.memory.command).toBe("/opt/mcpcage");
-    expect(statSync(file).mode & 0o777).toBe(0o640);
+    expect(statSync(file).mode & 0o777).toBe(asStored(0o640));
     expect(outcome.backup).toBe(`${file}.mcpcage.bak`);
     expect(readFileSync(outcome.backup!)).toEqual(bytes);
-    expect(statSync(outcome.backup!).mode & 0o777).toBe(0o640);
+    expect(statSync(outcome.backup!).mode & 0o777).toBe(asStored(0o640));
     expect(leftovers(dir)).toEqual([]);
   });
 
@@ -80,7 +81,7 @@ describe("wrap and unwrap replace the configuration atomically", () => {
     rename.fail = true;
     expect(() => wrapConfig(file, { dryRun: false, command: "/opt/mcpcage" })).toThrow("EIO: i/o error, rename");
     expect(readFileSync(file)).toEqual(bytes);
-    expect(statSync(file).mode & 0o777).toBe(0o640);
+    expect(statSync(file).mode & 0o777).toBe(asStored(0o640));
     expect(leftovers(dir)).toEqual([]);
 
     // The same for unwrap, on a file that wrap did change.

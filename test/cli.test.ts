@@ -421,7 +421,11 @@ describe("what run prints from an entry's arguments", () => {
   it("spells them out in the warning about a sensitive mount", () => {
     const home = freshHome();
     const fakeHome = join(home, "home");
-    const key = join(fakeHome, ".ssh", `key${HOSTILE}`);
+    // Windows allows no C0 control character in a file name: there the name keeps the others.
+    const windows = process.platform === "win32";
+    const hostile = windows ? "[2J\u009b\u202e\u200b" : HOSTILE;
+    const spelled = windows ? "[2J[U+009B][U+202E][U+200B]" : SPELLED;
+    const key = join(fakeHome, ".ssh", `key${hostile}`);
     mkdirSync(join(fakeHome, ".ssh"), { recursive: true });
     writeFileSync(key, "");
     // The warning comes before Docker is needed: run gets as far as it with no Docker to reach.
@@ -430,7 +434,7 @@ describe("what run prints from an entry's arguments", () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("Docker is required");
     expect(result.stderr).not.toMatch(RAW_CONTROL);
-    expect(result.stderr).toContain(`mcpcage: WARNING --mount ${key.replace(HOSTILE, SPELLED)} gives example-server-`);
+    expect(result.stderr).toContain(`mcpcage: WARNING --mount ${key.replace(hostile, spelled)} gives example-server-`);
   });
 });
 

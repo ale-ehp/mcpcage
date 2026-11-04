@@ -18,7 +18,7 @@ import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs } from "../src/protect.js";
 import { parseMount, runArgs } from "../src/sandbox.js";
 import { idleProgram } from "./fake-programs.js";
-import { cli, fakeServer, fakeUserEnv, hostileServer, literal, mcpcageWithEnv, native, root, stubHome } from "./helpers.js";
+import { asStored, cli, fakeServer, fakeUserEnv, hostileServer, literal, mcpcageWithEnv, native, root, stubHome } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
 /** An entry as a configuration file may hold it, whatever the types say. */
@@ -377,7 +377,8 @@ describe("wrapping one entry", () => {
     });
   });
 
-  it("mounts a path that ends in :rw or :ro read-only as it is written, never the path without that ending", () => {
+  // Windows allows no colon in a file name: no directory there is named notes:rw.
+  it.skipIf(process.platform === "win32")("mounts a path that ends in :rw or :ro read-only as it is written, never the path without that ending", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-data-"));
     const notes = join(top, "notes");
     mkdirSync(notes);
@@ -1167,7 +1168,8 @@ describe("inspection sandbox", () => {
     expect(() => inspectionSandbox({ argv: ["uvx", "mcp-server-time"], env: {} })).toThrow("only npx servers can be inspected");
   });
 
-  it("mounts a path as it is written: a final :rw names a directory, never makes a mount writable", () => {
+  // Windows allows no colon in a file name: no directory there is named .ssh:rw.
+  it.skipIf(process.platform === "win32")("mounts a path as it is written: a final :rw names a directory, never makes a mount writable", () => {
     const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
     // Both exist: parseMount read the argument as ~/.ssh with the option rw, and mounted the keys writable.
     mkdirSync(join(home, ".ssh"));
@@ -2090,7 +2092,7 @@ describe("mcpcage protect", () => {
     expect(after).toMatch(/^\t"mcpServers": \{$/m);
     expect(after).not.toMatch(/^ {2}"/m);
     expect(after.endsWith("}\n")).toBe(true);
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(file).mode & 0o777).toBe(asStored(0o600));
     expect(outcome.files[0]!.backup).toBe(`${file}.mcpcage.bak`);
     expect(readFileSync(`${file}.mcpcage.bak`, "utf8")).toBe(text);
     expect(readdirSync(home).filter((name) => name.endsWith(".tmp"))).toEqual([]);
