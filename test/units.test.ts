@@ -42,6 +42,11 @@ describe("launch parsing", () => {
     });
     expect(parseLaunch(["/usr/local/bin/npx", "--yes", "mcp-server@1.2.3"])).toMatchObject({ packageName: "mcp-server", versionRange: "1.2.3" });
     expect(parseLaunch(["npx", "./local-server"])).toMatchObject({ kind: "npm", localPath: "./local-server" });
+    // How server-pdf's README configures it: --silent only quiets npm, which never runs in the cage.
+    expect(parseLaunch(["npx", "-y", "--silent", "@modelcontextprotocol/server-pdf", "--stdio"])).toEqual({
+      kind: "npm", packageName: "@modelcontextprotocol/server-pdf", versionRange: undefined, args: ["--stdio"],
+    });
+    expect(parseLaunch(["npx", "-s", "-y", "mcp-server"])).toMatchObject({ kind: "npm", packageName: "mcp-server", args: [] });
     expect(parseLaunch(["uvx", "mcp-server-time"])).toEqual({ kind: "host", command: "uvx", args: ["mcp-server-time"] });
     expect(parseLaunch([], "mcp/time")).toEqual({ kind: "image", image: "mcp/time", args: [] });
   });

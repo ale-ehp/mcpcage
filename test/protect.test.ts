@@ -498,6 +498,9 @@ describe("wrapping one entry", () => {
     expect(serverType({ type: "local", command: "npx" })).toBe("npx"); // Copilot CLI's name for stdio
     expect(wrapEntry({ type: "local", command: "npx", args: ["-y", "pkg"] }, { command: "mcpcage" })).toMatchObject({ entry: { type: "local", command: "mcpcage" } });
     expect(wrapEntry({ command: "npx", args: ["--registry", "x", "pkg"] }, { command: "mcpcage" })).toEqual({ skip: "unsupported npx flag --registry" });
+    // server-pdf as its README configures it, left uncaged before as "unsupported npx flag --silent".
+    const pdf = ["-y", "--silent", "@modelcontextprotocol/server-pdf", "--stdio"];
+    expect(wrapEntry({ command: "npx", args: pdf }, { command: "mcpcage" })).toEqual({ entry: { command: "mcpcage", args: ["run", "--", "npx", ...pdf] } });
     expect(wrapEntry({ serverUrl: "https://x" }, { command: "mcpcage" })).toEqual({ skip: "remote server: nothing runs locally to cage" });
   });
 

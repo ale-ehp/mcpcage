@@ -7,7 +7,11 @@ export type LaunchSpec =
   | { kind: "image"; image: string; args: string[] }
   | { kind: "host"; command: string; args: string[] };
 
-const NPX_FLAGS_WITHOUT_VALUE = new Set(["-y", "--yes", "-q", "--quiet", "--no-install=false"]);
+// --silent and -s, like -q and --quiet, only set npm's log level: in the cage npm never runs, the
+// image's launcher starts the package. @modelcontextprotocol/server-pdf's README configures
+// `npx -y --silent ...`, which mcpcage refused ("unsupported npx flag --silent"), and wrap and
+// protect --fix left such an entry uncaged.
+const NPX_FLAGS_WITHOUT_VALUE = new Set(["-y", "--yes", "-q", "--quiet", "-s", "--silent", "--no-install=false"]);
 
 /**
  * Understands `npx [-y] <package>[@version] [args...]`, the form most MCP servers are configured
