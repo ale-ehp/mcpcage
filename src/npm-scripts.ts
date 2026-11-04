@@ -44,7 +44,11 @@ export function installScripts(spec: string, options: { offline: boolean; cacheD
   const answer = interpret((options.runner ?? runNpm)(args));
   if ("scripts" in answer) {
     const entry: CachedAnswer = { spec, fetchedAt: new Date().toISOString(), scripts: answer.scripts };
-    writeJson(file, entry);
+    try {
+      writeJson(file, entry);
+    } catch {
+      // A cache that cannot be written only means npm is asked again next time: the answer stands.
+    }
     return summarize(answer.scripts);
   }
   return { status: "unknown", scripts: [], detail: options.offline ? "offline, not in cache" : answer.error };
@@ -71,16 +75,23 @@ function interpret(result: ReturnType<NpmRunner>): { scripts: Record<string, unk
   // No output at all: the package has no "scripts" field.
   if (value === undefined) return { scripts: null };
   // A range that matches several versions gives one object per version; any of them may be installed.
+  // Anything else (a string, a number, null) is not an answer to the question: "none" would claim
+  // that the package runs nothing at install time, which nobody has checked.
+  const versions = Array.isArray(value) ? value : [value];
+  if (!versions.every(isJsonObject)) return { error: "npm view gave an answer of an unexpected shape" };
   const scripts: Record<string, unknown> = {};
-  for (const version of Array.isArray(value) ? value : [value]) if (isJsonObject(version)) Object.assign(scripts, version);
+  for (const version of versions) Object.assign(scripts, version);
   return { scripts };
 }
 
+/** npm's error in a few words; a code or summary that is not a string is left out, never converted. */
 function npmError(error: Record<string, unknown>): string {
-  if (error.code === "E404") return "not found on the npm registry";
-  if (error.code === "ENOTCACHED") return "not in the npm cache";
+  const code = typeof error.code === "string" ? error.code : "";
+  if (code === "E404") return "not found on the npm registry";
+  if (code === "ENOTCACHED") return "not in the npm cache";
   const summary = typeof error.summary === "string" ? (error.summary.split("\n")[0] ?? "").slice(0, 160) : "";
-  return `npm view failed: ${[error.code, summary].filter(Boolean).join(" ")}`;
+  const words = [code, summary].filter(Boolean).join(" ");
+  return words === "" ? "npm view failed with an error of an unexpected shape" : `npm view failed: ${words}`;
 }
 
 function readCache(file: string): CachedAnswer | undefined {

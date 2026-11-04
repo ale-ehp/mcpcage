@@ -1,13 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
 import { discoverConfigs, type ClientId } from "../src/clients.js";
-import { serverType, wrapEntry } from "../src/config.js";
+import { moveHostEnv, serverType, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
 import { listTools } from "../src/inspect.js";
 import { hasComments, parseJsonc } from "../src/jsonc.js";
 import { parseLaunch, serverIdFor } from "../src/launch.js";
@@ -19,6 +19,8 @@ import { runArgs } from "../src/sandbox.js";
 import { cli, fakeServer, fakeUserEnv, hostileServer, mcpcageWithEnv, root } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
+/** An entry as a configuration file may hold it, whatever the types say. */
+const asEntry = (value: unknown) => value as ServerEntry;
 const noNpm = () => ({ status: 0, stdout: "", stderr: "" });
 
 function writeJsonFile(file: string, value: unknown, indent: string | number = 2): void {
@@ -707,6 +709,25 @@ describe("install scripts", () => {
     expect(offline.mock.calls[0]![0]).toContain("--offline");
   });
 
+  it("says unknown, never none, for an answer of an unexpected shape, and never throws on one", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "mcpcage-npm-"));
+    const shape = "npm view gave an answer of an unexpected shape";
+    // A successful answer that is not the scripts object, nor one per version.
+    for (const stdout of ['"x"', "42", "null", '[{"postinstall": "node a.js"}, null]']) {
+      expect(installScripts(`odd-${stdout}`, { offline: false, cacheDir, runner: answer(stdout) }), stdout).toEqual({ status: "unknown", scripts: [], detail: shape });
+    }
+    // An error whose code cannot be converted to text, whether npm exits with 0 or not.
+    for (const status of [0, 1]) {
+      const odd = answer('{"error": {"code": {"toString": null}, "summary": ["not", "text"]}}', status);
+      expect(installScripts(`odd-error-${status}`, { offline: false, cacheDir, runner: odd })).toEqual({ status: "unknown", scripts: [], detail: "npm view failed with an error of an unexpected shape" });
+    }
+    expect(installScripts("odd-code", { offline: false, cacheDir, runner: answer('{"error": {"code": 42, "summary": "registry down"}}', 1) })).toEqual({
+      status: "unknown", scripts: [], detail: "npm view failed: registry down",
+    });
+    // Nothing of it was kept as an answer.
+    expect(existsSync(join(cacheDir, "npm-view"))).toBe(false);
+  });
+
   it("keeps an answer for a week under mcpcage's cache and reuses it", () => {
     const cacheDir = mkdtempSync(join(tmpdir(), "mcpcage-npm-"));
     const runner = answer('{"postinstall": "node setup.js"}');
@@ -1153,6 +1174,123 @@ describe("mcpcage protect", () => {
     expect(readdirSync(home).filter((name) => name.endsWith(".tmp"))).toEqual([]);
     expect(logged).toEqual(["  caged user-npx in ~/.claude.json", `  caged proj-npx in ~/.claude.json (project ${project})`, "  backup: ~/.claude.json.mcpcage.bak"]);
     expect(logged.join("\n")).not.toContain("acme_live_0123456789");
+  });
+});
+
+describe("a malformed entry or file", () => {
+  /** A fake home whose only configurations are Cursor's and Devin's user files, written as given. */
+  function twoFiles(cursorText: string, devinText = `${JSON.stringify({ mcpServers: { "devin-tool": { command: "npx", args: ["-y", "@acme/devin-tool"] } } }, null, 2)}\n`) {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-malformed-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const at = locationsFor(home, project);
+    const cursor = at("cursor", "user");
+    const devin = at("devin", "user");
+    writeText(cursor, cursorText);
+    writeText(devin, devinText);
+    return { home, project, cursor, devin, env: fakeUserEnv(home, cage, { CLAUDECODE: "1" }) };
+  }
+  const good = { command: "npx", args: ["-y", "@acme/good-mcp", "--api-key", "sk-live-0123456789abcdef"] };
+
+  it("reports every server and file when an argument cannot be converted to text", () => {
+    const machine = twoFiles(JSON.stringify({ mcpServers: { bad: { command: "npx", args: [{ toString: null }] }, good } }, null, 2));
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline");
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(1);
+    expect(result.stdout).toMatch(/^ {2}bad {11}npx +NOT CAGED\n {16}args: an argument that is not a string\n/m);
+    expect(result.stdout).toMatch(/^ {2}good {10}npx -y @acme\/good-mcp --api-key \*\*\* +NOT CAGED\n {16}secret in clear text: --api-key\n/m);
+    expect(result.stdout).toContain(`Devin  ${tilde(machine.devin, machine.home)}\n  devin-tool `);
+    expect(result.stdout).toContain("\nSummary\n  3 servers in 2 configuration files");
+    expect(result.stdout).not.toContain("0123456789abcdef");
+  });
+
+  it("reports an argument nested 10,000 levels deep as one that is not a string", () => {
+    const deep = "[".repeat(10_000) + "]".repeat(10_000);
+    const machine = twoFiles(`{ "mcpServers": { "deep": { "command": "npx", "args": ["-y", "@acme/deep-mcp", ${deep}, "/"] }, "good": ${JSON.stringify(good)} } }\n`);
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline");
+    expect(result.stderr).toBe("");
+    // Never a path to mount, nor anything else: the string arguments are read as before.
+    expect(result.stdout).toMatch(/^ {2}deep {10}npx -y @acme\/deep-mcp \/ +NOT CAGED\n {16}args: an argument that is not a string\n {16}access: \/: the whole disk\n/m);
+    expect(result.stdout).toMatch(/^ {2}good {10}npx -y @acme\/good-mcp/m);
+    expect(result.stdout).toContain("\nSummary\n  3 servers in 2 configuration files");
+  });
+
+  it("says an entry could not be described when its description fails, and goes on with the others", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-malformed-"));
+    const file = join(dir, "mcp.json");
+    writeJsonFile(file, {
+      mcpServers: {
+        crashing: { command: "npx", args: ["-y", "crashing-mcp"], env: { CRASH_TOKEN: "tok-live-0123456789" } },
+        after: { command: "npx", args: ["-y", "after-mcp"] },
+      },
+    });
+    const npmRunner = (args: string[]) => {
+      if (args[1] === "crashing-mcp") throw new Error("npm crashed reading tok-live-0123456789");
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: false, cacheDir: join(dir, "cache"), npmRunner });
+    expect(report.servers.map((server) => [server.name, server.error])).toEqual([["crashing", "npm crashed reading ***"], ["after", undefined]]);
+    const text = renderReport(report, { home: dir });
+    expect(text).toMatch(/^ {2}crashing {6}npx -y crashing-mcp +NOT CAGED\n {16}could not describe this entry: npm crashed reading \*\*\*\n/m);
+    expect(text).toContain("                install scripts: none\n");
+    expect(text).not.toContain("0123456789");
+  });
+
+  it("reports a file over 16 MiB as too large to read, without reading it, and reads the others", () => {
+    const machine = twoFiles(`{ "mcpServers": { "huge": ${JSON.stringify(good)} }, "padding": "`);
+    // Sparse: 17 MiB on the disk's books, nothing written.
+    truncateSync(machine.cursor, 17 * 1024 * 1024);
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline");
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain(`Cursor  ${tilde(machine.cursor, machine.home)}\n  could not read this file: too large to read (17.0 MiB; mcpcage reads configuration files up to 16 MiB)\n`);
+    expect(result.stdout).toContain(`Devin  ${tilde(machine.devin, machine.home)}\n  devin-tool `);
+    expect(result.stdout).not.toContain("huge");
+  });
+
+  it("--fix leaves a file with a setting nested too deep as it is, says why, and fixes the other files", () => {
+    const deep = "[".repeat(10_000) + "]".repeat(10_000);
+    const machine = twoFiles(`{\n  "mcpServers": { "files": { "command": "npx", "args": ["-y", "@acme/files-mcp"] } },\n  "history": ${deep}\n}\n`);
+    const original = readFileSync(machine.cursor);
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", "/opt/mcpcage");
+    expect(result.stderr).toBe("");
+    const reason = `  not changed: ${tilde(machine.cursor, machine.home)} nests values more than 256 levels deep, which mcpcage does not rewrite.`;
+    expect(result.stdout).toContain(`\nPlan\n${reason}`);
+    expect(result.stdout).toContain("    files: /opt/mcpcage run -- npx -y @acme/files-mcp\n");
+    expect(result.stdout.split(reason)).toHaveLength(2); // said once, with the plan
+    expect(readFileSync(machine.cursor)).toEqual(original);
+    expect(existsSync(`${machine.cursor}.mcpcage.bak`)).toBe(false);
+    expect(result.stdout).toContain(`  caged devin-tool in ${tilde(machine.devin, machine.home)}\n`);
+    expect(JSON.parse(readFileSync(machine.devin, "utf8")).mcpServers["devin-tool"]).toEqual({ command: "/opt/mcpcage", args: ["run", "--", "npx", "-y", "@acme/devin-tool"] });
+    expect(result.code).toBe(1); // files is still outside the cage
+  });
+
+  it("never converts an env value that is not a string: wrap and --fix leave that entry as it is and go on", () => {
+    const odd = { command: "npx", args: ["-y", "@acme/odd-mcp"], env: { NODE_OPTIONS: { toString: null } } };
+    const plain = { command: "npx", args: ["-y", "@acme/plain-mcp"], env: { PORT: 3000 } };
+    const reason = "its env gives NODE_OPTIONS a value that is not a string";
+    expect(wrapEntry(asEntry(odd), { command: "mcpcage" })).toEqual({ skip: reason });
+    expect(wrapEntry(asEntry({ command: "npx", args: ["-y", "x", { toString: null }] }), { command: "mcpcage" })).toEqual({ skip: "it has an argument that is not a string" });
+    expect(wrapEntry(asEntry({ command: { toString: null } }), { command: "mcpcage" })).toEqual({ skip: "its command is not a string" });
+    const caged = { command: "mcpcage", args: ["run", "--env", "NODE_OPTIONS", "--", "npx", "-y", "@acme/odd-mcp"], env: { NODE_OPTIONS: { toString: null } } };
+    expect(moveHostEnv(asEntry(caged))).toEqual({ skip: reason });
+    // A value mcpcage leaves where it is, in "env", is not converted either: the entry is caged as before.
+    expect(wrapEntry(asEntry(plain), { command: "mcpcage" })).toEqual({ entry: { command: "mcpcage", args: ["run", "--env", "PORT", "--", "npx", "-y", "@acme/plain-mcp"], env: { PORT: 3000 } } });
+
+    const machine = twoFiles(JSON.stringify({ mcpServers: { odd, plain } }, null, 2));
+    const original = readFileSync(machine.cursor, "utf8");
+    const wrapped = wrapConfig(machine.cursor, { dryRun: true, command: "mcpcage" });
+    expect(wrapped.skipped).toEqual([{ name: "odd", reason }]);
+    expect(wrapped.changed.map((change) => change.name)).toEqual(["plain"]);
+
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", "/opt/mcpcage");
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain(`\nPlan\n  not changed: odd in ${tilde(machine.cursor, machine.home)}: ${reason}\n  cage plain in ${tilde(machine.cursor, machine.home)}\n`);
+    expect(result.stdout).toContain(`  caged devin-tool in ${tilde(machine.devin, machine.home)}\n`);
+    expect(JSON.parse(readFileSync(machine.cursor, "utf8")).mcpServers.odd).toEqual(JSON.parse(original).mcpServers.odd);
+    expect(JSON.parse(readFileSync(machine.cursor, "utf8")).mcpServers.plain.command).toBe("/opt/mcpcage");
   });
 });
 

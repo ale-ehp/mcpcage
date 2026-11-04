@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { isJsonObject } from "./jsonc.js";
 import { parseLaunch } from "./launch.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
+import { terminalSafe } from "./terminal.js";
 
 /** One MCP server entry, as Claude Desktop, Claude Code, Cursor, VS Code, Copilot, Windsurf and Devin store it. */
 export interface ServerEntry {
@@ -105,12 +106,18 @@ export function wrapEntry(entry: ServerEntry, options: { command: string }): { e
   const type = serverType(entry);
   if (type === "remote") return { skip: "remote server: nothing runs locally to cage" };
   if (!entry.command) return { skip: "no command" };
+  // Configuration files are not type-checked: a value that is not a string is never converted into
+  // one (an object whose toString is null throws, one nested 10,000 levels deep runs out of stack).
+  if (typeof entry.command !== "string") return { skip: "its command is not a string" };
   if (type === "mcpcage") return { skip: "already wrapped" };
   if (type !== "npx") {
     const hint = type === "docker" ? "already containerized; `mcpcage run --image` can add pinning and audit" : "only npx servers can be caged in this version";
     return { skip: `${entry.command}: ${hint}` };
   }
-  const args = entry.args ?? [];
+  const given: unknown = entry.args ?? [];
+  if (!Array.isArray(given)) return { skip: "its args are not a list" };
+  if (given.some((arg) => typeof arg !== "string")) return { skip: "it has an argument that is not a string" };
+  const args = given as string[];
   let serverArgs: string[];
   try {
     serverArgs = parseLaunch([entry.command, ...args]).args;
@@ -134,7 +141,8 @@ export function wrapEntry(entry: ServerEntry, options: { command: string }): { e
       envFlags.push("--env", name);
       env[name] = value;
     } else if (host.to === "container") {
-      envFlags.push("--env", `${name}=${String(value)}`);
+      if (typeof value !== "string") return { skip: notAString(name) };
+      envFlags.push("--env", `${name}=${value}`);
     }
   }
   const mountFlags = [...new Set(paths.filter((path): path is string => path !== undefined))].flatMap((path) => ["--mount", `${path}:rw`]);
@@ -144,19 +152,27 @@ export function wrapEntry(entry: ServerEntry, options: { command: string }): { e
   return { entry: wrapped };
 }
 
+/** Why an entry whose variable would move into `--env NAME=value` stays as it is: its value would have to be converted. */
+function notAString(name: string): string {
+  return `its env gives ${terminalSafe(name)} a value that is not a string`;
+}
+
 /**
  * A wrapped entry whose `env` sets variables that act on the host (HOST_ENV), rewritten as
  * wrapEntry writes them: each moves to an `--env NAME=value` right after `run`, in place of an
  * `--env NAME` that read it from mcpcage's own environment, or is dropped with that flag. The other
- * arguments stay as they are. Undefined when the entry's `env` sets none.
+ * arguments stay as they are. Undefined when the entry's `env` sets none; a reason to leave the
+ * entry as it is when one of their values is not a string.
  */
-export function moveHostEnv(entry: ServerEntry): ServerEntry | undefined {
+export function moveHostEnv(entry: ServerEntry): { entry: ServerEntry } | { skip: string } | undefined {
   if (!isWrapped(entry) || !isJsonObject(entry.env)) return undefined;
   const host = Object.entries(entry.env).flatMap(([name, value]) => {
     const found = hostVariable(name, value);
     return found === undefined ? [] : [{ name, value, to: found.to }];
   });
   if (host.length === 0) return undefined;
+  const odd = host.find((variable) => variable.to === "container" && typeof variable.value !== "string");
+  if (odd !== undefined) return { skip: notAString(odd.name) };
   const names = new Set(host.map((variable) => variable.name));
   const args = entry.args ?? [];
   const separator = args.indexOf("--");
@@ -167,9 +183,9 @@ export function moveHostEnv(entry: ServerEntry): ServerEntry | undefined {
     if (arg === "--env" && names.has(own[index + 1]!)) index++;
     else if (!(typeof arg === "string" && arg.startsWith("--env=") && names.has(arg.slice("--env=".length)))) kept.push(arg);
   }
-  const moved = host.flatMap((variable) => (variable.to === "container" ? ["--env", `${variable.name}=${String(variable.value)}`] : []));
+  const moved = host.flatMap((variable) => (variable.to === "container" ? ["--env", `${variable.name}=${variable.value as string}`] : []));
   const env = Object.fromEntries(Object.entries(entry.env).filter(([name]) => !names.has(name))) as Record<string, string>;
-  return { ...entry, args: ["run", ...moved, ...kept, ...(separator === -1 ? [] : args.slice(separator))], env };
+  return { entry: { ...entry, args: ["run", ...moved, ...kept, ...(separator === -1 ? [] : args.slice(separator))], env } };
 }
 
 /**

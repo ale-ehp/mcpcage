@@ -1,11 +1,10 @@
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
-import { claudeCodeSections, type ClientId, type ConfigLocation } from "./clients.js";
+import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
 import { envValues, hostPath, hostVariable, isWrapped, moveHostEnv, replaceFile, serverType, wrapEntry, type ServerEntry, type ServerType } from "./config.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
-import { MAX_DEPTH, tooDeep, type ToolDefinition } from "./manifest.js";
+import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
 import type { SandboxOptions } from "./sandbox.js";
@@ -43,6 +42,10 @@ export interface ServerReport {
    * entry starts mcpcage (see HOST_ENV in config.ts), by name, with what each does. Never values.
    */
   hostEnv: Array<{ name: string; what: string }>;
+  /** What in the entry is not as a client expects it, such as an argument that is not a string. */
+  problems: string[];
+  /** Why the entry could not be described whole: the report says so on its lines and goes on. */
+  error?: string;
   installScripts?: InstallScripts;
   /** `skipped`: the path arguments the inspection did not mount, because they are sensitive (see sensitive.ts). */
   inspection?: { tools: number; findings: Finding[]; error?: string; skipped?: SkippedPath[] };
@@ -113,7 +116,6 @@ async function describeServer(
   lookups: Map<string, InstallScripts>,
 ): Promise<ServerReport> {
   const type = serverType(entry);
-  const shown = shownCommand(entry, type);
   const server: ServerReport = {
     client: file.client,
     clientName: file.clientName,
@@ -122,26 +124,44 @@ async function describeServer(
     label: project,
     name,
     type,
-    command: shown.line,
-    protectedByMcpcage: isWrapped(entry) && !withoutSandbox(entry),
-    secrets: [...new Set([...secretNames(entry), ...shown.secrets])],
-    broadAccess: type === "remote" ? [] : broadPaths(stringArgs(entry), options.home),
-    hostEnv: type === "npx" || type === "mcpcage" ? hostEnvOf(entry) : [],
+    command: NO_COMMAND,
+    protectedByMcpcage: false,
+    secrets: [],
+    broadAccess: [],
+    hostEnv: [],
+    problems: [],
   };
-  const launch = npxCommand(entry, type);
-  const npm = launch ? npmPackage(launch) : undefined;
-  if (npm) server.packageSpec = npm.local ? `local package ${npm.spec}` : npm.spec;
-  // Install scripts matter where they would run: an npx server outside the cage. A caged one whose
-  // env acts on the host still installs in the cage, with the scripts disabled.
-  if ((type === "npx" || (type === "mcpcage" && !server.protectedByMcpcage)) && npm && !npm.local) {
-    let lookup = lookups.get(npm.spec);
-    if (!lookup) {
-      lookup = installScripts(npm.spec, { offline: options.offline, cacheDir: options.cacheDir, runner: options.npmRunner });
-      lookups.set(npm.spec, lookup);
+  // Anything on the machine may have written the entry, and the report exists to find the ones
+  // nobody meant to be there: whatever in one trips its description up is said on its own lines, and
+  // the scan goes on with the others. One argument that could not be converted to text stopped the
+  // whole report, every other server and file unreported.
+  try {
+    const shown = shownCommand(entry, type);
+    server.command = shown.line;
+    server.protectedByMcpcage = isWrapped(entry) && !withoutSandbox(entry);
+    server.secrets = [...new Set([...secretNames(entry), ...shown.secrets])];
+    server.broadAccess = type === "remote" ? [] : broadPaths(stringArgs(entry), options.home);
+    server.hostEnv = type === "npx" || type === "mcpcage" ? hostEnvOf(entry) : [];
+    const odd = Array.isArray(entry.args) ? entry.args.filter((arg) => typeof arg !== "string").length : 0;
+    if (odd > 0) server.problems.push(`args: ${odd === 1 ? "an argument that is not a string" : `${odd} arguments that are not strings`}`);
+    const launch = npxCommand(entry, type);
+    const npm = launch ? npmPackage(launch) : undefined;
+    if (npm) server.packageSpec = npm.local ? `local package ${npm.spec}` : npm.spec;
+    // Install scripts matter where they would run: an npx server outside the cage. A caged one whose
+    // env acts on the host still installs in the cage, with the scripts disabled.
+    if ((type === "npx" || (type === "mcpcage" && !server.protectedByMcpcage)) && npm && !npm.local) {
+      let lookup = lookups.get(npm.spec);
+      if (!lookup) {
+        lookup = installScripts(npm.spec, { offline: options.offline, cacheDir: options.cacheDir, runner: options.npmRunner });
+        lookups.set(npm.spec, lookup);
+      }
+      server.installScripts = lookup;
     }
-    server.installScripts = lookup;
+    if (options.inspect && launch) server.inspection = await inspectServer(options.inspect, launch, entry, shown.hidden);
+  } catch (error) {
+    // The values of the entry's env and headers stay out of the report, whatever the error says.
+    server.error = hideValues(oneLine(messageOf(error)), [...Object.values(stringValues(entry.env)), ...Object.values(stringValues(entry.headers))]);
   }
-  if (options.inspect && launch) server.inspection = await inspectServer(options.inspect, launch, entry, shown.hidden);
   return server;
 }
 
@@ -239,7 +259,10 @@ function npmLaunch(argv: string[]): NpmLaunch | undefined {
  * `mcpcage run --no-sandbox`; or a caged one whose env runs on this machine, in mcpcage, first.
  */
 export function isUncaged(server: ServerReport): boolean {
-  return server.type === "npx" || (server.type === "mcpcage" && (!server.protectedByMcpcage || server.hostEnv.length > 0));
+  if (server.type === "npx") return true;
+  if (server.type !== "mcpcage") return false;
+  // A wrapped entry that could not be described is not known to be caged.
+  return server.error !== undefined || !server.protectedByMcpcage || server.hostEnv.length > 0;
 }
 
 /** The variables of an entry's env that act on the host once it starts mcpcage, with what each does. */
@@ -312,7 +335,8 @@ export function renderReport(report: ProtectReport, options: { home: string }): 
  */
 function serverLines(server: ServerReport, home: string): string[] {
   const indent = " ".repeat(NAME_WIDTH + 4);
-  const details: string[] = [];
+  const details: string[] = server.problems.map(printable);
+  if (server.error !== undefined) details.push(`could not describe this entry: ${printable(server.error)}`);
   for (const path of server.broadAccess) details.push(`access: ${printable(path)}: ${broadAccessKind(path, home) ?? "a broad path"}`);
   if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(printable).join(", ")}`);
   if (server.installScripts) details.push(installLine(server.installScripts));
@@ -336,6 +360,8 @@ function serverLines(server: ServerReport, home: string): string[] {
 }
 
 function status(server: ServerReport): string {
+  // An npx entry runs on the host whatever else could not be read in it.
+  if (server.error !== undefined && server.type !== "npx") return "could not be described";
   switch (server.type) {
     case "npx":
       return "NOT CAGED";
@@ -440,8 +466,16 @@ export function fixConfigs(options: FixOptions): FixOutcome {
     const servers = options.report.servers.filter((server) => server.file === file.file);
     const targets = servers.filter((server) => server.type === "npx" || (server.type === "mcpcage" && server.protectedByMcpcage && server.hostEnv.length > 0));
     // Already wrapped, so there is nothing to rewrite: only the person who chose --no-sandbox can drop it.
-    const onHost = servers.filter((server) => server.type === "mcpcage" && !server.protectedByMcpcage);
-    if (targets.length > 0 || onHost.length > 0) files.push(fixFile(file, targets, onHost, options, home));
+    const onHost = servers.filter((server) => server.type === "mcpcage" && !server.protectedByMcpcage && server.error === undefined);
+    if (targets.length === 0 && onHost.length === 0) continue;
+    try {
+      files.push(fixFile(file, targets, onHost, options, home));
+    } catch (error) {
+      // One file that cannot be rewritten leaves the others to be.
+      const fixed: FixedFile = { file: file.file, changed: [], skipped: [], refused: messageOf(error) };
+      options.log(`  not changed: ${shownFile(file, home)}: ${printable(fixed.refused!)}`);
+      files.push(fixed);
+    }
   }
   return { files };
 }
@@ -454,7 +488,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   let bytes: Buffer;
   let config: Record<string, unknown>;
   try {
-    bytes = readFileSync(file.file);
+    bytes = readConfigFile(file.file);
     config = parseConfig(bytes.toString("utf8"));
   } catch (error) {
     fixed.refused = `could not read it again: ${(error as Error).message}`;
@@ -498,6 +532,15 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
     for (const line of byHand) options.log(line);
     return fixed;
   }
+  // JSON.stringify recurses, and an unrelated setting nested a few thousand levels deep ran it out of
+  // stack, which stopped the rewrite of every file after this one.
+  if (nestedDeeperThan(config, MAX_DEPTH)) {
+    fixed.refused = `it nests values more than ${MAX_DEPTH} levels deep`;
+    fixed.changed = [];
+    options.log(`  not changed: ${shown} nests values more than ${MAX_DEPTH} levels deep, which mcpcage does not rewrite. Edit it by hand so that each server runs the command shown ("command" is its first word, "args" the rest):`);
+    for (const line of byHand) options.log(line);
+    return fixed;
+  }
   if (file.client === "claude-code" && file.scope === "user" && options.claudeCodeRunning) {
     fixed.refused = "Claude Code is running";
     fixed.changed = [];
@@ -516,8 +559,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
 /** An npx entry wrapped, or a caged entry with its env moved off the host; or why it stays as it is. */
 function rewrite(entry: ServerEntry, command: string): { entry: ServerEntry } | { skip: string } {
   if (serverType(entry) !== "mcpcage") return wrapEntry(entry, { command });
-  const moved = moveHostEnv(entry);
-  return moved === undefined ? { skip: "its env no longer runs on your machine" } : { entry: moved };
+  return moveHostEnv(entry) ?? { skip: "its env no longer runs on your machine" };
 }
 
 /** JSON in the file's own style: its indentation unit, line endings, final newline and byte order mark. */
@@ -574,8 +616,10 @@ function isPlaceholder(text: string): boolean {
 function shownCommand(entry: ServerEntry, type: ServerType): { line: string; secrets: string[]; hidden: string[] } {
   if (type === "remote") {
     const field = entry.url != null ? "url" : "serverUrl";
-    const masked = maskUrl(String(entry[field] ?? ""));
-    return { line: masked.shown || `(${String(entry.type)} server)`, secrets: masked.hidden.length > 0 ? [field] : [], hidden: masked.hidden };
+    const address = entry[field];
+    const masked = maskUrl(typeof address === "string" ? address : "");
+    const kind = typeof entry.type === "string" ? entry.type : "remote";
+    return { line: masked.shown || `(${kind} server)`, secrets: masked.hidden.length > 0 ? [field] : [], hidden: masked.hidden };
   }
   if (typeof entry.command !== "string" || entry.command === "") return { line: NO_COMMAND, secrets: [], hidden: [] };
   const masked = maskArgs(stringArgs(entry), type === "mcpcage");
@@ -753,9 +797,11 @@ function valueAt(value: unknown, path: string[]): unknown {
 
 function readText(file: string): string {
   try {
-    return readFileSync(file, "utf8");
+    return readConfigFile(file).toString("utf8");
   } catch (error) {
-    throw new Error(`could not read it (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})`);
+    const code = (error as NodeJS.ErrnoException).code;
+    // A file over the size limit is said so in readConfigFile's words.
+    throw new Error(code === undefined ? messageOf(error) : `could not read it (${code})`);
   }
 }
 
@@ -773,8 +819,12 @@ function parseConfig(text: string): Record<string, unknown> {
   return config;
 }
 
+/**
+ * The arguments that are strings. Another value is never converted: an object whose toString is
+ * null throws, and an array nested 10,000 levels deep runs out of stack. The report says it is there.
+ */
 function stringArgs(entry: ServerEntry): string[] {
-  return Array.isArray(entry.args) ? entry.args.map((arg) => String(arg)) : [];
+  return Array.isArray(entry.args) ? entry.args.filter((arg): arg is string => typeof arg === "string") : [];
 }
 
 function stringValues(record: unknown): Record<string, string> {
@@ -793,6 +843,11 @@ function hideValues(text: string, values: string[]): string {
 
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+/** What a caught value says, whatever was thrown. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : typeof error === "string" ? error : "an unexpected error";
 }
 
 /** The program's file name, from the first word of a command line (quoted when it has spaces). */

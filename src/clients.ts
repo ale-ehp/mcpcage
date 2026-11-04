@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { isJsonObject, parseJsonc } from "./jsonc.js";
 
@@ -110,8 +110,40 @@ function profileFiles(profiles: string, path: typeof posix): string[] {
 /** A file that cannot be read or parsed has only its root section; the scan reports the error. */
 function readQuietly(file: string): unknown {
   try {
-    return parseJsonc(readFileSync(file, "utf8"));
+    return parseJsonc(readConfigFile(file).toString("utf8"));
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * The most a configuration file may weigh for mcpcage to read it. Real ones stay far below: a
+ * ~/.claude.json with years of history keeps a few hundred kilobytes. Anything on the machine may
+ * write one, and a file of gigabytes, read whole and parsed, would take mcpcage down with it.
+ */
+export const MAX_CONFIG_BYTES = 16 * 1024 * 1024;
+
+/**
+ * The bytes of a configuration file, its size looked at before anything is read: a file over
+ * MAX_CONFIG_BYTES is refused unread, and one that grows past it while it is read is refused too.
+ */
+export function readConfigFile(file: string): Buffer {
+  const fd = openSync(file, "r");
+  try {
+    const tooLarge = (size: number) =>
+      new Error(`too large to read (${(size / 1024 / 1024).toFixed(1)} MiB; mcpcage reads configuration files up to ${MAX_CONFIG_BYTES / 1024 / 1024} MiB)`);
+    const size = fstatSync(fd).size;
+    if (size > MAX_CONFIG_BYTES) throw tooLarge(size);
+    const chunks: Buffer[] = [];
+    const chunk = Buffer.alloc(64 * 1024);
+    let total = 0;
+    for (let read = readSync(fd, chunk); read > 0; read = readSync(fd, chunk)) {
+      total += read;
+      if (total > MAX_CONFIG_BYTES) throw tooLarge(total);
+      chunks.push(Buffer.from(chunk.subarray(0, read)));
+    }
+    return Buffer.concat(chunks);
+  } finally {
+    closeSync(fd);
   }
 }
