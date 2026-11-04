@@ -12,7 +12,7 @@ import { banner } from "./banner.js";
 import { discoverConfigs } from "./clients.js";
 import { RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
-import { commandOnPath, temporaryMcpcage, type McpcageCommand } from "./installed.js";
+import { commandOnPath, installedScript, runningFrom, temporaryMcpcage, type McpcageCommand } from "./installed.js";
 import { npxArgv, parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, checkServerId, serverDir } from "./paths.js";
@@ -238,7 +238,8 @@ function onHost(line: string[], npx: boolean): { command: string; args: string[]
     if (found === undefined) throw new Error(`npx not found: mcpcage starts npm's npx-cli.js with the node it runs on, and there is none next to ${process.execPath}`);
     return { command: found.file, args: [...found.args, ...rest] };
   }
-  const batch = /\.(?:cmd|bat)$/i.test(program) ? program : /^[^/\\.]+$/.test(program) ? commandOnPath(program) : undefined;
+  // The program the spawn below finds: in this process's PATH, as it is.
+  const batch = /\.(?:cmd|bat)$/i.test(program) ? program : /^[^/\\.]+$/.test(program) ? commandOnPath(program, process.env.PATH ?? "") : undefined;
   if (batch !== undefined && /\.(?:cmd|bat)$/i.test(batch)) {
     throw new Error(
       `${batch} is a batch file, which Windows starts only through cmd.exe, a shell that would read the server's arguments as commands: give --no-sandbox the program it starts instead (for a package npm installed, node.exe and its script)`,
@@ -387,10 +388,19 @@ const inspectInCage: Inspector = async (launch) => {
  * CVE-2024-27980), so a client that starts servers so could not start what --fix wrote; the MCP
  * SDK's cross-spawn could. Both started node.exe given cli.js. A bare name would be looked for in the
  * client's current directory first.
+ *
+ * Run from a temporary place (see runningFrom), the PATH it was given starts with the runner's
+ * directories, which userPath leaves out: from npx the mcpcage installed with `npm install -g` was
+ * found past them, and an entry it had caged was said to start "not the mcpcage on your PATH".
  */
 function installedCommand(): McpcageCommand {
-  if (process.platform === "win32") return { node: process.execPath, script: realpathSync.native(fileURLToPath(import.meta.url)) };
-  return commandOnPath("mcpcage") ?? "mcpcage";
+  if (process.platform === "win32") {
+    const running = realpathSync.native(fileURLToPath(import.meta.url));
+    // Run by npx, pnpm dlx, yarn dlx or bunx, mcpcage writes the user's own: the one their PATH finds.
+    return { node: process.execPath, script: runningFrom() === undefined ? running : (installedScript() ?? running) };
+  }
+  // None on the user's PATH, the runner's own is the one --fix and wrap would write, and refuse.
+  return commandOnPath("mcpcage") ?? commandOnPath("mcpcage", process.env.PATH ?? "") ?? "mcpcage";
 }
 
 /**

@@ -100,10 +100,12 @@ mcpcage protect --fix        # shows the plan, asks, writes a backup next to eac
 
 `protect --fix` writes the absolute path of `mcpcage` into the files, because desktop apps start
 with a minimal `PATH` (on Windows, `node.exe` with mcpcage's `cli.js`: see [Windows](#windows)). It
-must be an installed mcpcage: run from a temporary place (`npx mcpcage protect --fix`, or
-`pnpm dlx`, `yarn dlx`, `bunx`, or anything in the system's temporary directory), `--fix` and
-`wrap` refuse to write that copy, which the runner or the system deletes, and say to install
-mcpcage (`npm install -g mcpcage`) or to name one with `--command`. Two files
+must be an installed mcpcage. Run from a temporary place (`npx mcpcage protect --fix`, or
+`pnpm dlx`, `yarn dlx`, `bunx`, or anything in the system's temporary directory), mcpcage looks for
+the one installed on your `PATH` past the directories the runner put first there, writes it, and
+counts what it caged as caged; with none installed, `--fix` and `wrap` refuse to write the
+runner's copy, which the runner or the system deletes, and say to install mcpcage
+(`npm install -g mcpcage`) or to name one with `--command`. Two files
 are never rewritten: `~/.claude.json` while Claude Code is running (Claude Code rewrites it while it
 runs, so close it first) and VS Code's `mcp.json` when it has comments. For both, mcpcage prints the
 exact command to put in the file.
@@ -209,7 +211,9 @@ only through `cmd.exe`: since the fix of CVE-2024-27980, Node refuses a plain sp
 (`EINVAL`), so a client that starts servers that way could not start it. A bare `mcpcage` is never
 written, nor counted as caged, because Windows looks for a bare name in the client's current
 directory first. An entry that mcpcage 0.5.0 caged with `mcpcage.cmd` is reported as one that some
-clients cannot start, and `--fix` gives it `node.exe` with `cli.js`, its options kept.
+clients cannot start, and `--fix` gives it `node.exe` with `cli.js`, its options kept. Run from a
+temporary place, mcpcage takes the `cli.js` of the mcpcage on your `PATH` as npm installs it, next
+to its `mcpcage.cmd` in `node_modules\mcpcage\dist` (after `npm link`, the clone's).
 
 **`cmd /c npx`.** An entry that starts `cmd /c npx ...`, as many Windows setups do, counts as npx
 and is caged. `cmd /c` is kept after `--`, so `unwrap` gives the entry back as it was, but mcpcage

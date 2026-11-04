@@ -159,7 +159,12 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   its directories is one of the user's own `PATH`, compared as they resolve, without case on macOS
   and Windows: an entry whose `PATH` has another directory, or a relative or empty one, is named and
   not counted as caged, and `wrap` and `--fix` leave such an entry as it is, for the user to check
-  or remove that `PATH`, since they cannot know which one was meant. Within the user's own directories the order can differ, so an
+  or remove that `PATH`, since they cannot know which one was meant. Run from a temporary place
+  (`npx`, `pnpm dlx`, `yarn dlx`, `bunx`), mcpcage leaves out of the user's own `PATH` what the
+  runner put first on it: the directories in a temporary place, every `node_modules/.bin` and npm's
+  `node-gyp-bin`. They are not the user's, and a look-alike mcpcage in a project's
+  `node_modules/.bin` would otherwise be taken for the installed one, and written by `--fix`.
+  Within the user's own directories the order can differ, so an
   entry can pick one of the user's programs over another of the same name; and `run`, which refuses
   to mount the directories of the `PATH` it is started with, does not check those of the user's that
   the entry's `PATH` leaves out (the report still names such a `--mount`). `COPILOT_HOME`,

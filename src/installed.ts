@@ -94,7 +94,7 @@ const RUNNER_CACHE = /(?:^|[\\/])(?:_npx[\\/][^\\/]+|dlx[\\/][0-9a-f]{32,}[\\/][
  * in a runner's cache: pnpm dlx starts the package in its store, through a bin in its dlx cache that
  * it puts first on the PATH. Undefined when it runs from anywhere else.
  */
-function runningFrom(): string | undefined {
+export function runningFrom(): string | undefined {
   const script = process.argv[1];
   if (script !== undefined && isAbsolute(script) && isTemporary(script)) return script;
   const found = onPath("mcpcage", process.env.PATH ?? "", false);
@@ -126,7 +126,7 @@ const UNKNOWN = Symbol("unknown");
  * followed, the same file as `own` (the command `wrap` and `--fix` write: pnpm and Volta install a
  * script or a program of their own, not a link into the package, so whatever it is, it is mcpcage)
  * or as the entry point of the mcpcage that is running. A bare name is looked up as the client's
- * spawn looks it up: in the PATH the entry's own `env` sets, else in this process's PATH. A
+ * spawn looks it up: in the PATH the entry's own `env` sets, else in the user's (see userPath). A
  * `command: "mcpcage"` with an `env.PATH` of the attacker's choice was vouched for as caged, because
  * it was looked up in mcpcage's PATH. A relative path, or a relative directory in the entry's PATH,
  * depends on the directory the client starts the entry from: it is never taken for mcpcage, nor is
@@ -166,15 +166,15 @@ function nodeAt(node: string, script: string, own: McpcageCommand | undefined): 
 
 /** The part of an entry's PATH that is not the user's (see foreignPath). */
 export interface ForeignPath {
-  /** Its directories that are not on this process's PATH, as written, each once: "" for an empty element. */
+  /** Its directories that are not on the user's PATH (see userPath), as written, each once: "" for an empty element. */
   dirs: string[];
   /** A value that is not a string, which the client's spawn converts into a directory name nobody chose. */
   notString?: boolean;
 }
 
 /**
- * The directories of the PATH an entry's `env` sets that are not on the PATH of this process, or
- * undefined when it sets none, or only directories of the user's. A client starts the entry with
+ * The directories of the PATH an entry's `env` sets that are not on the user's PATH (see userPath),
+ * or undefined when it sets none, or only directories of the user's. A client starts the entry with
  * that PATH, and every program started from there inherits it: the node that the
  * `#!/usr/bin/env node` of mcpcage's script finds, the dirname, sed and uname that a pnpm shim runs,
  * the docker that mcpcage runs and the credential helper that docker runs. Comparing node and docker
@@ -189,7 +189,7 @@ export function foreignPath(env: unknown): ForeignPath | undefined {
   const path = pathOf(env);
   if (path === undefined) return undefined;
   if (path === UNKNOWN) return { dirs: [], notString: true };
-  const yours = new Set((process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir)).map(dirKey));
+  const yours = new Set(userPath().split(delimiter).filter((dir) => isAbsolute(dir)).map(dirKey));
   const dirs = [...new Set(path.split(delimiter))].filter((dir) => !isAbsolute(dir) || !yours.has(dirKey(dir)));
   return dirs.length === 0 ? undefined : { dirs };
 }
@@ -337,18 +337,58 @@ function envValue(raw: string): string {
 }
 
 /**
- * The file a bare name finds in this process's PATH, as an entry's command is looked up (see onPath):
- * in its absolute directories only, never in the current directory. Undefined when none has it.
+ * The file a bare name finds in the user's PATH (see userPath), or in `path`, as an entry's command is
+ * looked up (see onPath): in its absolute directories only, never in the current directory. Undefined
+ * when none has it.
  */
-export function commandOnPath(name: string): string | undefined {
-  const found = onPath(name, process.env.PATH ?? "", false);
+export function commandOnPath(name: string, path = userPath()): string | undefined {
+  const found = onPath(name, path, false);
   return found === UNKNOWN ? undefined : found;
 }
 
-/** The file a command names here, symlinks followed, looked up in this process's PATH; undefined when there is none. */
+/** The file a command names here, symlinks followed, looked up in the user's PATH (see userPath); undefined when there is none. */
 function realCommand(command: string): string | undefined {
-  const found = onPath(command, process.env.PATH ?? "", false);
+  const found = onPath(command, userPath(), false);
   return found === undefined || found === UNKNOWN ? undefined : realFile(found);
+}
+
+/**
+ * The PATH mcpcage takes for the user's: this process's, without the directories that a package
+ * runner put first on it when mcpcage runs from one (see runningFrom). npx gives the program a PATH
+ * that starts with its cache's .bin, the node_modules/.bin of the current directory and of every one
+ * above it, and npm's node-gyp-bin; bunx its .bin in the temporary directory and the same
+ * node_modules/.bin; pnpm dlx its dlx cache's .bin; yarn dlx a directory of shims (node, yarn, the
+ * bin) in the temporary directory. Taken for the user's, from npx "the mcpcage on your PATH" was
+ * npx's own: an entry caged by the installed mcpcage was said to start another program, and --fix
+ * refused though mcpcage was installed. Left out are the directories in a temporary place, every
+ * node_modules/.bin and npm's node-gyp-bin: with npx's own .bin alone left out, a look-alike in a
+ * project's node_modules/.bin was found first, taken for the installed mcpcage and written by --fix.
+ * Leaving a directory out only takes trust away: what it holds is no longer the user's mcpcage or
+ * node, and an entry's PATH that names it picks programs that are not the user's.
+ */
+function userPath(): string {
+  const path = process.env.PATH ?? "";
+  if (runningFrom() === undefined) return path;
+  return path
+    .split(delimiter)
+    .filter((dir) => !isAbsolute(dir) || !(RUNNER_BIN.test(dir) || isTemporary(dir)))
+    .join(delimiter);
+}
+
+/** A directory that package managers put on the PATH of what they run: a node_modules/.bin, or npm's node-gyp-bin. */
+const RUNNER_BIN = /[\\/](?:node_modules[\\/]\.bin|node-gyp-bin)[\\/]?$/i;
+
+/**
+ * The cli.js of the mcpcage the user's PATH finds on Windows, as npm installs it there: npm writes
+ * <prefix>\mcpcage.cmd, which starts "%dp0%\node_modules\mcpcage\dist\cli.js" with node, and
+ * puts the package in <prefix>\node_modules\mcpcage, a junction to the clone after `npm link`.
+ * Checked on Windows 10 with npm 11.13, installed with --prefix and linked. Links followed;
+ * undefined when the PATH finds no mcpcage, or one that is not laid out so. Only that file is
+ * trusted, next to the mcpcage.cmd the user's PATH finds: never a cli.js a configuration names.
+ */
+export function installedScript(): string | undefined {
+  const command = commandOnPath("mcpcage");
+  return command === undefined ? undefined : realFile(join(dirname(command), "node_modules", "mcpcage", "dist", "cli.js"));
 }
 
 /** The entry point of the running mcpcage (its dist/cli.js), symlinks followed. */
@@ -366,7 +406,7 @@ function startedBy(entry: { command: string; env?: unknown }): string | typeof U
   // directory that is depends on the client.
   if (process.platform === "win32" && !/[/\\]/.test(entry.command)) return UNKNOWN;
   const path = pathOf(entry.env);
-  return path === undefined ? onPath(entry.command, process.env.PATH ?? "", false) : onPath(entry.command, path, true);
+  return path === undefined ? onPath(entry.command, userPath(), false) : onPath(entry.command, path, true);
 }
 
 /**

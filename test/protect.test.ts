@@ -2484,7 +2484,7 @@ describe("mcpcage started from npm's npx cache", () => {
    * started from there, with that directory's .bin first on the PATH, where the bin npm links (on
    * Windows the mcpcage.cmd it writes) finds it.
    */
-  function fromNpxCache(top: string): { cli: string; command: string; path: string } {
+  function fromNpxCache(top: string): { cli: string; command: string; bin: string; path: string } {
     const modules = join(top, "npm-cache", "_npx", "4d1f392c9a3fd6e1", "node_modules");
     const pkg = join(modules, "mcpcage");
     for (const part of ["dist", "runtime"]) cpSync(join(root, part), join(pkg, part), { recursive: true });
@@ -2497,8 +2497,93 @@ describe("mcpcage started from npm's npx cache", () => {
     const command = join(bin, process.platform === "win32" ? "mcpcage.cmd" : "mcpcage");
     if (process.platform === "win32") writeText(command, `@node "${script}" %*\r\n`);
     else symlinkSync(script, command);
-    return { cli: script, command, path: `${bin}${delimiter}${process.env.PATH ?? ""}` };
+    // Then node's own directory, not this machine's PATH, which may find an installed mcpcage.
+    return { cli: script, command, bin, path: `${bin}${delimiter}${dirname(process.execPath)}` };
   }
+
+  /**
+   * mcpcage installed as `npm install -g --prefix <prefix>` installs it: on macOS and Linux the
+   * package in <prefix>/lib/node_modules and <prefix>/bin/mcpcage linked to its cli.js; on Windows
+   * the package in <prefix>\node_modules and <prefix>\mcpcage.cmd, which starts
+   * "%dp0%\node_modules\mcpcage\dist\cli.js". With `npm link` the package's directory is a link
+   * (a junction on Windows) to a clone elsewhere. `script` is its cli.js, links followed.
+   */
+  function npmGlobal(top: string, linked: boolean): { bin: string; command: string; script: string } {
+    const windows = process.platform === "win32";
+    const prefix = join(top, "prefix");
+    const modules = windows ? join(prefix, "node_modules") : join(prefix, "lib", "node_modules");
+    const pkg = join(modules, "mcpcage");
+    const files = linked ? join(top, "src", "mcpcage") : pkg;
+    for (const part of ["dist", "runtime"]) cpSync(join(root, part), join(files, part), { recursive: true });
+    copyFileSync(join(root, "package.json"), join(files, "package.json"));
+    chmodSync(join(files, "dist", "cli.js"), 0o755);
+    if (linked) {
+      mkdirSync(modules, { recursive: true });
+      symlinkSync(files, pkg, "junction");
+    }
+    const bin = windows ? prefix : join(prefix, "bin");
+    mkdirSync(bin, { recursive: true });
+    const command = join(bin, windows ? "mcpcage.cmd" : "mcpcage");
+    if (windows) writeText(command, `@node "%~dp0\\node_modules\\mcpcage\\dist\\cli.js" %*\r\n`);
+    else symlinkSync(join(pkg, "dist", "cli.js"), command);
+    return { bin, command, script: realpathSync.native(join(pkg, "dist", "cli.js")) };
+  }
+
+  it.each([["npm install -g", false], ["npm link", true]] as const)(
+    "takes the mcpcage installed with %s for the user's, past the directories npx puts on the PATH, and --fix writes it",
+    (_, linked) => {
+      const top = mkdtempSync(join(tmpdir(), "mcpcage-npx-installed-"));
+      const home = join(top, "home");
+      const project = join(top, "work");
+      for (const dir of [home, project]) mkdirSync(dir, { recursive: true });
+      const npx = fromNpxCache(top);
+      const installed = npmGlobal(top, linked);
+      const windows = process.platform === "win32";
+      // An entry as the installed mcpcage's --fix writes it: its command, on Windows node.exe with its cli.js.
+      const caged = (server: string) => {
+        const args = ["run", "--", "npx", "-y", server];
+        return windows ? { command: process.execPath, args: [installed.script, ...args] } : { command: installed.command, args };
+      };
+      // A look-alike in the project's node_modules/.bin, which npx puts on the PATH too.
+      const lookAlike = idleProgram(join(project, "node_modules", ".bin"), "mcpcage");
+      const cursor = locationsFor(home, project)("cursor", "user");
+      writeJsonFile(cursor, {
+        mcpServers: {
+          notes: caged("@acme/notes-mcp"),
+          // npx's directory is on mcpcage's PATH, not on the user's: programs the entry's PATH picks there are not theirs.
+          pathed: { ...caged("@acme/pathed-mcp"), env: { PATH: [npx.bin, installed.bin].join(delimiter) } },
+          local: { command: lookAlike, args: ["run", "--", "npx", "-y", "@acme/local-mcp"] },
+          fresh: { command: "npx", args: ["-y", "@acme/fresh-mcp"] },
+        },
+      });
+      // The PATH npx gave mcpcage (npm 11.19): its cache's .bin, the node_modules/.bin of the current
+      // directory and of each one above it, npm's node-gyp-bin, then the user's own.
+      const above: string[] = [];
+      for (let dir = project; above.at(-1) !== dir; dir = dirname(dir)) above.push(dir);
+      const added = [npx.bin, ...above.map((dir) => join(dir, "node_modules", ".bin")), join(top, "npm", "node_modules", "@npmcli", "run-script", "lib", "node-gyp-bin")];
+      const env = fakeUserEnv(home, join(top, "cage"), { CLAUDECODE: "1", PATH: [...added, installed.bin, dirname(process.execPath)].join(delimiter) });
+      const mcpcageFromNpx = (...args: string[]) => {
+        const result = spawnSync(process.execPath, [npx.cli, ...args], { cwd: project, env, encoding: "utf8" });
+        return { code: result.status, stdout: result.stdout, stderr: result.stderr };
+      };
+
+      const scan = mcpcageFromNpx("protect", "--project", project, "--offline");
+      expect(lineOf(scan.stdout, "notes"), scan.stderr).toMatch(/ {2}caged$/);
+      expect(lineOf(scan.stdout, "pathed")).toMatch(/ {2}caged, but its PATH picks other programs$/);
+      expect(lineOf(scan.stdout, "local")).toMatch(/, which is not the mcpcage on your PATH$/);
+      expect(lineOf(scan.stdout, "fresh")).toMatch(/ {2}NOT CAGED$/);
+
+      // --fix writes the installed mcpcage, not npx's (which it would refuse) nor the look-alike.
+      const fix = mcpcageFromNpx("protect", "--project", project, "--offline", "--fix", "--yes", "--no-build");
+      expect(fix.stderr).not.toContain("temporary place");
+      const after = JSON.parse(readFileSync(cursor, "utf8")).mcpServers;
+      expect(after.fresh).toEqual(caged("@acme/fresh-mcp"));
+      expect(after.notes).toEqual(caged("@acme/notes-mcp"));
+      // What each entry starts now: the installed mcpcage, the look-alike's entry caged by it too.
+      const starts = (entry: { command: string; args: string[] }) => (windows ? [entry.command, entry.args[0]] : [entry.command]);
+      for (const [name, entry] of Object.entries(after)) expect(starts(entry as { command: string; args: string[] }), name).toEqual(starts(caged("")));
+    },
+  );
 
   it("--fix and wrap refuse to write a command from it, say to install mcpcage or pass --command, and protect still reports", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-npx-cache-"));
