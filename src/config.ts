@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
-import { foreignPath, mcpcageAt, movedPlaces, type ForeignPath } from "./installed.js";
+import { envFileOf, foreignPath, mcpcageAt, movedPlaces, type ForeignPath } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
 import { parseLaunch } from "./launch.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
@@ -59,7 +59,8 @@ export interface WrapOutcome {
  * Rewrites every npx-launched stdio server so the client starts it through `mcpcage run`. An entry
  * whose command is only named mcpcage (see mcpcageAt) is no cage: what it would start is wrapped as
  * an npx entry is, as `protect --fix` does. It was skipped as "already wrapped" for its name alone.
- * `writable` mounts the paths the servers are given writable (see wrapEntry).
+ * `writable` mounts the paths the servers are given writable (see wrapEntry). An entry that would
+ * still not count as caged once rewritten stays as it is, with the reason (see cageCheck).
  */
 export function wrapConfig(file: string, options: { dryRun: boolean; command?: string; writable?: boolean }): WrapOutcome {
   const command = options.command ?? "mcpcage";
@@ -67,8 +68,33 @@ export function wrapConfig(file: string, options: { dryRun: boolean; command?: s
     const original = isWrapped(entry) && mcpcageAt(entry, command) === "other program" ? unwrapEntry(entry) : { entry };
     if ("skip" in original) return skip(name, original.skip);
     const wrapped = wrapEntry(original.entry, { command, writable: options.writable });
-    return "skip" in wrapped ? skip(name, wrapped.skip) : wrapped.entry;
+    if ("skip" in wrapped) return skip(name, wrapped.skip);
+    const reason = cageCheck(wrapped.entry, { command, configFile: file });
+    return reason === undefined ? wrapped.entry : skip(name, reason);
   });
+}
+
+/**
+ * Why an entry that wrap or `protect --fix` is about to write would not count as caged in protect's
+ * report, in words that say what to do; undefined when it would. The rules are the report's: the
+ * mcpcage it starts (see mcpcageAt), then what its env and its envFile set (see envReason; the
+ * variables of its env that act on the host are in the cage by then, moved by wrapEntry). wrap
+ * printed "caged" for an entry whose PATH led the client to a look-alike of mcpcage, and --fix for
+ * an npx entry whose PATH put a node of its own first: each then ran on the host, and only the next
+ * report said so. An mcpcage that cannot be found starts nothing, and is written as before; a
+ * writable mount is the user's choice (`--writable`), which the report counts as an opened cage.
+ * `configFile` holds the entry: an envFile's `${workspaceFolder}` is found from it.
+ */
+export function cageCheck(entry: ServerEntry, options: { command: string; configFile: string }): string | undefined {
+  if (mcpcageAt(entry as ServerEntry & { command: string }, options.command) === "other program") {
+    // A bare name is looked up in the entry's PATH, a relative path from the client's directory.
+    return /[/\\]/.test(options.command) && !isAbsolute(options.command)
+      ? `${terminalSafe(options.command)} is a relative path, so what the client starts depends on the directory it starts the entry from: give the full path of mcpcage with --command`
+      : `its env sets a PATH that makes the client start another program than mcpcage: check that PATH, or remove it from its "env" by hand`;
+  }
+  const envFile = envFileOf(entry, options.configFile);
+  const fromFile = envFile === undefined ? undefined : { path: envFile.path, ...(envFile.variables === undefined ? {} : { effects: envEffects(envFile.variables) }) };
+  return envReason(envEffects(entry.env), fromFile);
 }
 
 /** What the variables of an entry's `env`, or of its `envFile`, do on the host once it starts mcpcage: names only, never values. */

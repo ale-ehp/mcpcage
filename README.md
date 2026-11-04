@@ -158,7 +158,8 @@ is often what lets the client find `node`, but it must stay within your own `PAT
 `docker` from its usual install places, while `node`, and the programs a shim such as pnpm's runs,
 come from the entry's `PATH`. So `protect` names each directory of an entry's `PATH` that is not on
 yours (compared as they resolve, without case on macOS and Windows), and each relative or empty
-one, and does not count the entry as caged; `--fix` leaves that `PATH` for you to check or remove.
+one, and does not count the entry as caged; `wrap` and `--fix` leave such an entry as it is, for
+you to check or remove that `PATH`.
 A `PATH` made of your own directories, such as the `/opt/homebrew/bin:/usr/bin:/bin` of many
 Claude Desktop configurations, is fine. The same goes for `COPILOT_HOME`, `XDG_CONFIG_HOME` and
 `APPDATA` set to another place than yours: `mcpcage run` looks for the clients' configurations,
@@ -168,7 +169,11 @@ which it refuses to mount, where they say. VS Code also adds the variables of th
 count the entry as caged when something does, or when the file cannot be read (`${workspaceFolder}`
 is known only in a project's own `.vscode/mcp.json` or `.cursor/mcp.json`). `wrap` and `--fix` keep
 the `envFile`, which VS Code loads as it is, and say that its variables reach mcpcage: the server
-gets only those named with `--env`.
+gets only those named with `--env`. Before they write an entry, `wrap` and `--fix` check it as
+`protect` will: one that would still not count as caged, because of a `PATH`, a client place or an
+`envFile` that only you can change, or a `PATH` that makes the client start another program than
+the mcpcage they write, is left as it is, with the reason and what to do, instead of being written
+and called caged.
 
 **Writable mounts are your choice.** A server that can write in a directory can change what your
 machine later runs from it: the code you run and build, and the files that git, editors and build
@@ -292,8 +297,8 @@ It never mounts a sensitive path: the server is inspected without it, and the re
 (`inspected without ~/.ssh: your SSH keys in ~/.ssh`).
 `--fix` prints the plan, asks for the word `yes` (or takes `--yes`), rewrites only the server
 entries of each file in the file's own style, moves into the cage the `env` of a caged server that
-would act on your machine (as `wrap` does), leaves a server that needs a sensitive path as it is
-(with the reason), keeps a backup (`<file>.mcpcage.bak`) and replaces the file atomically. The
+would act on your machine (as `wrap` does), leaves a server that needs a sensitive path, or that
+would still not count as caged once rewritten, as it is (with the reason), keeps a backup (`<file>.mcpcage.bak`) and replaces the file atomically. The
 paths it mounts are read-only unless you pass `--writable`; the options of a server caged already,
 a writable mount included, stay as they are written.
 

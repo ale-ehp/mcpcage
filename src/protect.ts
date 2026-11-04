@@ -3,7 +3,7 @@ import { join, posix, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
 import {
-  actsOnHost, envEffects, envReason, envValues, hostPath, isWrapped, moveHostEnv, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry,
+  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, moveHostEnv, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry,
   type EnvEffects, type ServerEntry, type ServerType,
 } from "./config.js";
 import { envFileOf, mcpcageAt, type ForeignPath, type McpcageKind } from "./installed.js";
@@ -661,18 +661,18 @@ export function fixConfigs(options: FixOptions): FixOutcome {
   for (const file of options.report.files) {
     if (!file.exists || file.error !== undefined) continue;
     const servers = options.report.servers.filter((server) => server.file === file.file);
-    // A program that is only named mcpcage gets the rewrite an npx entry gets.
+    // A program that is only named mcpcage gets the rewrite an npx entry gets; a caged entry whose
+    // env or envFile acts on the host gets what can be moved moved, and the check of the result.
     const targets = servers.filter(
-      (server) => server.type === "npx" || (server.type === "mcpcage" && ((server.protectedByMcpcage && server.hostEnv.length > 0) || server.mcpcage === "other program")),
+      (server) =>
+        server.type === "npx" ||
+        (server.type === "mcpcage" && (server.mcpcage === "other program" || (server.protectedByMcpcage && server.error === undefined && (actsOnHost(server) || envFileActs(server))))),
     );
     // Already wrapped, so there is nothing to rewrite: only the person who chose --no-sandbox can drop it.
     const onHost = servers.filter((server) => server.type === "mcpcage" && server.mcpcage === "installed" && !server.protectedByMcpcage && server.error === undefined);
-    // A PATH is often what lets the client find node at all, and a client place may be meant for the
-    // server: which ones were meant, only the user knows.
-    const picked = servers.filter((server) => envReason(server, server.envFile) !== undefined && server.error === undefined && !targets.includes(server));
-    if (targets.length === 0 && onHost.length === 0 && picked.length === 0) continue;
+    if (targets.length === 0 && onHost.length === 0) continue;
     try {
-      files.push(fixFile(file, targets, onHost, picked, options, home));
+      files.push(fixFile(file, targets, onHost, options, home));
     } catch (error) {
       // One file that cannot be rewritten leaves the others to be.
       const fixed: FixedFile = { file: file.file, changed: [], skipped: [], refused: messageOf(error) };
@@ -683,7 +683,7 @@ export function fixConfigs(options: FixOptions): FixOutcome {
   return { files };
 }
 
-function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerReport[], picked: ServerReport[], options: FixOptions, home: string): FixedFile {
+function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerReport[], options: FixOptions, home: string): FixedFile {
   const fixed: FixedFile = { file: file.file, changed: [], skipped: [] };
   const shown = shownFile(file, home);
   const where = (label: string | undefined) => (label === undefined ? shown : `${shown} (project ${terminalSafe(label)})`);
@@ -705,7 +705,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const server of targets) {
     const servers = valueAt(config, server.label === undefined ? [file.key] : ["projects", server.label, "mcpServers"]);
     const entry = isJsonObject(servers) && Object.hasOwn(servers, server.name) ? servers[server.name] : undefined;
-    const wrapped = !isJsonObject(servers) || !isJsonObject(entry) ? { skip: "it is no longer in the file" } : rewrite(entry as ServerEntry, options.command, options.writable === true);
+    const wrapped = !isJsonObject(servers) || !isJsonObject(entry) ? { skip: "it is no longer in the file" } : rewrite(entry as ServerEntry, options.command, options.writable === true, file.file);
     if ("skip" in wrapped) {
       fixed.skipped.push({ name: server.name, label: server.label, reason: wrapped.skip });
       continue;
@@ -718,7 +718,6 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const server of onHost) {
     fixed.skipped.push({ name: server.name, label: server.label, reason: "it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand" });
   }
-  for (const server of picked) fixed.skipped.push({ name: server.name, label: server.label, reason: envReason(server, server.envFile)! });
   for (const skipped of fixed.skipped) options.log(`  not changed: ${terminalSafe(skipped.name)} in ${where(skipped.label)}: ${terminalSafe(skipped.reason)}`);
   if (fixed.changed.length === 0) return fixed;
 
@@ -771,9 +770,20 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
 /**
  * An npx entry wrapped, a caged entry with its env moved off the host, or the npx command a program
  * only named mcpcage would start, wrapped as wrap would have wrapped it; or why it stays as it is.
- * What the command is, is looked at again: the file may have changed since the scan.
+ * What the command is, is looked at again: the file may have changed since the scan. The result is
+ * checked as the report will check it (see cageCheck): one that would still not count as caged,
+ * because of a PATH, a client place or an envFile that only the user can change, stays as it is,
+ * with what to do, instead of being called caged.
  */
-function rewrite(entry: ServerEntry, command: string, writable: boolean): { entry: ServerEntry; envOnly?: boolean } | { skip: string } {
+function rewrite(entry: ServerEntry, command: string, writable: boolean, configFile: string): { entry: ServerEntry; envOnly?: boolean } | { skip: string } {
+  const rewritten = rewriteEntry(entry, command, writable);
+  if ("skip" in rewritten) return rewritten;
+  const reason = cageCheck(rewritten.entry, { command, configFile });
+  if (reason !== undefined) return { skip: reason };
+  return rewritten.entry === entry ? { skip: "its env no longer runs on your machine" } : rewritten;
+}
+
+function rewriteEntry(entry: ServerEntry, command: string, writable: boolean): { entry: ServerEntry; envOnly?: boolean } | { skip: string } {
   if (serverType(entry) !== "mcpcage") return wrapEntry(entry, { command, writable });
   const found = mcpcageAt(entry as ServerEntry & { command: string }, command);
   if (found === "other program") {
@@ -781,8 +791,9 @@ function rewrite(entry: ServerEntry, command: string, writable: boolean): { entr
     return "skip" in inner ? inner : wrapEntry(inner.entry, { command, writable });
   }
   if (found === "not found") return { skip: "its mcpcage can no longer be found" };
+  // Nothing to move: the entry as it is, which the check says what to do about.
   const moved = moveHostEnv(entry);
-  return moved === undefined ? { skip: "its env no longer runs on your machine" } : "skip" in moved ? moved : { entry: moved.entry, envOnly: true };
+  return moved === undefined ? { entry } : "skip" in moved ? moved : { entry: moved.entry, envOnly: true };
 }
 
 /** JSON in the file's own style: its indentation unit, line endings, final newline and byte order mark. */

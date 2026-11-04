@@ -2141,11 +2141,17 @@ describe("which mcpcage an entry starts", () => {
     expect(scan.stdout).toContain("  4 run on your machine with your permissions and no cage.");
     expect(scan.code).toBe(1);
 
+    // Caged as an npx entry would be, those whose PATH has directories that are not the user's would
+    // still start what that PATH picks: --fix says so, and leaves them as they are.
     const fix = mcpcageWithEnv(onPath, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build");
-    expect(fix.stdout).toContain(`\nPlan\n  cage elsewhere in ${where}\n  cage relative in ${where}\n  cage odd in ${where}\n  cage inDir in ${where}\n\n`);
+    const byHand = `its env sets a PATH that picks other programs than yours: check that PATH, or remove it from its "env" by hand`;
+    expect(fix.stdout).toContain(
+      `\nPlan\n  not changed: elsewhere in ${where}: ${byHand}\n  not changed: relative in ${where}: ${byHand}\n  not changed: odd in ${where}: ${byHand}\n  cage inDir in ${where}\n\n`,
+    );
     const after = JSON.parse(readFileSync(cursor, "utf8")).mcpServers;
-    for (const name of ["elsewhere", "relative", "odd", "inDir"]) expect(after[name].command).toBe(installed.command);
-    expect(after.same).toEqual(servers.same);
+    expect(after.inDir.command).toBe(installed.command);
+    for (const name of ["elsewhere", "relative", "odd", "same"] as const) expect(after[name]).toEqual(servers[name]);
+    expect(fix.code).toBe(1);
   });
 
   it("counts the running mcpcage as mcpcage, as the demo links it", () => {
@@ -2174,14 +2180,16 @@ describe("which mcpcage an entry starts", () => {
     });
     const result = mcpcageWithEnv(fakeUserEnv(top, join(top, "cage")), "wrap", file, "--no-build", "--command", installed.command);
     expect(result.stdout).toContain(`  caged evil: ${installed.command} run --env NODE_OPTIONS=*** -- npx -y rogue\n`);
-    expect(result.stdout).toContain(`  caged elsewhere: ${installed.command} run --env PATH -- npx -y rogue\n`);
+    // Its PATH would still pick the look-alike, or any other program: said, and left as it is.
+    expect(result.stdout).toContain(`  skipped elsewhere: its env sets a PATH that picks other programs than yours: check that PATH, or remove it from its "env" by hand\n`);
     expect(result.stdout).toContain("  skipped real: already wrapped\n");
     const after = JSON.parse(readFileSync(file, "utf8")).mcpServers;
     // As --fix rewrites it: the look-alike's own options are gone, the env it had moved comes back as wrap moves it.
     expect(after.evil).toEqual({ command: installed.command, args: ["run", "--env", "NODE_OPTIONS=--import /tmp/x.mjs", "--", "npx", "-y", "rogue"], env: {} });
-    expect(after.elsewhere.command).toBe(installed.command);
+    expect(after.elsewhere).toEqual({ command: "mcpcage", args: ["run", "--", "npx", "-y", "rogue"], env: { PATH: evilDir } });
     // Done once: the rewritten entries start the mcpcage wrap writes.
-    expect(wrapConfig(file, { dryRun: true, command: installed.command }).skipped.map((skipped) => skipped.reason)).toEqual(["already wrapped", "already wrapped", "already wrapped"]);
+    expect(wrapConfig(file, { dryRun: true, command: installed.command }).skipped.map((skipped) => skipped.name)).toEqual(["evil", "elsewhere", "real"]);
+    expect(wrapConfig(file, { dryRun: true, command: installed.command }).changed).toEqual([]);
   });
 });
 
@@ -2532,6 +2540,107 @@ describe("an entry's envFile", () => {
     );
     expect(`${result.stdout}${result.stderr}`).not.toContain("never-printed");
     expect(JSON.parse(readFileSync(file, "utf8")).servers.clean).toEqual({ ...clean, command: "/opt/mcpcage", args: ["run", "--", "npx", "-y", "@acme/clean-mcp"] });
+  });
+});
+
+describe("what wrap and --fix write", () => {
+  // They wrote the entry, printed "caged", and then the client started what its PATH picked, or what
+  // its envFile set ran on the host: only the next report said so. They now check the entry they are
+  // about to write as the report will, and leave one that would not count as caged as it is.
+  const byHand = `its env sets a PATH that picks other programs than yours: check that PATH, or remove it from its "env" by hand`;
+  const otherProgram = `its env sets a PATH that makes the client start another program than mcpcage: check that PATH, or remove it from its "env" by hand`;
+
+  it("wrap leaves an entry whose PATH would still start something else as it is, every time, and says why", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-check-"));
+    const installed = fakeMcpcage();
+    // A look-alike of mcpcage, in a directory of the entry's PATH and in one of the user's, and a node.
+    const evilDir = join(top, "evil");
+    const theirsToo = join(top, "theirs-too");
+    const fake = join(top, "fake");
+    for (const program of [join(evilDir, "mcpcage"), join(theirsToo, "mcpcage"), join(fake, "node")]) {
+      writeText(program, "#!/bin/sh\nexit 0\n");
+      chmodSync(program, 0o755);
+    }
+    const run = ["run", "--", "npx", "-y", "rogue"];
+    const yours = (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir)).slice(-2);
+    const file = join(top, "mcp.json");
+    const servers = {
+      // As R3 found it: a bare mcpcage that the entry's PATH finds elsewhere.
+      notes: { command: "mcpcage", args: run, env: { PATH: evilDir } },
+      // Directories of the user's PATH only, in an order that finds the look-alike first.
+      reordered: { command: "npx", args: ["-y", "@acme/notes-mcp"], env: { PATH: [theirsToo, dirname(installed.command)].join(delimiter) } },
+      // A node of its own first.
+      node: { command: "npx", args: ["-y", "@acme/files-mcp"], env: { PATH: [fake, ...yours].join(delimiter) } },
+      // The minimal PATH of a Claude Desktop configuration: the user's own directories.
+      minimal: { command: "npx", args: ["-y", "@acme/minimal-mcp"], env: { PATH: yours.join(delimiter) } },
+    };
+    writeJsonFile(file, { mcpServers: servers });
+    const original = readFileSync(file, "utf8");
+    // The user's PATH: the installed mcpcage first, then the look-alike's directory, then this process's.
+    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), { PATH: [dirname(installed.command), theirsToo, process.env.PATH ?? ""].join(delimiter) });
+
+    for (const attempt of [1, 2]) {
+      const result = mcpcageWithEnv(env, "wrap", file, "--no-build", "--command", "mcpcage");
+      expect(result.code, `${attempt}: ${result.stderr}`).toBe(0);
+      expect(result.stdout).toContain(`  skipped notes: ${otherProgram}\n  skipped reordered: ${otherProgram}\n  skipped node: ${byHand}\n`);
+      expect(result.stdout).not.toMatch(/caged (notes|reordered|node):/);
+      if (attempt === 1) expect(result.stdout).toContain(`  caged minimal: mcpcage run --env PATH -- npx -y @acme/minimal-mcp\n`);
+      const after = JSON.parse(readFileSync(file, "utf8")).mcpServers;
+      for (const name of ["notes", "reordered", "node"] as const) expect(after[name]).toEqual(servers[name]);
+    }
+    expect(JSON.parse(original).mcpServers.minimal).toEqual(servers.minimal);
+    // A relative command depends on the directory the client starts the entry from.
+    const relative = join(top, "relative.json");
+    writeJsonFile(relative, { mcpServers: { minimal: servers.minimal } });
+    expect(wrapConfig(relative, { dryRun: true, command: join("bin", "mcpcage") }).skipped).toEqual([
+      { name: "minimal", reason: `${join("bin", "mcpcage")} is a relative path, so what the client starts depends on the directory it starts the entry from: give the full path of mcpcage with --command` },
+    ]);
+  });
+
+  it("wrap leaves an entry whose envFile acts on the host as it is, and keeps a harmless envFile", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-check-"));
+    const project = join(top, "work");
+    const file = join(project, ".vscode", "mcp.json");
+    writeText(join(project, ".env"), "NODE_OPTIONS=--require ./never-printed.cjs\n");
+    writeText(join(project, "clean.env"), "API_KEY=never-printed-key\n");
+    const servers = {
+      tuned: { type: "stdio", command: "npx", args: ["-y", "@acme/tuned-mcp"], envFile: "${workspaceFolder}/.env" },
+      clean: { type: "stdio", command: "npx", args: ["-y", "@acme/clean-mcp"], envFile: "${workspaceFolder}/clean.env" },
+    };
+    writeJsonFile(file, { servers });
+    const installed = fakeMcpcage();
+    const result = mcpcageWithEnv(fakeUserEnv(join(top, "home"), join(top, "cage")), "wrap", file, "--no-build", "--command", installed.command);
+    expect(result.code, result.stderr).toBe(0);
+    expect(`${result.stdout}${result.stderr}`).not.toContain("never-printed");
+    expect(result.stdout).toContain(
+      `  skipped tuned: its envFile sets NODE_OPTIONS, which acts on your machine before the cage starts: move it from \${workspaceFolder}/.env into its "env", or remove it\n`,
+    );
+    expect(JSON.parse(readFileSync(file, "utf8")).servers).toEqual({ tuned: servers.tuned, clean: { ...servers.clean, command: installed.command, args: ["run", "--", "npx", "-y", "@acme/clean-mcp"] } });
+  });
+
+  it("--fix leaves an npx entry whose PATH puts a node of its own first as it is, instead of calling it caged", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-check-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const installed = fakeMcpcage();
+    // What the #!/usr/bin/env node of mcpcage's script would find first.
+    const fake = join(top, "fake");
+    writeText(join(fake, "node"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(fake, "node"), 0o755);
+    const yours = (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir)).slice(-2);
+    const files = { command: "npx", args: ["-y", "@acme/files-mcp"], env: { PATH: [fake, ...yours].join(delimiter) } };
+    const cursor = locationsFor(home, project)("cursor", "user");
+    writeJsonFile(cursor, { mcpServers: { files } });
+    const original = readFileSync(cursor);
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
+
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    expect(fix.stdout).toContain(`\nPlan\n  not changed: files in ${tilde(cursor, home)}: ${byHand}\n  nothing that mcpcage can change by itself.\n`);
+    expect(fix.stdout).not.toContain("caged files");
+    expect(fix.code).toBe(1);
+    expect(readFileSync(cursor)).toEqual(original);
   });
 });
 
