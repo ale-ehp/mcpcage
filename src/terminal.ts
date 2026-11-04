@@ -34,6 +34,19 @@ export function printable(text: string, max: number): { shown: string; clipped: 
   return { shown, clipped: false };
 }
 
+/** The most characters of a server's text that one of mcpcage's log lines shows. */
+const MAX_EXCERPT = 200;
+
+/**
+ * `text` as terminalSafe shows it, clipped after `max` characters of that, with its full length when
+ * clipped. Only what is shown is spelled out: through terminalSafe whole, a server's id of 1,048,576
+ * U+009B became 8 MiB of "[U+009B]" in one log line, built before anything could cut it.
+ */
+export function excerpt(text: string, max = MAX_EXCERPT): string {
+  const { shown, clipped } = printable(text, max);
+  return clipped ? `${shown}... (${text.length} chars)` : shown;
+}
+
 function spell(char: string): string {
   if (char === "\n") return "\\n";
   if (char === "\r") return "\\r";
@@ -49,9 +62,15 @@ export const MAX_LOG_BYTES = 1024 * 1024;
  * A log function that writes one line per message to `stream` and never queues more than about
  * `limit` bytes. mcpcage's stderr is a pipe to the client, which may never read it: a server flooding
  * stdout with junk, each piece logged, piled 7.3 MB of lines up in mcpcage's memory for 100,000 of
- * them. So while more than `limit` bytes wait, messages are dropped and their lines counted, and once
- * the stream has written what it took, one line says how many were lost. The audit log is written
- * apart, and keeps them all.
+ * them. So a message that does not fit in what is left of `limit` is dropped and its lines counted,
+ * and once the stream has written what it took, one line says how many were lost. The audit log is
+ * written apart, and keeps them all.
+ *
+ * The message itself counts, in bytes, the line break included: only what already waited was checked
+ * before, so one message went out whole however long it was, and a server's id spelled out queued
+ * 8 MiB in one write. A message longer than what is left while a quarter of `limit` or more is left
+ * cannot be an ordinary line, which takes a few hundred bytes: it goes out cut to what is left, with
+ * its full length, so that it is seen without being held whole.
  */
 export function boundedLog(stream: Writable, limit = MAX_LOG_BYTES): (message: string) => void {
   let dropped = 0;
@@ -70,7 +89,11 @@ export function boundedLog(stream: Writable, limit = MAX_LOG_BYTES): (message: s
     });
   };
   return (message) => {
-    if (stream.writableLength > limit) {
+    const bytes = Buffer.byteLength(message) + 1;
+    const room = limit - stream.writableLength;
+    // A line that does not fit is dropped whole, never cut, while less than a quarter of `limit` is
+    // left: the rest waits then, and the callback of its last write sends the count once it drains.
+    if (bytes > room && room < limit / 4) {
       for (let at = message.indexOf("\n"); at !== -1; at = message.indexOf("\n", at + 1)) dropped++;
       dropped++;
       return;
@@ -78,6 +101,19 @@ export function boundedLog(stream: Writable, limit = MAX_LOG_BYTES): (message: s
     // The queue can fall under the limit before it drains: the count then goes out ahead of the
     // first line that gets through, where the gap is.
     report();
-    write(`${message}\n`);
+    write(bytes <= room ? `${message}\n` : `${cut(message, bytes - 1, limit - stream.writableLength)}\n`);
   };
+}
+
+/**
+ * The start of `message` (`bytes` long) with a note of its full length, in at most `room` bytes with
+ * the line break when the note fits there. TextEncoder.encodeInto stops before a character that would
+ * not fit whole, so none is cut in half, and it copies only what is kept.
+ */
+function cut(message: string, bytes: number, room: number): string {
+  const note = (kept: number) => `... (a message of ${bytes} bytes, cut at ${kept})`;
+  // The note with the full length is at least as long as the note with what is kept.
+  const space = Math.max(0, room - Buffer.byteLength(note(bytes)) - 1);
+  const { read, written } = new TextEncoder().encodeInto(message, new Uint8Array(space));
+  return `${message.slice(0, read)}${note(written)}`;
 }

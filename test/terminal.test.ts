@@ -91,3 +91,65 @@ describe("the bounded log", () => {
     expect(received()).not.toContain("dropped\n");
   });
 });
+
+describe("a message longer than what the log still holds", () => {
+  it("cuts one message too long for the limit to what is left, with its full length, and drops the next", async () => {
+    const { stream, received, drain } = stalledStream();
+    const log = boundedLog(stream);
+    // A server's id of 1,048,576 U+009B, spelled out. Before, all 8 MiB of it waited in one write.
+    const id = `mcpcage: dropped a response from the server to a request the client is not waiting for (id "${"[U+009B]".repeat(1024 * 1024)}")`;
+    log(id);
+    expect(stream.writableLength).toBeLessThanOrEqual(MAX_LOG_BYTES);
+    // Neither fits in what is left, and less than a quarter of the limit is left: both are dropped.
+    log("x".repeat(600 * 1024));
+    log("mcpcage: an ordinary line");
+    expect(stream.writableLength).toBeLessThanOrEqual(MAX_LOG_BYTES);
+
+    drain();
+    await vi.waitFor(() => expect(received()).toContain("mcpcage: dropped 2 lines of log output while the client was not reading it\n"));
+    const [cut, ...rest] = received().split("\n").filter(Boolean);
+    const note = /\.\.\. \(a message of (\d+) bytes, cut at (\d+)\)$/.exec(cut!)!;
+    expect(Number(note[1])).toBe(Buffer.byteLength(id));
+    expect(cut!.slice(0, -note[0].length)).toBe(id.slice(0, Number(note[2])));
+    expect(Buffer.byteLength(cut!) + 1).toBeLessThanOrEqual(MAX_LOG_BYTES);
+    expect(Buffer.byteLength(cut!) + 1).toBeGreaterThan(MAX_LOG_BYTES - 100);
+    expect(rest).toEqual(["mcpcage: dropped 2 lines of log output while the client was not reading it"]);
+  });
+
+  it("cuts a message that does not fit while a quarter of the limit or more is left, and drops one that does not fit once less is", async () => {
+    const { stream, received, drain } = stalledStream();
+    const log = boundedLog(stream, 1000);
+    log("a".repeat(299));
+    log("b".repeat(1000)); // 700 bytes left: cut to them
+    expect(stream.writableLength).toBeLessThanOrEqual(1000);
+    expect(stream.writableLength).toBeGreaterThan(990);
+    drain();
+    await vi.waitFor(() => expect(received()).toContain("cut at"));
+    const [whole, cut] = received().split("\n");
+    expect(whole).toBe("a".repeat(299));
+    expect(cut).toMatch(/^b+\.\.\. \(a message of 1000 bytes, cut at \d+\)$/);
+
+    const second = stalledStream();
+    const small = boundedLog(second.stream, 1000);
+    small("a".repeat(799));
+    small("b".repeat(1000)); // 200 bytes left, under a quarter: dropped and counted
+    expect(second.stream.writableLength).toBe(800);
+    second.drain();
+    await vi.waitFor(() => expect(second.received()).toContain("mcpcage: dropped 1 line of log output"));
+    expect(second.received()).not.toContain("b");
+  });
+
+  it("measures a message in bytes and never cuts a character in half", async () => {
+    const { stream, received, drain } = stalledStream();
+    const log = boundedLog(stream, 100);
+    // 300 bytes in 100 characters: before, the message was not measured at all, and went out whole.
+    log("東".repeat(100));
+    expect(stream.writableLength).toBeLessThanOrEqual(100);
+    drain();
+    await vi.waitFor(() => expect(received()).toContain("cut at"));
+    expect(received()).toMatch(/^(東+)\.\.\. \(a message of 300 bytes, cut at (\d+)\)\n$/);
+    const [, kept, at] = /^(東+)\.\.\. \(a message of 300 bytes, cut at (\d+)\)\n$/.exec(received())!;
+    expect(Buffer.byteLength(kept!)).toBe(Number(at));
+    expect(received()).not.toContain("�");
+  });
+});

@@ -7,7 +7,7 @@ import { LineSplitter, MAX_LINE_BYTES } from "./lines.js";
 import { checkFirstListing, checkTools, isToolList, MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, own, pinTools, tooDeep, type Pin, type ToolDefinition, type Violation } from "./manifest.js";
 import { loadPin, pendingCount, savePending, savePin } from "./pinstore.js";
 import { countFindings, countSuspicious, describeResultSigns, describeViolationsWithFindings, highSeveritySigns, scanResult } from "./suspicious.js";
-import { terminalSafe } from "./terminal.js";
+import { excerpt, terminalSafe } from "./terminal.js";
 
 /** JSON-RPC error code mcpcage uses when it refuses a message (implementation-defined range). */
 export const BLOCKED = -32001;
@@ -201,7 +201,9 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     }
     const reason = `${SERVER_REQUESTS_REFUSED.get(method) ?? "the server sent a request that mcpcage does not know"}. Pass --allow-server-requests to allow it.`;
     audit.write("server-request-blocked", { id, method });
-    log(`mcpcage: blocked ${terminalSafe(method)} from ${serverId}: ${reason}`);
+    // The server's text in a log line is an excerpt, here and below: spelled out whole, a method or an
+    // id of a million C1 controls made one line of 8 MiB. The audit log records it as it came.
+    log(`mcpcage: blocked ${excerpt(method)} from ${serverId}: ${reason}`);
     answerServer(blocked(id, `mcpcage blocked ${method}: ${reason}`));
     return undefined;
   };
@@ -279,7 +281,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       const shown = nestedDeeperThan(id, MAX_DEPTH) ? `(nested more than ${MAX_DEPTH} levels deep)` : (id ?? null);
       audit.write("unsolicited-response", { id: shown });
       // JSON.stringify escapes U+0000 to U+001F only: C1 controls and bidi characters would pass raw.
-      log(`mcpcage: dropped a response from the server to a request the client is not waiting for (id ${terminalSafe(JSON.stringify(shown))})`);
+      log(`mcpcage: dropped a response from the server to a request the client is not waiting for (id ${excerpt(JSON.stringify(shown))})`);
       return undefined;
     }
     fromClient.delete(id);
@@ -304,7 +306,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     if (tools.length > MAX_TOOLS) return tooMany(id, tools.length);
     const deep = tooDeep(tools);
     if (deep) {
-      return refuseListing(id, `the definition of "${terminalSafe(deep.name)}" is nested more than ${MAX_DEPTH} levels deep`, "the server listed a definition nested too deep", {
+      return refuseListing(id, `the definition of "${excerpt(deep.name)}" is nested more than ${MAX_DEPTH} levels deep`, "the server listed a definition nested too deep", {
         reason: "too-deep",
         tool: deep.name,
         limit: MAX_DEPTH,
@@ -359,7 +361,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     const messages = values.filter(isJsonRpc);
     if (values.length === 0 || messages.length < values.length) {
       audit.write("stdout-noise", { bytes: line.length });
-      log(`mcpcage: dropped output from the server that is not JSON-RPC: ${terminalSafe(line.slice(0, 120))}`);
+      log(`mcpcage: dropped output from the server that is not JSON-RPC: ${excerpt(line)}`);
     }
     const out = messages.map(fromServer).filter((message) => message !== undefined);
     if (out.length === 0) return;

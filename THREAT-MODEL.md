@@ -104,7 +104,8 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   one audit entry and one line on stderr, with ids recorded as the server sent them, up to 16 MiB
   each. A server can grow the audit log, and the client's log while the client reads it, as fast as
   it writes; there is no rate limit. When the client does not read, at most 1 MiB of lines waits in
-  mcpcage's memory: the next ones are dropped and counted, and one line gives the count once it reads.
+  mcpcage's memory: a message too long for what is left is cut with its full length or dropped, the
+  next ones are dropped and counted, and one line gives the count once it reads.
 - **What a client's parser refuses.** mcpcage passes on what is JSON-RPC by its shape. A client's
   own parser can be stricter (the official SDK refuses a message with both a method and a result,
   or a fractional id): such a message only leaves the client's request without an answer.
