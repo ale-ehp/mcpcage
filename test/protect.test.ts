@@ -18,7 +18,7 @@ import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs } from "../src/protect.js";
 import { parseMount, runArgs } from "../src/sandbox.js";
 import { idleProgram } from "./fake-programs.js";
-import { cli, fakeServer, fakeUserEnv, hostileServer, mcpcageWithEnv, root, stubHome } from "./helpers.js";
+import { cli, fakeServer, fakeUserEnv, hostileServer, literal, mcpcageWithEnv, native, root, stubHome } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
 /** An entry as a configuration file may hold it, whatever the types say. */
@@ -411,7 +411,7 @@ describe("wrapping one entry", () => {
     stubHome(home);
     try {
       // A writable ~/.cursor would let the server read the other servers' tokens and add an uncaged one.
-      const reason = "which mcpcage will not mount: the MCP servers, settings and extensions of Cursor in ~/.cursor";
+      const reason = `which mcpcage will not mount: the MCP servers, settings and extensions of Cursor in ${native("~/.cursor")}`;
       expect(wrapEntry({ command: "npx", args: ["-y", "rogue", "~/.cursor"] }, { command: "mcpcage" })).toEqual({ skip: `needs ${join(home, ".cursor")}, ${reason}` });
       const file = join(home, ".cursor", "mcp.json");
       expect(wrapEntry({ command: "npx", args: ["-y", "rogue", file] }, { command: "mcpcage" })).toEqual({ skip: `needs ${file}, ${reason}` });
@@ -793,7 +793,7 @@ describe("what a server can reach", () => {
     const decoy = mkdtempSync(join(tmpdir(), "mcpcage-decoy-home-"));
     expect(broadAccessKind(join(account, ".ssh"), decoy)).toBe(`your SSH keys in ${join(account, ".ssh")}`);
     expect(broadAccessKind(account, decoy)).toBe("your whole home directory");
-    expect(broadAccessKind("~/.ssh", decoy)).toBe("your SSH keys in ~/.ssh");
+    expect(broadAccessKind("~/.ssh", decoy)).toBe(`your SSH keys in ${native("~/.ssh")}`);
   });
 
   it("reports secrets by name only, masks them in command lines and never takes placeholders for secrets", async () => {
@@ -1202,13 +1202,14 @@ describe("inspection sandbox", () => {
       };
       const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
       const report = await scanConfigs({ locations: [location], home, offline: true, cacheDir: join(home, "cache"), npmRunner: noNpm, inspect });
-      const skipped = [{ path: join(home, ".ssh"), reason: "your SSH keys in ~/.ssh" }];
+      const skipped = [{ path: join(home, ".ssh"), reason: `your SSH keys in ${native("~/.ssh")}` }];
       expect(report.servers.map((server) => server.inspection?.skipped)).toEqual([skipped, skipped, undefined]);
       expect(report.servers[1]!.inspection!.error).toContain("the server stopped before listing its tools");
 
       const text = renderReport(report, { home });
-      expect(text).toContain("                inspected without ~/.ssh: your SSH keys in ~/.ssh\n                tools: 1, no signs of hidden instructions\n");
-      expect(text).toContain("                inspected without ~/.ssh: your SSH keys in ~/.ssh\n                could not inspect: the server stopped before listing its tools");
+      const without = `                inspected without ${native("~/.ssh")}: your SSH keys in ${native("~/.ssh")}`;
+      expect(text).toContain(`${without}\n                tools: 1, no signs of hidden instructions\n`);
+      expect(text).toContain(`${without}\n                could not inspect: the server stopped before listing its tools`);
       expect(text.match(/inspected without/g)).toHaveLength(2);
     } finally {
       vi.unstubAllEnvs();
@@ -1374,18 +1375,18 @@ describe("mcpcage protect", () => {
     const lines = out.split("\n");
     const line = (name: string) => lines.find((text) => text.startsWith(`  ${name} `)) ?? "";
     expect(out).toContain(`Claude Desktop  ${tilde(files.desktop, home)}\n`);
-    expect(line("filesystem")).toMatch(new RegExp(`^  filesystem {4}npx -y @modelcontextprotocol/server-filesystem ${home} +NOT CAGED$`));
+    expect(line("filesystem")).toMatch(new RegExp(`^  filesystem {4}npx -y @modelcontextprotocol/server-filesystem ${literal(home)} +NOT CAGED$`));
     expect(out).toContain(`                access: ${home}: your whole home directory\n`);
     expect(line("github")).toMatch(/^  github {8}npx -y @modelcontextprotocol\/server-github {24}NOT CAGED$/);
     expect(out).toContain("                secret in clear text: GITHUB_TOKEN\n");
     expect(out).toContain("                install scripts: unknown (offline, not in cache)\n");
     expect(line("remote")).toMatch(/^  remote {8}https:\/\/mcp\.example\.com\/mcp {39}remote, nothing to cage$/);
-    expect(out).toContain("Claude Code  ~/.claude.json (user)\n");
-    expect(line("notes")).toMatch(new RegExp(`^  notes {9}mcpcage run --mount ${machine.notes} -- npx -y notes-mcp +caged$`));
+    expect(out).toContain(`Claude Code  ${native("~/.claude.json")} (user)\n`);
+    expect(line("notes")).toMatch(new RegExp(`^  notes {9}mcpcage run --mount ${literal(machine.notes)} -- npx -y notes-mcp +caged$`));
     expect(line("time")).toMatch(/^  time {10}uvx mcp-server-time +uvx, not supported yet$/);
-    expect(out).toContain(`Claude Code  ~/.claude.json (project ${project})\n  proj-npx `);
+    expect(out).toContain(`Claude Code  ${native("~/.claude.json")} (project ${project})\n  proj-npx `);
     expect(line("proj-npx")).toMatch(/NOT CAGED$/);
-    expect(out).toContain("Claude Code  ~/.claude.json (project /Users/someone/other)\n");
+    expect(out).toContain(`Claude Code  ${native("~/.claude.json")} (project /Users/someone/other)\n`);
     expect(line("local-node")).toMatch(/node, not npx: cannot be caged yet$/);
     expect(out).not.toContain("/Users/someone/empty"); // a project without servers is not listed
     expect(out).toContain(`Claude Code  ${files.mcpJson}\n  project-tool `);
@@ -1429,14 +1430,15 @@ describe("mcpcage protect", () => {
     expect(`${result.stdout}${result.stderr}`).not.toContain(TOKEN);
     // The report names what each of the two would open, and counts them.
     expect(result.stdout).toContain(`                access: ${home}: your whole home directory\n`);
-    expect(result.stdout).toContain("                access: ~/.ssh: your SSH keys in ~/.ssh\n");
+    // The path as the entry writes it, then the place it opens as this system writes it.
+    expect(result.stdout).toContain(`                access: ~/.ssh: your SSH keys in ${native("~/.ssh")}\n`);
     expect(result.stdout).toContain("  2 can reach your whole home directory, the disk or a directory with credentials.\n");
     // A writable mount of the home directory or of ~/.ssh would undo the cage: both stay as they are, and the plan says why, once.
     expect(result.stdout).toContain(
       `\nPlan\n  not changed: filesystem in ${tilde(files.desktop, home)}: needs ${home}, which mcpcage will not mount: your whole home directory\n  cage github in ${tilde(files.desktop, home)}\n`,
     );
     expect(result.stdout).toContain(
-      `  not changed: keys in ${tilde(files.cursor, home)}: needs ${join(home, ".ssh")}, which mcpcage will not mount: your SSH keys in ~/.ssh\n  cage files in ${tilde(files.cursor, home)}\n`,
+      `  not changed: keys in ${tilde(files.cursor, home)}: needs ${join(home, ".ssh")}, which mcpcage will not mount: your SSH keys in ${native("~/.ssh")}\n  cage files in ${tilde(files.cursor, home)}\n`,
     );
     expect(result.stdout.match(/which mcpcage will not mount/g)).toHaveLength(2);
     expect(result.stdout).toContain(`  caged github in ${tilde(files.desktop, home)}\n`);
@@ -1590,7 +1592,7 @@ describe("mcpcage protect", () => {
     writeJsonFile(cursor, { mcpServers: { rogue: { command: "npx", args: ["-y", "@acme/rogue-mcp", "~/.cursor"] } } });
     const original = readFileSync(cursor);
     const env = fakeUserEnv(home, cage, { CLAUDECODE: "1" });
-    const reason = "the MCP servers, settings and extensions of Cursor in ~/.cursor";
+    const reason = `the MCP servers, settings and extensions of Cursor in ${native("~/.cursor")}`;
 
     const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
     expect(scan.stdout).toContain(`                access: ~/.cursor: ${reason}\n`);
@@ -1768,7 +1770,7 @@ describe("mcpcage protect", () => {
     );
     expect(scan.stdout).toMatch(/^ {2}keys {10}mcpcage run --allow-sensitive-mount --mount ~\/\.ssh -- npx -y pkg-b +caged, with the cage opened$/m);
     expect(scan.stdout).toContain(
-      `caged, with the cage opened\n${indent}access: ~/.ssh: your SSH keys in ~/.ssh\n${indent}may mount the whole disk, your home directory or a directory with credentials (--allow-sensitive-mount)\n`,
+      `caged, with the cage opened\n${indent}access: ~/.ssh: your SSH keys in ${native("~/.ssh")}\n${indent}may mount the whole disk, your home directory or a directory with credentials (--allow-sensitive-mount)\n`,
     );
     expect(scan.stdout).toMatch(/^ {2}both {10}mcpcage run --allow-net --env NODE_OPTIONS --env API_TOKEN -- npx -y pkg-c +caged, but its env runs on your machine$/m);
     expect(scan.stdout).toContain(
@@ -1825,10 +1827,10 @@ describe("mcpcage protect", () => {
 
     const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
     expect(scan.stderr).toBe("");
-    expect(scan.stdout).toMatch(new RegExp(`^ {2}notes {9}mcpcage run --mount ${notes}:rw -- .* {2}caged, with the cage opened\n${indent}writable: ${notes}: ${what}\n {2}docs `, "m"));
+    expect(scan.stdout).toMatch(new RegExp(`^ {2}notes {9}mcpcage run --mount ${literal(notes)}:rw -- .* {2}caged, with the cage opened\n${indent}writable: ${literal(notes)}: ${what}\n {2}docs `, "m"));
     // Written with `=`, read as `run` reads it; the read-only mount next to it is not named.
-    expect(scan.stdout).toMatch(new RegExp(`^ {2}docs {10}mcpcage run --mount=${docs}:rw --mount ${reference} -- .* {2}caged, with the cage opened\n${indent}writable: ${docs}: ${what}\n {2}reader `, "m"));
-    expect(scan.stdout).toMatch(new RegExp(`^ {2}reader {8}mcpcage run --mount ${reference} -- .* {2}caged\n {2}fresh `, "m"));
+    expect(scan.stdout).toMatch(new RegExp(`^ {2}docs {10}mcpcage run --mount=${literal(docs)}:rw --mount ${literal(reference)} -- .* {2}caged, with the cage opened\n${indent}writable: ${literal(docs)}: ${what}\n {2}reader `, "m"));
+    expect(scan.stdout).toMatch(new RegExp(`^ {2}reader {8}mcpcage run --mount ${literal(reference)} -- .* {2}caged\n {2}fresh `, "m"));
     expect(scan.stdout.match(/writable: /g)).toHaveLength(2);
     expect(scan.stdout).toContain("  1 already runs through mcpcage.\n  2 run through mcpcage with the cage opened by their options.\n");
 
@@ -2055,7 +2057,8 @@ describe("mcpcage protect", () => {
     const planned: string[] = [];
     const plan = fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: false, dryRun: true, log: (line) => planned.push(line), home });
     expect(plan.files.map((fixed) => fixed.changed.map((change) => change.name))).toEqual([["user-npx", "proj-npx"]]);
-    expect(planned).toEqual(["  cage user-npx in ~/.claude.json", `  cage proj-npx in ~/.claude.json (project ${project})`]);
+    const shown = native("~/.claude.json");
+    expect(planned).toEqual([`  cage user-npx in ${shown}`, `  cage proj-npx in ${shown} (project ${project})`]);
     expect(readFileSync(file, "utf8")).toBe(text); // a dry run writes nothing
     // With --writable, the commands to write by hand say what each writable mount lets the server change.
     const byHand: string[] = [];
@@ -2083,7 +2086,7 @@ describe("mcpcage protect", () => {
     expect(outcome.files[0]!.backup).toBe(`${file}.mcpcage.bak`);
     expect(readFileSync(`${file}.mcpcage.bak`, "utf8")).toBe(text);
     expect(readdirSync(home).filter((name) => name.endsWith(".tmp"))).toEqual([]);
-    expect(logged).toEqual(["  caged user-npx in ~/.claude.json", `  caged proj-npx in ~/.claude.json (project ${project})`, "  backup: ~/.claude.json.mcpcage.bak"]);
+    expect(logged).toEqual([`  caged user-npx in ${shown}`, `  caged proj-npx in ${shown} (project ${project})`, `  backup: ${shown}.mcpcage.bak`]);
     expect(logged.join("\n")).not.toContain("acme_live_0123456789");
   });
 });
@@ -2155,7 +2158,7 @@ describe("which mcpcage an entry starts", () => {
 
     const scan = mcpcageWithEnv(onPath, "protect", "--project", project, "--offline");
     for (const name of ["elsewhere", "relative", "odd"]) expect(lineOf(scan.stdout, name)).toMatch(/ {2}starts mcpcage, which is not the mcpcage on your PATH$/);
-    expect(lineOf(scan.stdout, "inDir")).toMatch(/ {2}starts bin\/mcpcage, which is not the mcpcage on your PATH$/);
+    expect(lineOf(scan.stdout, "inDir")).toMatch(new RegExp(` {2}starts ${literal(join("bin", "mcpcage"))}, which is not the mcpcage on your PATH$`));
     expect(mcpcageAt({ command: "./mcpcage" }, installed.command)).toBe("other program");
     expect(lineOf(scan.stdout, "same")).toMatch(/ {2}caged$/);
     expect(scan.stdout).toContain("  4 run on your machine with your permissions and no cage.");

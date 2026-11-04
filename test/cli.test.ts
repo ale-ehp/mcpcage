@@ -6,7 +6,7 @@ import { AuditLog } from "../src/audit.js";
 import { pinTools } from "../src/manifest.js";
 import { auditDir, checkServerId, serverDir } from "../src/paths.js";
 import { noDocker } from "./fake-programs.js";
-import { connectFake, fakeUserEnv, freshHome, mcpcage, mcpcageWithEnv, root } from "./helpers.js";
+import { connectFake, fakeUserEnv, freshHome, mcpcage, mcpcageWithEnv, native, root } from "./helpers.js";
 
 /** A control, C1 or format character, raw: what a terminal acts on or hides instead of showing. */
 const RAW_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/;
@@ -176,7 +176,7 @@ describe("cli", () => {
 
     const refused = mcpcageWithEnv(env, "run", "--mount", keys, ...server);
     expect(refused.code).toBe(1);
-    expect(refused.stderr).toBe(`mcpcage: --mount ${keys}: your SSH keys in ~/.ssh. Pass --allow-sensitive-mount if you really want this.\n`);
+    expect(refused.stderr).toBe(`mcpcage: --mount ${keys}: your SSH keys in ${native("~/.ssh")}. Pass --allow-sensitive-mount if you really want this.\n`);
     expect(existsSync(cage)).toBe(false); // refused before anything else, the audit log included
     expect(mcpcageWithEnv(env, "prepare", "--mount", `${keys}:rw`, ...server).stderr).toContain("Pass --allow-sensitive-mount");
 
@@ -219,7 +219,7 @@ describe("cli", () => {
 
     const refused = mcpcageWithEnv(env, "run", "--mount", "~/.zshrc:rw", "--", "npx", "-y", "something");
     expect(refused.code).toBe(1);
-    expect(refused.stderr).toBe(`mcpcage: --mount ${join(home, ".zshrc")}: the commands your shell runs in ~/.zshrc. Pass --allow-sensitive-mount if you really want this.\n`);
+    expect(refused.stderr).toBe(`mcpcage: --mount ${join(home, ".zshrc")}: the commands your shell runs in ${native("~/.zshrc")}. Pass --allow-sensitive-mount if you really want this.\n`);
     expect(existsSync(cage)).toBe(false);
   });
 

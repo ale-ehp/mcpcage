@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -11,6 +11,16 @@ export const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const cli = join(root, "dist", "cli.js");
 export const fakeServer = join(root, "test", "fixtures", "fake-server.mjs");
 export const hostileServer = join(root, "test", "fixtures", "hostile-server.mjs");
+
+/** A path written with `/`, as this system writes it: mcpcage shows ~/.ssh as ~\.ssh on Windows. */
+export function native(path: string): string {
+  return path.split("/").join(sep);
+}
+
+/** `text` in a regular expression, matched as it is: a Windows path is full of backslashes. */
+export function literal(text: string): string {
+  return text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
 
 export function freshHome(): string {
   return mkdtempSync(join(tmpdir(), "mcpcage-test-"));

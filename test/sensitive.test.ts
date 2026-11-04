@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { discoverConfigs } from "../src/clients.js";
 import { clientPlaces, sensitivePath, thisMachine } from "../src/sensitive.js";
+import { native } from "./helpers.js";
 
 describe("paths mcpcage will not mount", () => {
   const mac = { home: "/Users/me", platform: "darwin" as const };
@@ -72,8 +73,8 @@ describe("paths mcpcage will not mount", () => {
     symlinkSync(join(home, ".ssh"), join(projects, "keys"));
     symlinkSync(home, join(projects, "everything"));
     const options = { home, platform: process.platform };
-    expect(sensitivePath(join(projects, "keys"), options)).toBe("your SSH keys in ~/.ssh");
-    expect(sensitivePath(join(projects, "keys", "id_ed25519"), options)).toBe("your SSH keys in ~/.ssh"); // not there: its parent is resolved
+    expect(sensitivePath(join(projects, "keys"), options)).toBe(`your SSH keys in ${native("~/.ssh")}`);
+    expect(sensitivePath(join(projects, "keys", "id_ed25519"), options)).toBe(`your SSH keys in ${native("~/.ssh")}`); // not there: its parent is resolved
     expect(sensitivePath(join(projects, "everything"), options)).toBe("your whole home directory");
     // Mounting the directory itself is fine: inside the cage its links lead nowhere.
     expect(sensitivePath(projects, options)).toBeUndefined();
@@ -219,7 +220,7 @@ describe("paths mcpcage will not mount", () => {
     mkdirSync(join(home, "links"));
     symlinkSync(join(home, "repo", ".git", "hooks"), join(home, "links", "hooks"));
     const options = { home, platform: process.platform };
-    expect(sensitivePath(join(home, "links", "hooks"), options)).toBe("the git configuration and hooks of ~/repo, which can make your machine run commands");
+    expect(sensitivePath(join(home, "links", "hooks"), options)).toBe(`the git configuration and hooks of ${native("~/repo")}, which can make your machine run commands`);
     expect(sensitivePath(join(home, "links"), options)).toBeUndefined();
   });
 
