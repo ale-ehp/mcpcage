@@ -3,7 +3,8 @@
 ## Reporting a vulnerability
 
 Please report vulnerabilities privately through GitHub's "Report a vulnerability" button on the
-Security tab of this repository. Do not open a public issue.
+Security tab of this repository, which opens a private advisory form:
+<https://github.com/ale-ehp/mcpcage/security/advisories/new>. Do not open a public issue.
 
 Include:
 
