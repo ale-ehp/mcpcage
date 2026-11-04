@@ -71,11 +71,15 @@ export function foreignPath(env: unknown): ForeignPath | undefined {
   return dirs.length === 0 ? undefined : { dirs };
 }
 
-/** A directory as it resolves, symlinks followed, without case on macOS and Windows. */
+/**
+ * A directory as it resolves, symlinks followed, without case on macOS and Windows, and with the
+ * names the system keeps on disk: realpathSync kept an 8.3 short name (C:\PROGRA~1), and a PATH
+ * that spelled the user's own directory in full counted as another one.
+ */
 function dirKey(dir: string): string {
   let real: string;
   try {
-    real = realpathSync(dir);
+    real = realpathSync.native(dir);
   } catch {
     // Not there, or not yet: compared as written, `..` and a final separator resolved.
     real = resolve(dir);

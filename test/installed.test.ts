@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join, sep } from "node:path";
@@ -25,6 +25,21 @@ describe("the PATH an entry sets", () => {
       expect(foreignPath({ PATH: join(top, "other") })).toEqual({ dirs: [join(top, "other")] });
       expect(foreignPath({ PATH: ["x"] })).toEqual({ dirs: [], notString: true });
       expect([foreignPath({}), foreignPath(undefined), foreignPath({ Path: join(top, "other") })]).toEqual([undefined, undefined, process.platform === "win32" ? { dirs: [join(top, "other")] } : undefined]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("the PATH an entry sets, on Windows", () => {
+  it.runIf(process.platform === "win32")("compares directories by the names Windows keeps on disk, not by their 8.3 short names", () => {
+    // Installers put directories on the PATH by their short names too (C:\PROGRA~1\...).
+    const dir = join(mkdtempSync(join(tmpdir(), "mcpcage-path-")), "Program Files");
+    mkdirSync(dir);
+    const short = execSync(`for %I in ("${dir}") do @echo %~sI`, { encoding: "utf8" }).trim();
+    vi.stubEnv("PATH", short);
+    try {
+      expect(foreignPath({ PATH: dir })).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
     }
