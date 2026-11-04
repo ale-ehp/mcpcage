@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
 import { envFileOf, foreignPath, mcpcageAt, movedPlaces, type ForeignPath } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
-import { isNpx, parseLaunch } from "./launch.js";
+import { cmdNpx, isNpx, npxArgv, parseLaunch } from "./launch.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
 
@@ -252,7 +252,9 @@ export function hostVariable(name: string, value: unknown): { to: "container" | 
  * choice. A `~/` argument becomes the absolute path that is mounted: inside the cage HOME is
  * /tmp, so a server that expands `~` itself would look in /tmp. A server given the whole disk, the
  * home directory or a directory with credentials (see sensitive.ts) is not caged at all: that mount
- * would undo the cage, so the entry stays as it is and the reason is given.
+ * would undo the cage, so the entry stays as it is and the reason is given. A `cmd /c npx` entry on
+ * Windows keeps `cmd /c` after `--`: unwrap gives it back as it was, and `run` reads the npx command
+ * line in it (see cmdNpx), so mcpcage never starts cmd for it.
  */
 export function wrapEntry(entry: ServerEntry, options: { command: string; writable?: boolean }): { entry: ServerEntry } | { skip: string } {
   const type = serverType(entry);
@@ -263,6 +265,8 @@ export function wrapEntry(entry: ServerEntry, options: { command: string; writab
   if (typeof entry.command !== "string") return { skip: "its command is not a string" };
   if (type === "mcpcage") return { skip: "already wrapped" };
   if (type !== "npx") {
+    const cmd = Array.isArray(entry.args) ? cmdNpx([entry.command, ...entry.args]) : undefined;
+    if (cmd !== undefined && "notPlain" in cmd) return { skip: `${entry.command} /c npx: ${cmd.notPlain}: only a plain npx command line can be caged` };
     const hint = type === "docker" ? "already containerized; `mcpcage run --image` can add pinning and audit" : "only npx servers can be caged in this version";
     return { skip: `${entry.command}: ${hint}` };
   }
@@ -398,6 +402,8 @@ export function serverType(entry: ServerEntry, platform: NodeJS.Platform = proce
   if (isWrapped(entry, platform)) return "mcpcage";
   if (typeof entry.command !== "string") return "other";
   if (isNpx(entry.command, platform)) return "npx";
+  // `cmd /c npx ...` on Windows, when what follows /c is npx and its arguments alone (see cmdNpx).
+  if (Array.isArray(entry.args) && npxArgv([entry.command, ...entry.args], platform) !== undefined) return "npx";
   const program = programName(entry.command, platform);
   if (/^uvx(\.exe)?$/.test(program)) return "uvx";
   if (/^docker(\.exe)?$/.test(program)) return "docker";

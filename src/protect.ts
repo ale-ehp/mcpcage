@@ -8,7 +8,7 @@ import {
 } from "./config.js";
 import { envFileOf, mcpcageAt, type ForeignPath, type McpcageKind } from "./installed.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
-import { isNpx, parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
+import { cmdNpx, npxArgv, parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
 import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
@@ -74,6 +74,8 @@ export interface ServerReport {
   envFile?: { path?: string; effects?: EnvEffects };
   /** What in the entry is not as a client expects it, such as an argument that is not a string. */
   problems: string[];
+  /** For a `cmd /c npx` entry on Windows that runs more than npx, why it is not caged (see cmdNpx). */
+  notPlain?: string;
   /** Why the entry could not be described whole: the report says so on its lines and goes on. */
   error?: string;
   installScripts?: InstallScripts;
@@ -192,6 +194,8 @@ async function describeServer(
       const envFile = envFileOf(entry, file.file);
       if (envFile !== undefined) server.envFile = envFile.variables === undefined ? { path: envFile.path } : { path: envFile.path, effects: effectsOf(envFile.variables, installed) };
     }
+    const cmd = type === "other" && Array.isArray(entry.args) ? cmdNpx([entry.command, ...entry.args]) : undefined;
+    if (cmd !== undefined && "notPlain" in cmd) server.notPlain = cmd.notPlain;
     const odd = Array.isArray(entry.args) ? entry.args.filter((arg) => typeof arg !== "string").length : 0;
     if (odd > 0) server.problems.push(`args: ${odd === 1 ? "an argument that is not a string" : `${odd} arguments that are not strings`}`);
     const launch = npxCommand(entry, type);
@@ -487,6 +491,7 @@ export function renderReport(report: ProtectReport, options: { home: string }): 
 function serverLines(server: ServerReport, home: string): string[] {
   const indent = " ".repeat(NAME_WIDTH + 4);
   const details: string[] = server.problems.map(terminalSafe);
+  if (server.notPlain !== undefined) details.push(`cmd: ${terminalSafe(server.notPlain)}`);
   if (server.error !== undefined) details.push(`could not describe this entry: ${terminalSafe(server.error)}`);
   for (const path of server.broadAccess) details.push(`access: ${terminalSafe(path)}: ${broadAccessKind(path, home) ?? "a broad path"}`);
   if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(terminalSafe).join(", ")}`);
@@ -541,7 +546,8 @@ function status(server: ServerReport): string {
     case "uvx":
       return "uvx, not supported yet";
     default:
-      return server.command === NO_COMMAND ? "no command: nothing to start" : `${terminalSafe(programOf(server.command))}, not npx: cannot be caged yet`;
+      if (server.command === NO_COMMAND) return "no command: nothing to start";
+      return `${terminalSafe(programOf(server.command))}, ${server.notPlain === undefined ? "not npx: cannot be caged yet" : "not a plain npx command line: cannot be caged"}`;
   }
 }
 
@@ -1064,7 +1070,7 @@ function npxCommand(entry: ServerEntry, type: ServerType): string[] | undefined 
   if (type === "npx") return [entry.command as string, ...args];
   if (type !== "mcpcage" || !args.includes("--")) return undefined;
   const inner = args.slice(args.indexOf("--") + 1);
-  return inner[0] !== undefined && isNpx(inner[0]) ? inner : undefined;
+  return npxArgv(inner) === undefined ? undefined : inner;
 }
 
 function npmPackage(argv: string[]): { spec: string; local: boolean } | undefined {

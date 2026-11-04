@@ -12,7 +12,7 @@ import { discoverConfigs } from "./clients.js";
 import { RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
 import { commandOnPath } from "./installed.js";
-import { parseLaunch, serverIdFor } from "./launch.js";
+import { npxArgv, parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, checkServerId, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, refuseTooMany, type Pending } from "./pinstore.js";
@@ -158,8 +158,11 @@ async function run(argv: string[]): Promise<number> {
   let env: NodeJS.ProcessEnv | undefined;
   if (values["no-sandbox"]) {
     if (spec.kind === "image") throw new Error("--image always runs in a container; drop --no-sandbox");
-    command = spec.kind === "host" ? spec.command : server[0]!;
-    args = spec.kind === "host" ? spec.args : server.slice(1);
+    // The npx command line alone: one that `cmd /c` runs (see cmdNpx) starts without cmd, which
+    // would read its arguments as commands.
+    const line = (spec.kind === "npm" ? npxArgv(server) : undefined) ?? server;
+    command = line[0]!;
+    args = line.slice(1);
     log(`mcpcage: WARNING ${serverId} runs on the host without isolation (--no-sandbox). Tool pinning and audit are still on.`);
     auditLog.write("sandbox", { mode: "none", command: [command, ...args] });
   } else {

@@ -1,3 +1,4 @@
+import { win32 } from "node:path";
 import { canonicalJson, sha256 } from "./canonical.js";
 
 /** What the MCP client asked to start, after `mcpcage run --`. */
@@ -10,14 +11,16 @@ const NPX_FLAGS_WITHOUT_VALUE = new Set(["-y", "--yes", "-q", "--quiet", "--no-i
 
 /**
  * Understands `npx [-y] <package>[@version] [args...]`, the form most MCP servers are configured
- * with. Anything else is a plain host command, which only `--no-sandbox` accepts. `platform` is the
- * system the command line was written for (see isLocalPath).
+ * with, and on Windows the same run by `cmd /c` (see cmdNpx). Anything else is a plain host command,
+ * which only `--no-sandbox` accepts. `platform` is the system the command line was written for.
  */
 export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Platform = process.platform): LaunchSpec {
   if (image) return { kind: "image", image, args: argv };
-  const [command, ...rest] = argv;
+  const [command] = argv;
   if (!command) throw new Error("missing the server command after `--`");
-  if (!isNpx(command, platform)) return { kind: "host", command, args: rest };
+  const npx = npxArgv(argv, platform);
+  if (npx === undefined) return { kind: "host", command, args: argv.slice(1) };
+  const rest = npx.slice(1);
 
   let index = 0;
   while (index < rest.length && rest[index]!.startsWith("-")) {
@@ -34,6 +37,72 @@ export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Pla
   if (isLocalPath(spec, platform)) return { kind: "npm", packageName: "", localPath: spec, args };
   const { name, range } = splitPackageSpec(spec);
   return { kind: "npm", packageName: name, versionRange: range, args };
+}
+
+/**
+ * The npx command line a server's command line runs: itself when it starts npx, the part after `/c`
+ * when it is a plain `cmd /c npx ...` on Windows (see cmdNpx); undefined for any other.
+ */
+export function npxArgv(argv: readonly unknown[], platform: NodeJS.Platform = process.platform): string[] | undefined {
+  const [command] = argv;
+  if (typeof command === "string" && isNpx(command, platform)) return argv as string[];
+  const cmd = cmdNpx(argv, platform);
+  return cmd !== undefined && "npx" in cmd ? cmd.npx : undefined;
+}
+
+/**
+ * The npx command line that `cmd /c npx ...` runs on Windows, where many configurations start npx so,
+ * because some clients cannot start npx.cmd themselves: `cmd` or `cmd.exe` in any case, bare or a
+ * full path, then `/c` (any case), after `/d` or `/s` at most. Undefined for a command line that is
+ * not one. Such entries were "cmd, not npx" in the report, and wrap and --fix left them on the host.
+ * cmd reads what follows `/c` itself: `&`, `|`, `<`, `>`, `^`, `%`, `!`, quotes and parentheses can
+ * start another command, redirect, or change what npx is given, and a control character can end the
+ * line. Only a line with none of them runs npx with exactly the arguments the cage gives it; for any
+ * other, `notPlain` says why (never quoting an argument, which may hold a credential), and it stays a
+ * program mcpcage does not cage. An argument with a space is accepted after the first: the client
+ * quotes it, cmd passes the quotes on, and npx reads them away. In the first, npx's path, the quotes
+ * open the line, where cmd removes them by rules of its own.
+ */
+export function cmdNpx(argv: readonly unknown[], platform: NodeJS.Platform = process.platform): { npx: string[] } | { notPlain: string } | undefined {
+  if (platform !== "win32") return undefined;
+  const [command, ...args] = argv;
+  if (typeof command !== "string" || !isCmd(command) || args.some((arg) => typeof arg !== "string")) return undefined;
+  const words = args as string[];
+  const first = words.findIndex((word) => !word.startsWith("/"));
+  const switches = first === -1 ? words : words.slice(0, first);
+  if (!/^\/c$/i.test(switches.at(-1) ?? "")) return undefined;
+  const line = words.slice(switches.length);
+  // The program cmd starts: the line up to the first character that ends a program's name for it.
+  const program = /^[^\s"&|<>^%!(),;=]*/.exec(line.join(" "))![0];
+  if (!isNpx(program, platform) && !isNpx(line[0] ?? "", platform)) return undefined;
+  if (switches.slice(0, -1).some((option) => !/^\/[ds]$/i.test(option))) return { notPlain: "it gives cmd a switch other than /d and /s before /c" };
+  for (const word of line) {
+    if (word === "") return { notPlain: "an argument after /c is empty, which the client can give cmd only in quotes" };
+    const read = CMD_READS.find(([characters]) => characters.test(word));
+    if (read !== undefined) return { notPlain: `an argument after /c has ${read[1]}` };
+  }
+  if (line[0] !== program) {
+    return { notPlain: isNpx(line[0]!, platform) ? "the path of npx has a space, so the client quotes it, and cmd removes quotes there by rules of its own" : "it gives npx and what follows in one argument, which cmd splits by rules of its own" };
+  }
+  return { npx: line };
+}
+
+/** What cmd reads itself in the line after `/c`, with what it does. */
+const CMD_READS: ReadonlyArray<[RegExp, string]> = [
+  [/[&|]/, "& or |, with which cmd starts another command"],
+  [/[<>]/, "< or >, with which cmd redirects what npx reads or writes"],
+  [/\^/, "^, which cmd removes as an escape"],
+  [/%/, "%, between two of which cmd fills in a variable"],
+  [/!/, "!, between two of which cmd fills in a variable when delayed expansion is on"],
+  [/"/, "quotes, which cmd reads by rules of its own"],
+  [/[()]/, "parentheses, which cmd can read as a block"],
+  [/[\u0000-\u001f\u007f]/, "a control character, and a line break ends cmd's command"],
+];
+
+/** `cmd` or `cmd.exe`, in any case, bare or a full path: a relative one depends on the client's directory. */
+function isCmd(command: string): boolean {
+  if (/[/\\]/.test(command) && !win32.isAbsolute(command)) return false;
+  return /^cmd(\.exe)?$/.test(win32.basename(command).toLowerCase());
 }
 
 /**

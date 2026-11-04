@@ -7,11 +7,11 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
 import { discoverConfigs, type ClientId } from "../src/clients.js";
-import { isWrapped, moveHostEnv, serverType, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
+import { isWrapped, moveHostEnv, serverType, unwrapEntry, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
 import { listTools } from "../src/inspect.js";
 import { mcpcageAt } from "../src/installed.js";
 import { hasComments, parseJsonc } from "../src/jsonc.js";
-import { parseLaunch, serverIdFor } from "../src/launch.js";
+import { cmdNpx, parseLaunch, serverIdFor } from "../src/launch.js";
 import { tooDeep } from "../src/manifest.js";
 import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
@@ -477,6 +477,55 @@ describe("wrapping one entry", () => {
     const mcpcage = { command: "C:\\npm\\MCPCAGE.CMD", args: ["run", "--", "npx", "-y", "pkg"] };
     expect([serverType(mcpcage, "win32"), serverType(mcpcage, "darwin")]).toEqual(["mcpcage", "other"]);
     expect([isWrapped(mcpcage, "win32"), isWrapped(mcpcage, "linux")]).toEqual([true, false]);
+  });
+
+  it("cages cmd /c npx on Windows as npx, keeps cmd /c for unwrap, and says why one that runs more than npx is not caged", () => {
+    const memory = ["-y", "@modelcontextprotocol/server-memory"];
+    const plain = [
+      { command: "cmd", args: ["/c", "npx", ...memory] },
+      { command: "CMD.EXE", args: ["/C", "NPX", ...memory] },
+      // A space after npx's own name is quoted by the client, and cmd passes the quotes on to npx.
+      { command: "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/s", "/c", "C:\\nodejs\\npx.cmd", ...memory, "C:\\My Notes"] },
+    ];
+    for (const entry of plain) {
+      const npx = entry.args.slice(entry.args.findIndex((arg) => !arg.startsWith("/")));
+      expect([serverType(entry, "win32"), serverType(entry, "darwin")]).toEqual(["npx", "other"]);
+      // The same server as the npx command line it runs, with the same id: the same pins.
+      expect(parseLaunch([entry.command, ...entry.args], undefined, "win32")).toEqual(parseLaunch(npx, undefined, "win32"));
+      const wrapped = onWindows(() => wrapEntry(entry, { command: "mcpcage" }));
+      expect(wrapped).toEqual({ entry: { command: "mcpcage", args: ["run", "--", entry.command, ...entry.args] } });
+      expect(onWindows(() => unwrapEntry((wrapped as { entry: ServerEntry }).entry))).toEqual({ entry });
+    }
+    const notPlain: Array<[string[], string]> = [
+      [["/c", "npx", ...memory, "&", "calc"], "an argument after /c has & or |, with which cmd starts another command"],
+      [["/c", "npx", ...memory, "|", "more"], "& or |"],
+      [["/c", "npx", ...memory, ">", "out.txt"], "< or >"],
+      [["/c", "npx", ...memory, "a^b"], "^, which cmd removes"],
+      [["/c", "npx", ...memory, "--token=%GITHUB_TOKEN%"], "%, between two of which cmd fills in a variable"],
+      [["/c", "npx", ...memory, "!x!"], "!, between two of which"],
+      [["/c", "npx", ...memory, '"quoted"'], "quotes"],
+      [["/c", "npx", ...memory, "(x)"], "parentheses"],
+      [["/c", "npx", ...memory, "a\r\nb"], "a control character"],
+      [["/c", "npx", ...memory, ""], "an argument after /c is empty"],
+      [["/q", "/c", "npx", ...memory], "a switch other than /d and /s"],
+      [["/c", "npx -y @modelcontextprotocol/server-memory"], "npx and what follows in one argument"],
+      [["/c", "C:\\Program Files\\nodejs\\npx.cmd", ...memory], "the path of npx has a space"],
+    ];
+    for (const [args, why] of notPlain) {
+      const entry = { command: "cmd", args };
+      expect(serverType(entry, "win32")).toBe("other");
+      expect(parseLaunch(["cmd", ...args], undefined, "win32")).toEqual({ kind: "host", command: "cmd", args });
+      expect(cmdNpx(["cmd", ...args], "win32")).toEqual({ notPlain: expect.stringContaining(why) });
+      const skip = onWindows(() => wrapEntry(entry, { command: "mcpcage" }));
+      expect(skip).toEqual({ skip: expect.stringMatching(new RegExp(`^cmd /c npx: .*${literal(why)}.*: only a plain npx command line can be caged$`)) });
+    }
+    // An argument is never quoted in the reason: it may hold a credential.
+    expect(JSON.stringify(cmdNpx(["cmd", "/c", "npx", "-y", "pkg", "--token=%GITHUB_TOKEN%"], "win32"))).not.toContain("GITHUB_TOKEN");
+    // cmd that starts something else, /k, a cmd found from the client's directory: other programs, said as before.
+    for (const argv of [["cmd", "/c", "uvx", "x"], ["cmd", "/k", "npx", "x"], [".\\cmd.exe", "/c", "npx", "x"], ["cmd", "/c"], ["cmd", "/c", "npx", 1]]) {
+      expect(cmdNpx(argv, "win32")).toBeUndefined();
+    }
+    expect(cmdNpx(["cmd", "/c", "npx", ...memory], "linux")).toBeUndefined();
   });
 
   it("moves the env that would act on the host into the cage as NAME=value, drops HOME and MCPCAGE_HOME, and keeps the rest as before", () => {
@@ -2270,6 +2319,46 @@ describe("which mcpcage an entry starts", () => {
     // Done once: the rewritten entries start the mcpcage wrap writes.
     expect(wrapConfig(file, { dryRun: true, command: installed.command }).skipped.map((skipped) => skipped.name)).toEqual(["evil", "elsewhere", "real"]);
     expect(wrapConfig(file, { dryRun: true, command: installed.command }).changed).toEqual([]);
+  });
+});
+
+describe("npx started by cmd /c, on Windows", () => {
+  const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+
+  it.runIf(process.platform === "win32")("is counted as npx, caged by --fix with cmd /c kept, and given back as it was by unwrap", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cmd-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    for (const dir of [home, project]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    const servers = {
+      viacmd: { command: "cmd", args: ["/c", "npx", "-y", "@acme/notes-mcp"] },
+      full: { command: "C:\\Windows\\System32\\CMD.EXE", args: ["/d", "/s", "/C", "NPX.CMD", "-y", "@acme/notes-mcp"] },
+      chained: { command: "cmd", args: ["/c", "npx", "-y", "@acme/notes-mcp", "&", "calc"] },
+    };
+    writeJsonFile(cursor, { mcpServers: servers });
+    const original = readFileSync(cursor);
+    const installed = fakeMcpcage();
+    const env = fakeUserEnv(home, join(top, "cage"), { CLAUDECODE: "1", PATH: installed.path });
+
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    for (const name of ["viacmd", "full"]) expect(lineOf(scan.stdout, name)).toMatch(/ {2}NOT CAGED$/);
+    expect(lineOf(scan.stdout, "chained")).toMatch(/ {2}cmd, not a plain npx command line: cannot be caged$/);
+    expect(scan.stdout).toContain("cmd: an argument after /c has & or |, with which cmd starts another command\n");
+    expect(scan.stdout).toContain("  2 run on your machine with your permissions and no cage.");
+
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    expect(fix.code, fix.stderr).toBe(0);
+    const after = JSON.parse(readFileSync(cursor, "utf8")).mcpServers;
+    expect(after.viacmd).toEqual({ command: installed.command, args: ["run", "--", "cmd", "/c", "npx", "-y", "@acme/notes-mcp"] });
+    expect(after.full).toEqual({ command: installed.command, args: ["run", "--", servers.full.command, ...servers.full.args] });
+    expect(after.chained).toEqual(servers.chained);
+    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
+    for (const name of ["viacmd", "full"]) expect(lineOf(again.stdout, name)).toMatch(/ {2}caged$/);
+
+    const unwrap = mcpcageWithEnv(env, "unwrap", cursor);
+    expect(unwrap.code, unwrap.stderr).toBe(0);
+    expect(readFileSync(cursor).equals(original)).toBe(true);
   });
 });
 
