@@ -6,7 +6,7 @@ import { AuditLog } from "../src/audit.js";
 import { pinTools } from "../src/manifest.js";
 import { auditDir, checkServerId, serverDir } from "../src/paths.js";
 import { noDocker } from "./fake-programs.js";
-import { connectFake, fakeUserEnv, freshHome, mcpcage, mcpcageWithEnv, native, root } from "./helpers.js";
+import { connectFake, fakeUserEnv, freshHome, mcpcage, mcpcageWithEnv, native, root, written } from "./helpers.js";
 
 /** A control, C1 or format character, raw: what a terminal acts on or hides instead of showing. */
 const RAW_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/;
@@ -160,7 +160,7 @@ describe("cli", () => {
     writeFileSync(file, JSON.stringify(original));
     const result = mcpcage(home, "wrap", file, "--dry-run");
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("caged memory: mcpcage run -- npx -y @modelcontextprotocol/server-memory");
+    expect(result.stdout).toContain(`caged memory: ${written().line} run -- npx -y @modelcontextprotocol/server-memory`);
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(original);
   });
 
@@ -304,7 +304,7 @@ describe("cli", () => {
     writeFileSync(file, JSON.stringify({ mcpServers: { tuned: { command: "npx", args: ["-y", "pkg"], env: { NODE_OPTIONS: "--max-old-space-size=4096", API_KEY: "x" } } } }));
     const result = mcpcage(home, "wrap", file, "--dry-run");
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("caged tuned: mcpcage run --env NODE_OPTIONS=*** --env API_KEY -- npx -y pkg\n");
+    expect(result.stdout).toContain(`caged tuned: ${written().line} run --env NODE_OPTIONS=*** --env API_KEY -- npx -y pkg\n`);
     expect(result.stdout).not.toContain("4096");
   });
 
@@ -381,7 +381,7 @@ describe("what wrap and unwrap print", () => {
     const wrapped = mcpcage(home, "wrap", file, "--dry-run");
     expect(wrapped.code).toBe(0);
     expect(wrapped.stdout).not.toMatch(RAW_CONTROL);
-    expect(wrapped.stdout).toContain(`  caged notes${SPELLED}: mcpcage run -- npx -y pkg-a x${SPELLED}\n`);
+    expect(wrapped.stdout).toContain(`  caged notes${SPELLED}: ${written().line} run -- npx -y pkg-a x${SPELLED}\n`);
     expect(wrapped.stdout).toContain(`  skipped time${SPELLED}: uvx${SPELLED}: only npx servers can be caged in this version\n`);
 
     writeFileSync(file, JSON.stringify({ mcpServers: { [`back${HOSTILE}`]: { command: "mcpcage", args: ["run", "--", "npx", "-y", `pkg${HOSTILE}`] }, [`odd${HOSTILE}`]: { command: "mcpcage", args: ["run"] } } }));
@@ -398,7 +398,7 @@ describe("what wrap and unwrap print", () => {
     // No Docker to reach: the build fails, and says so with the server's name.
     const result = mcpcageWithEnv({ ...process.env, MCPCAGE_HOME: home, ...noDocker(home) }, "wrap", file);
     expect(result.code).toBe(1);
-    expect(result.stdout).toContain(`  caged notes${SPELLED}: mcpcage run -- npx -y pkg-a\n`);
+    expect(result.stdout).toContain(`  caged notes${SPELLED}: ${written().line} run -- npx -y pkg-a\n`);
     expect(result.stderr).not.toMatch(RAW_CONTROL);
     expect(result.stderr).toContain(`  could not build notes${SPELLED}: Docker is required to cage a server`);
   });

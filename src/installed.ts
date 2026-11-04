@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { readConfigFile } from "./clients.js";
 import { isJsonObject } from "./jsonc.js";
 import { clientPlaces } from "./sensitive.js";
@@ -18,6 +18,25 @@ import { clientPlaces } from "./sensitive.js";
 /** An mcpcage known to this one, another program (or one that cannot be told apart), or nothing that can be found. */
 export type McpcageKind = "installed" | "other program" | "not found";
 
+/**
+ * How configurations start mcpcage: a command (mcpcage, mcpcage.cmd, a full path), or on Windows a
+ * node given mcpcage's cli.js as its first argument, which every client there can start (see
+ * installedCommand in cli.ts).
+ */
+export type McpcageCommand = string | { node: string; script: string };
+
+/**
+ * The script of an entry that starts mcpcage as --fix writes it on Windows: node or node.exe, then a
+ * file named cli.js, then `run`. Undefined for any other entry, and on other systems. Whether that
+ * node and that script are mcpcage's is mcpcageAt's question.
+ */
+export function nodeScript(entry: { command?: unknown; args?: unknown }, platform: NodeJS.Platform = process.platform): string | undefined {
+  if (platform !== "win32" || typeof entry.command !== "string" || !Array.isArray(entry.args)) return undefined;
+  const [script, run] = entry.args as unknown[];
+  const node = /^node(\.exe)?$/.test(win32.basename(entry.command).toLowerCase());
+  return node && typeof script === "string" && win32.basename(script).toLowerCase() === "cli.js" && run === "run" ? script : undefined;
+}
+
 /** A command whose file depends on something not known here: the directory the client starts it from. */
 const UNKNOWN = Symbol("unknown");
 
@@ -29,16 +48,38 @@ const UNKNOWN = Symbol("unknown");
  * spawn looks it up: in the PATH the entry's own `env` sets, else in this process's PATH. A
  * `command: "mcpcage"` with an `env.PATH` of the attacker's choice was vouched for as caged, because
  * it was looked up in mcpcage's PATH. A relative path, or a relative directory in the entry's PATH,
- * depends on the directory the client starts the entry from: it is never taken for mcpcage.
+ * depends on the directory the client starts the entry from: it is never taken for mcpcage. Node
+ * with a cli.js, as --fix writes on Windows, is mcpcage when both are (see nodeAt).
  */
-export function mcpcageAt(entry: { command: string; env?: unknown }, own?: string): McpcageKind {
+export function mcpcageAt(entry: { command: string; args?: unknown; env?: unknown }, own?: McpcageCommand): McpcageKind {
+  const script = nodeScript(entry);
+  if (script !== undefined) return nodeAt(entry.command, script, own);
   const found = startedBy(entry);
   if (found === undefined) return "not found";
   if (found === UNKNOWN) return "other program";
   const real = realFile(found);
   if (real === undefined) return "not found";
-  const known = [own === undefined ? undefined : realCommand(own), runningMcpcage()];
+  // Where --fix writes node with cli.js, the mcpcage it wrote before is the one the PATH finds.
+  const known = [typeof own === "string" ? realCommand(own) : own === undefined ? undefined : realCommand("mcpcage"), runningMcpcage()];
   return known.includes(real) ? "installed" : "other program";
+}
+
+/**
+ * Whether a node given a cli.js, as --fix writes on Windows, starts mcpcage. A configuration can name
+ * any node.exe, which need not run the script at all, and any cli.js. Both must be full paths:
+ * Windows looks for a bare name in the client's current directory first, and a relative path depends
+ * on it. The node must be the same file as the one running mcpcage, the one the PATH finds or the
+ * one --fix writes; the script the same file as the running mcpcage's cli.js or the one --fix writes.
+ */
+function nodeAt(node: string, script: string, own: McpcageCommand | undefined): McpcageKind {
+  if (!isAbsolute(node) || !isAbsolute(script)) return "other program";
+  const realNode = realFile(node);
+  const realScript = realFile(script);
+  if (realNode === undefined || realScript === undefined) return "not found";
+  const given = typeof own === "object" ? own : undefined;
+  const nodes = [realFile(process.execPath), realCommand("node"), given === undefined ? undefined : realFile(given.node)];
+  const scripts = [runningMcpcage(), given === undefined ? undefined : realFile(given.script)];
+  return nodes.includes(realNode) && scripts.includes(realScript) ? "installed" : "other program";
 }
 
 /** The part of an entry's PATH that is not the user's (see foreignPath). */

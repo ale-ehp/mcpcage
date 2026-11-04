@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
-import { envFileOf, foreignPath, mcpcageAt, movedPlaces, type ForeignPath } from "./installed.js";
+import { envFileOf, foreignPath, mcpcageAt, movedPlaces, nodeScript, type ForeignPath, type McpcageCommand } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
 import { cmdNpx, isNpx, npxArgv, parseLaunch } from "./launch.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
@@ -62,7 +62,7 @@ export interface WrapOutcome {
  * `writable` mounts the paths the servers are given writable (see wrapEntry). An entry that would
  * still not count as caged once rewritten stays as it is, with the reason (see cageCheck).
  */
-export function wrapConfig(file: string, options: { dryRun: boolean; command?: string; writable?: boolean }): WrapOutcome {
+export function wrapConfig(file: string, options: { dryRun: boolean; command?: McpcageCommand; writable?: boolean }): WrapOutcome {
   const command = options.command ?? "mcpcage";
   return transform(file, options.dryRun, (name, entry, skip) => {
     const original = isWrapped(entry) && mcpcageAt(entry, command) === "other program" ? unwrapEntry(entry) : { entry };
@@ -85,11 +85,12 @@ export function wrapConfig(file: string, options: { dryRun: boolean; command?: s
  * writable mount is the user's choice (`--writable`), which the report counts as an opened cage.
  * `configFile` holds the entry: an envFile's `${workspaceFolder}` is found from it.
  */
-export function cageCheck(entry: ServerEntry, options: { command: string; configFile: string }): string | undefined {
+export function cageCheck(entry: ServerEntry, options: { command: McpcageCommand; configFile: string }): string | undefined {
   if (mcpcageAt(entry as ServerEntry & { command: string }, options.command) === "other program") {
     // A bare name is looked up in the entry's PATH, a relative path from the client's directory.
-    return /[/\\]/.test(options.command) && !isAbsolute(options.command)
-      ? `${terminalSafe(options.command)} is a relative path, so what the client starts depends on the directory it starts the entry from: give the full path of mcpcage with --command`
+    const command = typeof options.command === "string" ? options.command : options.command.node;
+    return /[/\\]/.test(command) && !isAbsolute(command)
+      ? `${terminalSafe(command)} is a relative path, so what the client starts depends on the directory it starts the entry from: give the full path of mcpcage with --command`
       : `its env sets a PATH that makes the client start another program than mcpcage: check that PATH, or remove it from its "env" by hand`;
   }
   const envFile = envFileOf(entry, options.configFile);
@@ -256,7 +257,7 @@ export function hostVariable(name: string, value: unknown): { to: "container" | 
  * Windows keeps `cmd /c` after `--`: unwrap gives it back as it was, and `run` reads the npx command
  * line in it (see cmdNpx), so mcpcage never starts cmd for it.
  */
-export function wrapEntry(entry: ServerEntry, options: { command: string; writable?: boolean }): { entry: ServerEntry } | { skip: string } {
+export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand; writable?: boolean }): { entry: ServerEntry } | { skip: string } {
   const type = serverType(entry);
   if (type === "remote") return { skip: "remote server: nothing runs locally to cage" };
   if (!entry.command) return { skip: "no command" };
@@ -309,7 +310,8 @@ export function wrapEntry(entry: ServerEntry, options: { command: string; writab
   const mode = (path: string) => (options.writable ? `${path}:rw` : /:(?:rw|ro)$/.test(path) ? `${path}:ro` : path);
   const mountFlags = [...new Set(paths.filter((path): path is string => path !== undefined))].flatMap((path) => ["--mount", mode(path)]);
   const server = serverArgs.map((arg, index) => paths[index] ?? arg);
-  const wrapped: ServerEntry = { ...entry, command: options.command, args: ["run", ...envFlags, ...mountFlags, "--", entry.command, ...npxPart, ...server] };
+  const launcher = typeof options.command === "string" ? { command: options.command, args: [] } : { command: options.command.node, args: [options.command.script] };
+  const wrapped: ServerEntry = { ...entry, command: launcher.command, args: [...launcher.args, "run", ...envFlags, ...mountFlags, "--", entry.command, ...npxPart, ...server] };
   if (isJsonObject(entry.env)) wrapped.env = Object.fromEntries(env) as Record<string, string>;
   return { entry: wrapped };
 }
@@ -336,7 +338,9 @@ export function moveHostEnv(entry: ServerEntry): { entry: ServerEntry } | { skip
   const odd = host.find((variable) => variable.to === "container" && typeof variable.value !== "string");
   if (odd !== undefined) return { skip: notAString(odd.name) };
   const names = new Set(host.map((variable) => variable.name));
-  const args = entry.args; // a list: isWrapped asks for one
+  // From `run` on: node.exe's script, when mcpcage starts so (see nodeScript), stays first.
+  const script = nodeScript(entry) === undefined ? [] : entry.args.slice(0, 1);
+  const args = entry.args.slice(script.length); // a list: isWrapped asks for one
   const separator = args.indexOf("--");
   const own = args.slice(1, separator === -1 ? args.length : separator);
   const kept: string[] = [];
@@ -347,7 +351,7 @@ export function moveHostEnv(entry: ServerEntry): { entry: ServerEntry } | { skip
   }
   const moved = host.flatMap((variable) => (variable.to === "container" ? ["--env", `${variable.name}=${variable.value as string}`] : []));
   const env = Object.fromEntries(Object.entries(entry.env).filter(([name]) => !names.has(name))) as Record<string, string>;
-  return { entry: { ...entry, args: ["run", ...moved, ...kept, ...(separator === -1 ? [] : args.slice(separator))], env } };
+  return { entry: { ...entry, args: [...script, "run", ...moved, ...kept, ...(separator === -1 ? [] : args.slice(separator))], env } };
 }
 
 /**
@@ -444,10 +448,17 @@ export function unwrapEntry(entry: ServerEntry): { entry: ServerEntry } | { skip
 }
 
 export function isWrapped(entry: ServerEntry, platform: NodeJS.Platform = process.platform): entry is ServerEntry & { command: string; args: string[] } {
-  // `where mcpcage` gives mcpcage.cmd on Windows, which starts it as MCPCAGE.CMD too. The arguments
-  // must be a list: an object whose "0" is "run" looked wrapped too, and unwrap stopped at it with
-  // "args.indexOf is not a function".
-  return typeof entry.command === "string" && /^mcpcage(\.cmd|\.exe)?$/.test(programName(entry.command, platform)) && Array.isArray(entry.args) && entry.args[0] === "run";
+  // `where mcpcage` gives mcpcage.cmd on Windows, which starts it as MCPCAGE.CMD too, and --fix
+  // writes node.exe with mcpcage's cli.js there (see nodeScript). The arguments must be a list: an
+  // object whose "0" is "run" looked wrapped too, and unwrap stopped at it with "args.indexOf is not
+  // a function".
+  if (typeof entry.command !== "string" || !Array.isArray(entry.args)) return false;
+  return (/^mcpcage(\.cmd|\.exe)?$/.test(programName(entry.command, platform)) && entry.args[0] === "run") || nodeScript(entry, platform) !== undefined;
+}
+
+/** A wrapped entry's arguments from `run` on: those after the script node.exe is given, when mcpcage starts so (see nodeScript). */
+export function mcpcageArgs(entry: ServerEntry & { args: unknown[] }): unknown[] {
+  return nodeScript(entry) === undefined ? entry.args : entry.args.slice(1);
 }
 
 type Rewrite = (

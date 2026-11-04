@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
 import { discoverConfigs } from "./clients.js";
 import { RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
-import { commandOnPath } from "./installed.js";
+import { commandOnPath, type McpcageCommand } from "./installed.js";
 import { npxArgv, parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, checkServerId, serverDir } from "./paths.js";
@@ -63,7 +64,8 @@ Protect options:
   --fix                 route every npx server through mcpcage, after showing the plan (backups are kept)
   --yes                 with --fix: change the files without asking
   --no-build            with --fix: do not build the sandbox images now
-  --command <path>      the mcpcage command written into configurations (default: mcpcage's full path)
+  --command <path>      the mcpcage command written into configurations (default: mcpcage's full path;
+                        on Windows, node.exe with mcpcage's cli.js)
   --writable            with --fix, and with wrap: mount the paths servers are given writable, not read-only
 `;
 
@@ -257,7 +259,7 @@ async function wrap(command: "wrap" | "unwrap", argv: string[]): Promise<number>
   for (const file of positionals) {
     const outcome =
       command === "wrap"
-        ? wrapConfig(file, { dryRun: values["dry-run"], command: values.command, writable: values.writable })
+        ? wrapConfig(file, { dryRun: values["dry-run"], command: values.command ?? (process.platform === "win32" ? installedCommand() : undefined), writable: values.writable })
         : unwrapConfig(file, { dryRun: values["dry-run"] });
     report(outcome, command, values["dry-run"]);
     if (command === "wrap" && !values["dry-run"] && !values["no-build"]) status = Math.max(status, buildImages(outcome.changed));
@@ -370,8 +372,16 @@ const inspectInCage: Inspector = async (launch) => {
  * Windows `where` looked in the current directory first, and spawning `where` by name ran a where.exe
  * found there: run in a repository that held a mcpcage.cmd, --fix wrote it into the user's
  * configurations, and the clients started it on the host.
+ *
+ * On Windows configurations get the node running mcpcage and mcpcage's own cli.js, by their full
+ * paths, which every client can start. The mcpcage.cmd npm installs starts only through cmd.exe:
+ * checked on Windows 10 with Node 24, a plain child_process.spawn of it throws EINVAL (Node's fix of
+ * CVE-2024-27980), so a client that starts servers so could not start what --fix wrote; the MCP
+ * SDK's cross-spawn could. Both started node.exe given cli.js. A bare name would be looked for in the
+ * client's current directory first.
  */
-function installedCommand(): string {
+function installedCommand(): McpcageCommand {
+  if (process.platform === "win32") return { node: process.execPath, script: realpathSync.native(fileURLToPath(import.meta.url)) };
   return commandOnPath("mcpcage") ?? "mcpcage";
 }
 

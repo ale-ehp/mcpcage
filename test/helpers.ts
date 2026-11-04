@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +29,23 @@ export function asStored(mode: number): number {
 /** `text` in a regular expression, matched as it is: a Windows path is full of backslashes. */
 export function literal(text: string): string {
   return text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+/**
+ * How wrap writes mcpcage when no --command is given, and protect --fix on Windows: `mcpcage` on
+ * macOS and Linux; on Windows the node that runs the CLI with its cli.js, by their full paths, which
+ * every client there can start. `line` is how wrap prints it, before `run`.
+ */
+export function written(): { command: string; args: string[]; line: string } {
+  if (process.platform !== "win32") return { command: "mcpcage", args: [], line: "mcpcage" };
+  const script = realpathSync.native(cli);
+  return { command: process.execPath, args: [script], line: `${process.execPath} ${script}` };
+}
+
+/** An entry as wrap writes it: `written()`, then `args` from `run` on. */
+export function writtenEntry(args: string[]): { command: string; args: string[] } {
+  const { command, args: first } = written();
+  return { command, args: [...first, ...args] };
 }
 
 export function freshHome(): string {
