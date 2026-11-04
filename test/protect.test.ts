@@ -659,6 +659,41 @@ describe("what a server can reach", () => {
   });
 });
 
+describe("placeholders", () => {
+  it("takes a value for a placeholder only when it is one whole, and masks a real key that holds changeme, <...> or ${...}", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-secrets-"));
+    const file = join(dir, "mcp.json");
+    writeJsonFile(file, {
+      mcpServers: {
+        changeme: { command: "npx", args: ["-y", "a-mcp", "--api-key", "sk-live-changeme-0123456789"] },
+        angle: { command: "npx", args: ["-y", "b-mcp", "--token", "sk-live-<x>-0123456789"] },
+        dollar: { command: "npx", args: ["-y", "c-mcp", "--secret=sk-${x}-0123456789abc"], env: { D_TOKEN: "tok-${input:x}-0123456789" } },
+        whole: {
+          command: "npx",
+          args: ["-y", "d-mcp", "--api-key", "${input:key}", "--token", "<user>:<password>"],
+          env: { A_TOKEN: "TODO: fill in", B_SECRET: "CHANGE_ME", GOOGLE_APPLICATION_CREDENTIALS: "${workspaceFolder}/credentials.json" },
+        },
+        remote: { type: "http", url: "https://mcp.example.test/mcp", headers: { Authorization: "Bearer ${input:token}" } },
+      },
+    });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm });
+    expect(report.servers.map((server) => [server.name, server.secrets])).toEqual([
+      ["changeme", ["--api-key"]],
+      ["angle", ["--token"]],
+      ["dollar", ["D_TOKEN", "--secret"]],
+      ["whole", []],
+      ["remote", []],
+    ]);
+    const text = renderReport(report, { home: dir });
+    expect(text).not.toContain("0123456789");
+    expect(text).toContain("  changeme      npx -y a-mcp --api-key *** ");
+    expect(text).toContain("  angle         npx -y b-mcp --token *** ");
+    expect(text).toContain("  dollar        npx -y c-mcp --secret=*** ");
+    expect(text).toContain("  whole         npx -y d-mcp --api-key ${input:key} --token <user>:<password> ");
+  });
+});
+
 describe("credentials in the report", () => {
   it("masks every credential value of a repeated query name and a real key that holds xxx, and keeps whole placeholders apart", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mcpcage-secrets-"));

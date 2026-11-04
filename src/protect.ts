@@ -772,22 +772,33 @@ function looksLikeSecret(value: unknown): boolean {
   const text = value.trim();
   if (text.length < 8 || isPlaceholder(text)) return false;
   if (/^(?:true|false|-?\d+(?:\.\d+)?)$/i.test(text)) return false;
-  if (/^(?:~|\/|[A-Za-z]:[\\/])/.test(text)) return false; // the path of a key file is not the key
+  // The path of a key file is not the key, written from a variable too: ${workspaceFolder}/key.json.
+  if (/^(?:~|\/|[A-Za-z]:[\\/]|\$\{[^}]*\}[\\/]|\$[A-Za-z_]\w*[\\/]|%[A-Za-z_]\w*%[\\/])/.test(text)) return false;
   return !/^[a-z][a-z0-9+.-]*:\/\//i.test(text) || maskUrl(text).hidden.length > 0;
 }
 
+// ${VAR}, VS Code's ${env:VAR} and ${input:id}, and <your token>, alone or with only separators
+// between them (<user>:<password>).
+const FILLED_IN = /^(?:\$\{[^}]*\}|<[^<>]*>)(?:[\s:@\/._-]*(?:\$\{[^}]*\}|<[^<>]*>))*$/;
+
+/**
+ * A value that stands for one the client fills in or the user writes later: only when it is one
+ * whole, after an auth scheme at most (`Bearer ${input:token}`). Anywhere in the value, "xxx" made
+ * `--api-key sk-live-xxx-0123456789` a placeholder, and then "changeme", "<...>" and "${...}" did the
+ * same for `sk-live-changeme-0123456789`: printed in clear, and left out of the count. A value that
+ * is not surely a placeholder is taken for a secret, and masked.
+ */
 function isPlaceholder(text: string): boolean {
+  const value = text.replace(/^(?:bearer|basic|token|bot)\s+/i, "");
   return (
-    /\$\{[^}]*\}/.test(text) || // ${VAR}, VS Code's ${env:VAR} and ${input:id}
-    /<[^<>]*>/.test(text) || // <your token>
-    /^your_/i.test(text) ||
-    // xxxxxxxx, sk-xxxx, ghp_XXXXXXXX, ****: only as the whole value, after a short prefix. Anywhere
-    // in it, "xxx" made `--api-key sk-live-xxx-0123456789` a placeholder, printed in clear.
-    /^(?:[a-z0-9]{1,8}[-_]){0,3}[x*.-]{3,}$/i.test(text) ||
-    /change[_-]?me/i.test(text) ||
-    /^todo/i.test(text) ||
-    /^\$[A-Za-z_]\w*$/.test(text) || // $GITHUB_TOKEN
-    /^%[A-Za-z_]\w*%$/.test(text) // %GITHUB_TOKEN%
+    FILLED_IN.test(value) ||
+    /^your_[a-z_-]*$/i.test(value) || // YOUR_API_KEY, your_token_here
+    // xxxxxxxx, sk-xxxx, ghp_XXXXXXXX, ****, after a short prefix.
+    /^(?:[a-z0-9]{1,8}[-_]){0,3}[x*.-]{3,}$/i.test(value) ||
+    /^change[\s_-]?me(?:[\s_-]+[a-z]+)*$/i.test(value) || // changeme, CHANGE_ME, changeme-please
+    /^todo(?:[\s:.,-]+[a-z]+)*[\s:.!-]*$/i.test(value) || // TODO, TODO: fill in
+    /^\$[A-Za-z_]\w*$/.test(value) || // $GITHUB_TOKEN
+    /^%[A-Za-z_]\w*%$/.test(value) // %GITHUB_TOKEN%
   );
 }
 
