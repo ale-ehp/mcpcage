@@ -393,7 +393,8 @@ function pointer(file: string, prefix: string, refuse: (problem: string) => Erro
 
 /**
  * Where `path` leads from the directory `base` (a real path), as the system resolves it: each
- * symlink followed, and `..` taken from where a link led, not from how the path is spelled.
+ * symlink followed, each name as the system spells it on disk, and `..` taken from where a link
+ * led, not from how the path is spelled.
  * `link` hears of every symlink on the way. The real path; or, when it does not exist, the deepest
  * place on the way that does. Errors other than a missing entry are thrown, ELOOP after 40 links.
  */
@@ -422,7 +423,9 @@ function locate(base: string, path: string, link: (at: string) => void): { real:
       throw error;
     }
     if (!stat.isSymbolicLink()) {
-      current = next;
+      // As the system spells it on disk, as the writable mounts are compared: on Windows a name may
+      // be the 8.3 short name of a long one (MYPROJ~1 for My Projects), which matches no other spelling.
+      current = realpathSync.native(next);
       continue;
     }
     link(next);

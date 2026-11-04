@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -388,6 +389,17 @@ describe("settings in a writable mount", () => {
         writeFileSync(join(dir, "app", ".git"), `gitdir: ${join(realpathSync.native(dir), "meta").replaceAll(sep, "/")}\n`);
         expect(withSettingsReadOnly([rw(dir), ro(join(dir, "app"))], SETTINGS_LIMITS, platform)).toContainEqual(ro(join(dir, "meta")));
       }
+    });
+
+    it.runIf(process.platform === "win32")("follows a .git file to its repository on Windows when it names it by 8.3 short names", () => {
+      // git writes the path it was given: `git init --separate-git-dir C:\Users\me\MYPROJ~1\meta`
+      // names C:\Users\me\My Projects\meta by the short names Windows gives long ones.
+      const dir = mkdtempSync(join(tmpdir(), "mcpcage-case-"));
+      mkdirSync(join(dir, "app"));
+      mkdirSync(join(dir, "repository meta", "hooks"), { recursive: true });
+      const short = execSync(`for %I in ("${join(dir, "repository meta")}") do @echo %~sI`, { encoding: "utf8" }).trim();
+      writeFileSync(join(dir, "app", ".git"), `gitdir: ${short}\n`);
+      expect(withSettingsReadOnly([rw(dir), ro(join(dir, "app"))], SETTINGS_LIMITS, "win32")).toContainEqual(ro(join(dir, "repository meta")));
     });
   });
 
