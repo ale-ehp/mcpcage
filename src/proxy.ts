@@ -135,7 +135,10 @@ export function runProxy(options: ProxyOptions): Promise<number> {
         // named "" approved was given calls without a name, or with a number or a list for one.
         const tool = typeof message.params?.name === "string" ? message.params.name : undefined;
         // Only a tool approved under that very name passes: looked up plainly, "constructor",
-        // "toString", "__proto__" and the other names every object inherits passed unlisted.
+        // "toString", "__proto__" and the other names every object inherits passed unlisted. The model
+        // writes the arguments, which are hashed for the audit log: nested 5,000 levels deep, which a
+        // client's own JSON.stringify writes, hashing them ran out of stack and stopped mcpcage. No tool
+        // takes arguments that deep, and a definition nested that deep is refused too.
         const reason = locked
           ? `this session is locked because ${locked}`
           : !pin
@@ -144,7 +147,9 @@ export function runProxy(options: ProxyOptions): Promise<number> {
               ? "its tool name is not a string"
               : !own(pin.tools, tool)
                 ? `tool "${tool}" is not in the approved manifest`
-                : undefined;
+                : nestedDeeperThan(message.params?.arguments, MAX_DEPTH)
+                  ? `its arguments are nested more than ${MAX_DEPTH} levels deep`
+                  : undefined;
         if (reason) {
           audit.write("call-blocked", { id: message.id, tool, reason });
           if (id !== undefined) refuse(id, `mcpcage blocked tools/call: ${reason}. Run \`mcpcage diff ${serverId}\` to review.`);

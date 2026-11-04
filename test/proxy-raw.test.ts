@@ -111,4 +111,24 @@ describe("calls a client writes by hand", () => {
     const blocked = audit(home).filter((entry) => entry.event === "call-blocked");
     expect(blocked.map((entry) => [entry.id, entry.reason])).toEqual([2, 3, 4, 5, 6].map((id) => [id, "its tool name is not a string"]));
   });
+
+  it("refuses a call whose arguments are nested too deep, and keeps serving", async () => {
+    // Found by the proxy's property-based test: hashing them for the audit log ran out of stack, and
+    // mcpcage stopped with a RangeError. The model writes the arguments, and a client writes these
+    // 5,000 levels with its own JSON.stringify.
+    const home = freshHome();
+    const session = rawSession(home, [{ name: "read_file", description: "Reads a file.", inputSchema: { type: "object" } }]);
+    session.send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    await session.answer(1);
+    const nested = `${"[".repeat(5000)}${"]".repeat(5000)}`;
+    session.send(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":${nested}}}}`);
+    expect(await session.answer(2)).toMatchObject({ error: { code: -32001, message: "mcpcage blocked tools/call: its arguments are nested more than 256 levels deep. Run `mcpcage diff raw` to review." } });
+    // Shallow arguments still pass.
+    session.send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "read_file", arguments: { path: [[["a"]]] } } });
+    expect((await session.answer(3)).result).toEqual({ content: [{ type: "text", text: 'called "read_file"' }] });
+    expect(await session.close()).toBe(0);
+    expect(session.stderr()).not.toContain("RangeError");
+    expect(session.got().map((line) => line.id)).toEqual([1, 3]);
+    expect(audit(home).filter((entry) => entry.event === "call-blocked").map((entry) => [entry.id, entry.tool, entry.reason])).toEqual([[2, "read_file", "its arguments are nested more than 256 levels deep"]]);
+  });
 });
