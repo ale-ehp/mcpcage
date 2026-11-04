@@ -6,13 +6,14 @@ import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalJson } from "../src/canonical.js";
-import { unwrapConfig, wrapConfig } from "../src/config.js";
+import { isWrapped, moveHostEnv, unwrapConfig, unwrapEntry, wrapConfig, type ServerEntry } from "../src/config.js";
 import { parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep, type Pin, type ToolDefinition } from "../src/manifest.js";
 import { approvePending, loadPin, savePending, savePin } from "../src/pinstore.js";
 import { dockerfile, parseMount, runArgs, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
 import { describeViolationsWithFindings } from "../src/suspicious.js";
+import { fakeUserEnv, mcpcageWithEnv } from "./helpers.js";
 
 /** Runs `body` with mcpcage's data in a fresh directory, as the CLI sees it when MCPCAGE_HOME is set. */
 function inFreshHome(body: (home: string) => void): void {
@@ -418,6 +419,64 @@ describe("client configuration", () => {
     expect(outcome.key).toBe("servers");
     expect(outcome.changed).toHaveLength(1);
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(original);
+  });
+});
+
+describe("a malformed entry in wrap and unwrap", () => {
+  function write(config: unknown): string {
+    const file = join(mkdtempSync(join(tmpdir(), "mcpcage-config-")), "config.json");
+    writeFileSync(file, JSON.stringify(config, null, 2));
+    return file;
+  }
+  const caged = { command: "mcpcage", args: ["run", "--env", "NODE_OPTIONS=--max-old-space-size=4096", "--", "npx", "-y", "pkg-b"] };
+  const plain = { command: "npx", args: ["-y", "pkg-b"], env: { NODE_OPTIONS: "--max-old-space-size=4096" } };
+
+  it("never takes args that are an object for a wrapped command line, and restores the other entries", () => {
+    // An object whose "0" is "run" looked wrapped: unwrap stopped at it with "args.indexOf is not a
+    // function" and restored nothing in the file.
+    const odd = { command: "mcpcage", args: { "0": "run", "1": "--", "2": "npx", "3": "-y", "4": "pkg-a" }, env: { NODE_OPTIONS: "--max-old-space-size=4096" } };
+    expect(isWrapped(odd as unknown as ServerEntry)).toBe(false);
+    expect(moveHostEnv(odd as unknown as ServerEntry)).toBeUndefined();
+    expect(unwrapEntry(odd as unknown as ServerEntry)).toEqual({ skip: "not wrapped" });
+
+    const file = write({ mcpServers: { odd, caged } });
+    const outcome = unwrapConfig(file, { dryRun: false });
+    expect(outcome.skipped).toEqual([{ name: "odd", reason: "not wrapped" }]);
+    expect(outcome.changed.map((change) => change.name)).toEqual(["caged"]);
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers).toEqual({ odd, caged: plain });
+
+    // As the user runs it: every entry said, and no error.
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+    const again = write({ mcpServers: { odd, caged } });
+    const result = mcpcageWithEnv(fakeUserEnv(home, join(home, "cage")), "unwrap", again, "--dry-run");
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("  restored caged: npx -y pkg-b\n  skipped odd: not wrapped\n");
+  });
+
+  it("leaves an entry that is not an object as it is, says why, and rewrites the others", () => {
+    const file = write({ mcpServers: { empty: null, list: [], text: "npx -y pkg-a", plain } });
+    const wrapped = wrapConfig(file, { dryRun: false, command: "/opt/mcpcage" });
+    const reason = "it is not an object";
+    expect(wrapped.skipped).toEqual([
+      { name: "empty", reason },
+      { name: "list", reason },
+      { name: "text", reason },
+    ]);
+    expect(wrapped.changed.map((change) => change.name)).toEqual(["plain"]);
+    const unwrapped = unwrapConfig(file, { dryRun: false });
+    expect(unwrapped.skipped).toEqual(wrapped.skipped);
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers).toEqual({ empty: null, list: [], text: "npx -y pkg-a", plain });
+  });
+
+  it("never writes back as the command or its arguments a value that is not a string", () => {
+    // Restored, `{"toString": null}` became a command that unwrap could not print, after writing it.
+    const odd = { command: "mcpcage", args: ["run", "--", { toString: null }, "-y", "pkg-a"] };
+    expect(unwrapEntry(odd as unknown as ServerEntry)).toEqual({ skip: "it has an argument that is not a string" });
+    const file = write({ mcpServers: { odd, caged } });
+    const outcome = unwrapConfig(file, { dryRun: false });
+    expect(outcome.skipped).toEqual([{ name: "odd", reason: "it has an argument that is not a string" }]);
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers).toEqual({ odd, caged: plain });
   });
 });
 

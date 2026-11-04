@@ -7,17 +7,24 @@ import { unwrapConfig, wrapConfig } from "../src/config.js";
 // The last step of a rewrite, the rename over the configuration, fails on demand, as it can on a
 // full disk or when mcpcage is killed: the client must still find its whole old file.
 const rename = vi.hoisted(() => ({ fail: false }));
+// One path whose question fails, in place of whatever else could trip up the rewrite of one entry.
+const lookup = vi.hoisted(() => ({ failFor: undefined as string | undefined }));
 vi.mock("node:fs", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:fs")>();
   const renameSync = (from: PathLike, to: PathLike) => {
     if (rename.fail) throw Object.assign(new Error(`EIO: i/o error, rename '${String(from)}' -> '${String(to)}'`), { code: "EIO" });
     original.renameSync(from, to);
   };
-  return { ...original, renameSync };
+  const existsSync = (path: PathLike) => {
+    if (lookup.failFor !== undefined && path === lookup.failFor) throw Object.assign(new Error(`EIO: i/o error, access '${lookup.failFor}'`), { code: "EIO" });
+    return original.existsSync(path);
+  };
+  return { ...original, renameSync, existsSync };
 });
 
 afterEach(() => {
   rename.fail = false;
+  lookup.failFor = undefined;
 });
 
 const memory = { mcpServers: { memory: { command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"] } } };
@@ -84,5 +91,22 @@ describe("wrap and unwrap replace the configuration atomically", () => {
     expect(() => unwrapConfig(file, { dryRun: false })).toThrow("EIO: i/o error, rename");
     expect(readFileSync(file)).toEqual(wrapped);
     expect(leftovers(dir)).toEqual([]);
+  });
+});
+
+describe("one entry whose rewrite fails", () => {
+  it("is left as it is, with the reason, and the other entries of the file are rewritten", () => {
+    // Before, the error left the command and every other server of the file as it was.
+    const { file } = configFile();
+    const stuck = { command: "npx", args: ["-y", "@acme/files-mcp", "/mcpcage-test/unreadable"] };
+    writeFileSync(file, `${JSON.stringify({ mcpServers: { stuck, ...memory.mcpServers } }, null, 2)}\n`);
+    lookup.failFor = "/mcpcage-test/unreadable";
+    const outcome = wrapConfig(file, { dryRun: false, command: "/opt/mcpcage" });
+    expect(outcome.skipped).toEqual([{ name: "stuck", reason: "could not rewrite it: EIO: i/o error, access '/mcpcage-test/unreadable'" }]);
+    expect(outcome.changed.map((change) => change.name)).toEqual(["memory"]);
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers).toEqual({
+      stuck,
+      memory: { command: "/opt/mcpcage", args: ["run", "--", "npx", "-y", "@modelcontextprotocol/server-memory"] },
+    });
   });
 });

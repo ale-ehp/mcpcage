@@ -211,7 +211,7 @@ export function moveHostEnv(entry: ServerEntry): { entry: ServerEntry } | { skip
   const odd = host.find((variable) => variable.to === "container" && typeof variable.value !== "string");
   if (odd !== undefined) return { skip: notAString(odd.name) };
   const names = new Set(host.map((variable) => variable.name));
-  const args = entry.args ?? [];
+  const args = entry.args; // a list: isWrapped asks for one
   const separator = args.indexOf("--");
   const own = args.slice(1, separator === -1 ? args.length : separator);
   const kept: string[] = [];
@@ -295,19 +295,23 @@ export function unwrapConfig(file: string, options: { dryRun: boolean }): WrapOu
 /** The entry a wrapped one was made from: the command after `--`, with the values of its `--env NAME=value` back in `env`. */
 export function unwrapEntry(entry: ServerEntry): { entry: ServerEntry } | { skip: string } {
   if (!isWrapped(entry)) return { skip: "not wrapped" };
-  const args = entry.args ?? [];
+  const args = entry.args; // a list: isWrapped asks for one
   const separator = args.indexOf("--");
   const original = args.slice(separator + 1);
   if (separator === -1 || original.length === 0) return { skip: "unexpected mcpcage arguments" };
+  // They become the command and its arguments again, which are never converted into text: unwrap
+  // wrote such a command back, then stopped printing it ("Cannot convert object to primitive value").
+  if (original.some((arg) => typeof arg !== "string")) return { skip: "it has an argument that is not a string" };
   const restored: ServerEntry = { ...entry, command: original[0], args: original.slice(1) };
   const moved = envValues(args);
   if (moved.length > 0) restored.env = { ...(isJsonObject(entry.env) ? entry.env : {}), ...Object.fromEntries(moved.map((variable) => [variable.name, variable.value])) };
   return { entry: restored };
 }
 
-export function isWrapped(entry: ServerEntry): boolean {
-  // `where mcpcage` gives mcpcage.cmd on Windows.
-  return typeof entry.command === "string" && /(^|[/\\])mcpcage(\.cmd|\.exe)?$/.test(entry.command) && entry.args?.[0] === "run";
+export function isWrapped(entry: ServerEntry): entry is ServerEntry & { command: string; args: string[] } {
+  // `where mcpcage` gives mcpcage.cmd on Windows. The arguments must be a list: an object whose "0"
+  // is "run" looked wrapped too, and unwrap stopped at it with "args.indexOf is not a function".
+  return typeof entry.command === "string" && /(^|[/\\])mcpcage(\.cmd|\.exe)?$/.test(entry.command) && Array.isArray(entry.args) && entry.args[0] === "run";
 }
 
 type Rewrite = (
@@ -343,7 +347,15 @@ function transform(file: string, dryRun: boolean, rewrite: Rewrite): WrapOutcome
     return undefined;
   };
   for (const [name, entry] of Object.entries(servers)) {
-    const after = rewrite(name, entry, skip);
+    // Configuration files are not type-checked, and one entry that trips its rewrite up is left as it
+    // is, with the reason, while the others are rewritten: a null entry, or one whose args were an
+    // object, stopped wrap or unwrap with a TypeError and left every server of the file as it was.
+    let after: ServerEntry | undefined;
+    try {
+      after = isJsonObject(entry) ? rewrite(name, entry, skip) : skip(name, "it is not an object");
+    } catch (error) {
+      after = skip(name, `could not rewrite it: ${error instanceof Error ? error.message : "an unexpected error"}`);
+    }
     if (after) {
       outcome.changed.push({ name, before: entry, after });
       servers[name] = after;
