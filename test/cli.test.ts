@@ -297,6 +297,37 @@ describe("approving past the pin limit", () => {
   });
 });
 
+describe("names of a million characters in diff and approve", () => {
+  it("shows an excerpt of each tool name, key and path, with its full length", () => {
+    const home = freshHome();
+    const dir = join(home, "servers", "long");
+    mkdirSync(dir, { recursive: true });
+    const huge = "\u009b".repeat(1_000_000);
+    const changed = `c${"\u009b".repeat(999_999)}`;
+    // A new tool with a field of that name, and a changed tool that adds a property of that name.
+    const added = { name: huge, description: "Adds.", [huge]: "x" };
+    const before = { name: changed, description: "Old.", inputSchema: { type: "object", properties: {} } };
+    const after = { name: changed, description: "Old.", inputSchema: { type: "object", properties: { [huge]: { type: "string" } } } };
+    const violations = [
+      { kind: "new-tool", name: huge, after: added },
+      { kind: "changed-tool", name: changed, before, after },
+    ];
+    writeFileSync(join(dir, "pending.json"), JSON.stringify({ serverId: "long", seenAt: "2026-11-04T00:00:00.000Z", tools: [added, after], violations }));
+    const spelled = (count: number) => "[U+009B]".repeat(count);
+    const path = `inputSchema.properties.${huge}`;
+    const pathShown = `inputSchema.properties.${spelled(22)}... (${path.length} chars)`;
+    // Before, each name, key and path was spelled out whole: 8 MB apiece.
+    for (const result of [mcpcage(home, "diff", "long"), mcpcage(home, "approve", "long", "--yes")]) {
+      expect(result.stdout.length).toBeLessThan(4_000);
+      const lines = result.stdout.split("\n");
+      expect(lines).toContain(`+ new tool "${spelled(25)}... (1000000 chars)" was not in the approved manifest`);
+      expect(lines).toContain(`    ${spelled(25)}... (1000000 chars): x`);
+      expect(lines).toContain(`~ tool "c${spelled(24)}... (1000000 chars)" changed since it was approved`);
+      expect(lines).toContain(`    ${pathShown}: (absent) -> {"type":"string"}`);
+    }
+  });
+});
+
 describe("server ids", () => {
   afterEach(() => {
     vi.unstubAllEnvs();

@@ -1,5 +1,5 @@
 import { canonicalJson, sha256 } from "./canonical.js";
-import { printable, terminalSafe } from "./terminal.js";
+import { excerpt, printable } from "./terminal.js";
 
 /** A tool as returned by `tools/list`: name, description, inputSchema, annotations... */
 export interface ToolDefinition {
@@ -148,10 +148,12 @@ export function describeViolations(violations: Violation[]): string {
 /**
  * The lines for one violation, so callers can add their own lines under each tool. Names, keys and
  * values are the server's text, so each goes through terminalSafe: printed raw, an escape sequence
- * or a carriage return in them cleared or rewrote the screen the user reads before approving.
+ * or a carriage return in them cleared or rewrote the screen the user reads before approving. Names
+ * and keys are excerpts, as values are clipped: spelled out whole, a tool name of a million U+009B
+ * made 8 MiB of the proxy's block message, of `mcpcage diff` and of `approve`.
  */
 export function describeViolation(violation: Violation): string[] {
-  const name = terminalSafe(violation.name);
+  const name = excerpt(violation.name);
   if (violation.kind === "new-tool") {
     return [`+ new tool "${name}" was not in the approved manifest`, ...indent(fieldsOf(violation.after))];
   }
@@ -175,18 +177,18 @@ function fieldsOf(tool: ToolDefinition): string[] {
   return ordered.flatMap((key) => {
     const value = own(tool, key);
     if (value === undefined) return [];
-    return [`${terminalSafe(key)}: ${clip(typeof value === "string" ? value : canonicalJson(value))}`];
+    return [`${excerpt(key)}: ${clip(typeof value === "string" ? value : canonicalJson(value))}`];
   });
 }
 
-/** Lists the paths that differ between two JSON values, with before and after values, all as terminalSafe shows them. */
+/** Lists the paths that differ between two JSON values, with before and after values, all as terminalSafe shows them, the paths as excerpts. */
 export function jsonChanges(before: unknown, after: unknown, path = ""): string[] {
   if (canonicalJson(before) === canonicalJson(after)) return [];
   const bothObjects =
     before !== null && after !== null && typeof before === "object" && typeof after === "object" &&
     !Array.isArray(before) && !Array.isArray(after);
   if (!bothObjects) {
-    return [`${terminalSafe(path || "(root)")}: ${clip(show(before))} -> ${clip(show(after))}`];
+    return [`${excerpt(path || "(root)")}: ${clip(show(before))} -> ${clip(show(after))}`];
   }
   const changes: string[] = [];
   const keys = new Set([...Object.keys(before as object), ...Object.keys(after as object)]);
