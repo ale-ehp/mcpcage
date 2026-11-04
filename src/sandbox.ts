@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { accessSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
+import { homedir, userInfo } from "node:os";
+import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256 } from "./canonical.js";
 import type { LaunchSpec } from "./launch.js";
@@ -60,7 +60,8 @@ export interface Prepared {
 }
 
 export function dockerAvailable(): { ok: boolean; version?: string; error?: string } {
-  const result = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { encoding: "utf8" });
+  const program = dockerProgram();
+  const result = spawnSync(program.file, ["version", "--format", "{{.Server.Version}}"], { encoding: "utf8", env: program.env });
   if (result.error) return { ok: false, error: result.error.message };
   if (result.status !== 0) return { ok: false, error: result.stderr.trim() || "docker is not running" };
   return { ok: true, version: result.stdout.trim() };
@@ -549,7 +550,9 @@ function packLocal(path: string, context: string): string {
     copyFileSync(source, join(context, "package.tgz"));
     return "./package.tgz";
   }
-  const packed = spawnSync("npm", ["pack", source, "--pack-destination", context, "--json", "--ignore-scripts"], { encoding: "utf8" });
+  const npm = npmProgram();
+  const packed = spawnSync(npm.file, [...npm.args, "pack", source, "--pack-destination", context, "--json", "--ignore-scripts"], { encoding: "utf8", env: npm.env });
+  if (packed.error) throw new Error(`npm pack ${source} failed: ${packed.error.message}`);
   if (packed.status !== 0) throw new Error(`npm pack ${source} failed: ${packed.stderr.trim()}`);
   const [result] = JSON.parse(packed.stdout) as Array<{ filename: string }>;
   if (!result) throw new Error(`npm pack ${source} produced nothing`);
@@ -557,16 +560,116 @@ function packLocal(path: string, context: string): string {
 }
 
 function imageId(reference: string): string | undefined {
-  const result = spawnSync("docker", ["image", "inspect", "--format", "{{.Id}}", reference], { encoding: "utf8" });
+  const program = dockerProgram();
+  const result = spawnSync(program.file, ["image", "inspect", "--format", "{{.Id}}", reference], { encoding: "utf8", env: program.env });
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
 /** Runs docker; its output goes to stderr (stdout belongs to the MCP channel) when `stream` is set. */
 function docker(args: string[], stream = false): string {
-  const result = spawnSync("docker", args, { encoding: "utf8", stdio: stream ? ["ignore", 2, 2] : ["ignore", "pipe", "pipe"] });
+  const program = dockerProgram();
+  const result = spawnSync(program.file, args, { encoding: "utf8", env: program.env, stdio: stream ? ["ignore", 2, 2] : ["ignore", "pipe", "pipe"] });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`docker ${args[0]} failed${stream ? "" : `: ${(result.stderr ?? "").trim()}`}`);
   return result.stdout ?? "";
+}
+
+/** A program mcpcage runs on the host: the file to start, the arguments before its own, and the environment to start it with. */
+export interface HostProgram {
+  /** An absolute path; the bare name when it is found nowhere, so that starting it fails as before. */
+  file: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+}
+
+/*
+ * A client starts mcpcage with its own environment plus the server entry's `env`, PATH included, and
+ * anyone who could write the configuration chose that PATH. mcpcage started the docker it found
+ * first there, and docker runs its credential helpers (`docker build` runs docker-credential-<name>
+ * list, `docker pull` runs get) from the PATH it is given: a `docker` or a `docker-credential-desktop`
+ * put first in the entry's PATH ran on the host, outside any cage, as soon as mcpcage checked for
+ * Docker or built an image; and npm, which mcpcage runs to pack a local package, finds its node with
+ * `#!/usr/bin/env node`. So docker is looked for in the places where Homebrew, Docker Desktop, the
+ * Linux distributions, OrbStack, Rancher Desktop and Nix install it, in this order, and in the PATH
+ * only when none has it; npm likewise, next to the node running mcpcage first. Each runs with a PATH
+ * of these places and the directory it was found in, so what it starts comes from there too. The
+ * rest of the environment stays: DOCKER_HOST, DOCKER_CONFIG and npm_config_* are the user's own
+ * here, because `wrap` moves an entry's into the cage (HOST_ENV in config.ts). The places are POSIX
+ * ones: on Windows docker.exe comes from the PATH, and runs with only its own directory as its PATH.
+ */
+function trustedPlaces(): string[] {
+  if (process.platform === "win32") return [];
+  // The account's home from the user database: HOME is a variable, and a client sets it for mcpcage
+  // from the entry too. An account the database does not know (some containers) gets the system's places only.
+  let home: string | undefined;
+  try {
+    home = userInfo().homedir;
+  } catch {
+    home = undefined;
+  }
+  const own = (path: string) => (home !== undefined && isAbsolute(home) ? [join(home, path)] : []);
+  return [
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/usr/bin",
+    "/bin",
+    ...own(".docker/bin"),
+    ...own(".orbstack/bin"),
+    ...own(".rd/bin"),
+    "/Applications/Docker.app/Contents/Resources/bin",
+    "/run/current-system/sw/bin",
+    ...own(".nix-profile/bin"),
+  ];
+}
+
+/** The docker mcpcage runs, and the environment it runs every docker command with (see trustedPlaces). */
+export function dockerProgram(): HostProgram {
+  const name = process.platform === "win32" ? "docker.exe" : "docker";
+  const file = findProgram(name, trustedPlaces()) ?? findProgram(name, searchPath());
+  return { file: file ?? name, args: [], env: trustedEnv(file === undefined ? [] : [dirname(file)]) };
+}
+
+/** The npm mcpcage runs to pack a local package: the one next to the node running mcpcage, else as docker is found (see trustedPlaces). */
+export function npmProgram(): HostProgram {
+  const here = dirname(process.execPath);
+  if (process.platform === "win32") {
+    // npm.cmd starts only through a shell, which would read a package path as commands: the script
+    // it runs starts with this node alone, from where Node's installer puts it.
+    const script = join(here, "node_modules", "npm", "bin", "npm-cli.js");
+    return existsSync(script) ? { file: process.execPath, args: [script], env: trustedEnv([here]) } : { file: "npm", args: [], env: trustedEnv([]) };
+  }
+  const file = findProgram("npm", [here, ...trustedPlaces()]) ?? findProgram("npm", searchPath());
+  // Its directory comes first in its PATH: `#!/usr/bin/env node` then finds the node installed with it.
+  return { file: file ?? "npm", args: [], env: trustedEnv(file === undefined ? [] : [dirname(file)]) };
+}
+
+/** mcpcage's environment, with a PATH of `first` and the trusted places only. */
+function trustedEnv(first: string[]): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  // Windows compares names without case: a `Path` left next to the new PATH could be the one used.
+  if (process.platform === "win32") for (const name of Object.keys(env)) if (name.toUpperCase() === "PATH") delete env[name];
+  env.PATH = [...new Set([...first, ...trustedPlaces()])].join(delimiter);
+  return env;
+}
+
+/** The absolute directories of mcpcage's PATH: a relative one depends on the directory mcpcage was started in. */
+function searchPath(): string[] {
+  return (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir));
+}
+
+/** The first file named `name` in `dirs` that can be run, symlinks followed; undefined when none has it. */
+function findProgram(name: string, dirs: string[]): string | undefined {
+  for (const dir of dirs) {
+    const file = join(dir, name);
+    try {
+      if (!statSync(file).isFile()) continue;
+      if (process.platform !== "win32") accessSync(file, constants.X_OK);
+      return file;
+    } catch {
+      // not here, or not a program: on to the next
+    }
+  }
+  return undefined;
 }
 
 function launcherPath(): string {

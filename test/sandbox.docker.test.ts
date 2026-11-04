@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { dockerAvailable } from "../src/sandbox.js";
-import { connect, freshHome, mcpcage, root } from "./helpers.js";
+import { fakePrograms, standardDocker } from "./fake-programs.js";
+import { connect, freshHome, mcpcage, mcpcageWithEnv, root } from "./helpers.js";
 
 const probePackage = join(root, "demo", "probe-server");
 const docker = dockerAvailable();
@@ -86,4 +87,13 @@ describe.skipIf(!docker.ok)("caged npm server (real Docker)", () => {
     expect(shown).toContain('"network":"none"');
     expect(shown).toContain('"package":"mcpcage-probe"');
   });
+
+  // A client starts mcpcage with the PATH a server entry sets: what it puts first must not run.
+  it.skipIf(standardDocker === undefined)("packs and builds with the npm next to node and the docker of a standard place, whatever comes first on the PATH", () => {
+    const fake = fakePrograms();
+    const prepared = mcpcageWithEnv({ ...process.env, MCPCAGE_HOME: home, PATH: fake.path }, "prepare", "--id", "probe-path", "--", ...server);
+    expect(prepared.code, prepared.stderr).toBe(0);
+    expect(prepared.stdout).toContain("mcpcage-probe@1.0.0");
+    expect(fake.ran()).toBe("");
+  }, 600_000);
 });

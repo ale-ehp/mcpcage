@@ -163,6 +163,10 @@ async function run(argv: string[]): Promise<number> {
     if (spec.kind === "host") {
       throw new Error(`"${spec.command}" is not an npx command. Use \`mcpcage run -- npx -y <package>\`, \`--image <image>\` for containerized servers, or --no-sandbox.`);
     }
+    // Said before Docker is needed: what the cage leaves open is said even when Docker is missing or the build fails.
+    if (values["allow-net"]) log(`mcpcage: WARNING ${serverId} has network access (--allow-net).`);
+    // The path is the entry's argument; the server id is a plain name (checkServerId, serverIdFor).
+    for (const mount of sensitive) log(terminalSafe(`mcpcage: WARNING --mount ${mount.path} gives ${serverId} ${mount.reason} (--allow-sensitive-mount).`));
     const prepared = prepareSandbox({
       serverId,
       spec,
@@ -178,9 +182,6 @@ async function run(argv: string[]): Promise<number> {
     });
     command = prepared.command;
     args = prepared.args;
-    if (values["allow-net"]) log(`mcpcage: WARNING ${serverId} has network access (--allow-net).`);
-    // The path is the entry's argument; the server id is a plain name (checkServerId, serverIdFor).
-    for (const mount of sensitive) log(terminalSafe(`mcpcage: WARNING --mount ${mount.path} gives ${serverId} ${mount.reason} (--allow-sensitive-mount).`));
     auditLog.write("sandbox", {
       mode: "docker",
       image: prepared.record.image,

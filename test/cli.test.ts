@@ -1,10 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuditLog } from "../src/audit.js";
 import { pinTools } from "../src/manifest.js";
 import { auditDir, checkServerId, serverDir } from "../src/paths.js";
+import { noDocker } from "./fake-programs.js";
 import { connectFake, fakeUserEnv, freshHome, mcpcage, mcpcageWithEnv, root } from "./helpers.js";
 
 /** A control, C1 or format character, raw: what a terminal acts on or hides instead of showing. */
@@ -169,8 +170,8 @@ describe("cli", () => {
     const cage = join(top, "cage");
     const keys = join(home, ".ssh");
     mkdirSync(keys, { recursive: true });
-    // No docker on the PATH: a run that got past the check would stop there, never before it.
-    const env = fakeUserEnv(home, cage, { PATH: join(top, "no-docker-here") });
+    // No Docker to reach: a run that got past the check would stop there, never before it.
+    const env = fakeUserEnv(home, cage, noDocker(top));
     const server = ["--", "npx", "-y", "something"];
 
     const refused = mcpcageWithEnv(env, "run", "--mount", keys, ...server);
@@ -187,8 +188,8 @@ describe("cli", () => {
   it("refuses a memory or CPU limit that is not positive, which Docker reads as no limit", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
     const cage = join(top, "cage");
-    // No docker on the PATH: a run that got past the check would stop there, never before it.
-    const env = fakeUserEnv(join(top, "home"), cage, { PATH: join(top, "no-docker-here") });
+    // No Docker to reach: a run that got past the check would stop there, never before it.
+    const env = fakeUserEnv(join(top, "home"), cage, noDocker(top));
     const server = ["--", "npx", "-y", "something"];
     const memory = (value: string) => `mcpcage: --memory ${value}: give a positive size, such as 512m or 2g (Docker reads 0 as no limit)\n`;
     const cpus = (value: string) => `mcpcage: --cpus ${value}: give a positive number of CPUs, such as 1 or 0.5 (Docker reads 0 as no limit)\n`;
@@ -214,7 +215,7 @@ describe("cli", () => {
     const cage = join(top, "cage");
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, ".zshrc"), "# runs at every new terminal\n");
-    const env = fakeUserEnv(home, cage, { PATH: join(top, "no-docker-here") });
+    const env = fakeUserEnv(home, cage, noDocker(top));
 
     const refused = mcpcageWithEnv(env, "run", "--mount", "~/.zshrc:rw", "--", "npx", "-y", "something");
     expect(refused.code).toBe(1);
@@ -226,8 +227,8 @@ describe("cli", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
     const project = join(top, "project");
     mkdirSync(join(project, ".git"), { recursive: true });
-    // No docker on the PATH: a run that got past the settings would stop there.
-    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), { PATH: join(top, "no-docker-here") });
+    // No Docker to reach: a run that got past the settings would stop there.
+    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), noDocker(top));
     const server = ["--", "npx", "-y", "something"];
     expect(mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server).stderr).toContain("Docker is required");
 
@@ -246,8 +247,8 @@ describe("cli", () => {
     const file = join(project, "app", ".git");
     mkdirSync(join(project, "app"), { recursive: true });
     writeFileSync(file, "gitdir: ../meta\n");
-    // No docker on the PATH: a run that got past the settings would stop there.
-    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), { PATH: join(top, "no-docker-here") });
+    // No Docker to reach: a run that got past the settings would stop there.
+    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), noDocker(top));
     const server = ["--", "npx", "-y", "something"];
     const refused = mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server);
     expect(refused.code).toBe(1);
@@ -265,8 +266,8 @@ describe("cli", () => {
     const project = join(top, "project");
     mkdirSync(join(project, "app"), { recursive: true });
     writeFileSync(join(project, ".mcp.json"), "{}\n");
-    // No docker on the PATH: a run that got past the settings would stop there.
-    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), { PATH: join(top, "no-docker-here") });
+    // No Docker to reach: a run that got past the settings would stop there.
+    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), noDocker(top));
     const server = ["--", "npx", "-y", "something"];
     const system = process.platform === "win32" ? "Windows" : "macOS";
     const refused = mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server);
@@ -289,7 +290,7 @@ describe("cli", () => {
     mkdirSync(decoy);
     // A client sets HOME from the server entry's env; the account's home stays where the keys are.
     const keys = join(userInfo().homedir, ".ssh");
-    const env = fakeUserEnv(decoy, cage, { PATH: join(top, "no-docker-here") });
+    const env = fakeUserEnv(decoy, cage, noDocker(top));
 
     const refused = mcpcageWithEnv(env, "run", "--mount", `${keys}:rw`, "--", "npx", "-y", "something");
     expect(refused.code).toBe(1);
@@ -394,8 +395,8 @@ describe("what wrap and unwrap print", () => {
     const home = freshHome();
     const file = join(home, "mcp.json");
     writeFileSync(file, JSON.stringify({ mcpServers: { [`notes${HOSTILE}`]: { command: "npx", args: ["-y", "pkg-a"] } } }));
-    // No docker on this PATH: the build fails, and says so with the server's name.
-    const result = mcpcageWithEnv({ ...process.env, MCPCAGE_HOME: home, PATH: join(home, "no-docker-here") }, "wrap", file);
+    // No Docker to reach: the build fails, and says so with the server's name.
+    const result = mcpcageWithEnv({ ...process.env, MCPCAGE_HOME: home, ...noDocker(home) }, "wrap", file);
     expect(result.code).toBe(1);
     expect(result.stdout).toContain(`  caged notes${SPELLED}: mcpcage run -- npx -y pkg-a\n`);
     expect(result.stderr).not.toMatch(RAW_CONTROL);
@@ -423,14 +424,11 @@ describe("what run prints from an entry's arguments", () => {
     const key = join(fakeHome, ".ssh", `key${HOSTILE}`);
     mkdirSync(join(fakeHome, ".ssh"), { recursive: true });
     writeFileSync(key, "");
-    // A docker that knows the image and starts a server that ends at once: run gets as far as its warnings.
-    const bin = join(home, "bin");
-    mkdirSync(bin);
-    writeFileSync(join(bin, "docker"), '#!/bin/sh\ncase "$1" in\n  version) echo 29.0.0 ;;\n  image) echo sha256:0123456789ab ;;\nesac\nexit 0\n');
-    chmodSync(join(bin, "docker"), 0o755);
-    const env = fakeUserEnv(fakeHome, join(home, "cage"), { PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` });
+    // The warning comes before Docker is needed: run gets as far as it with no Docker to reach.
+    const env = fakeUserEnv(fakeHome, join(home, "cage"), noDocker(home));
     const result = mcpcageWithEnv(env, "run", "--image", "example/server", "--allow-sensitive-mount", "--mount", key, "--", "serve");
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("Docker is required");
     expect(result.stderr).not.toMatch(RAW_CONTROL);
     expect(result.stderr).toContain(`mcpcage: WARNING --mount ${key.replace(HOSTILE, SPELLED)} gives example-server-`);
   });
@@ -441,14 +439,14 @@ describe("server ids", () => {
     vi.unstubAllEnvs();
   });
 
-  /** A fresh machine: mcpcage's store two levels down, and the commands run with no Docker on the PATH. */
+  /** A fresh machine: mcpcage's store two levels down, and the commands run with no Docker to reach. */
   function machine() {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-ids-"));
     const home = join(top, "home");
     mkdirSync(home);
     const cage = join(top, "cage", "store");
-    // No docker on the PATH: a run that got past the check would stop there, after the audit log.
-    const env = fakeUserEnv(home, cage, { PATH: join(top, "no-docker-here") });
+    // No Docker to reach: a run that got past the check would stop there, after the audit log.
+    const env = fakeUserEnv(home, cage, noDocker(top));
     return { top, cage, env };
   }
 
