@@ -84,7 +84,7 @@ export interface UserConfig {
 export function userConfigs(options: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv }): UserConfig[] {
   const windows = options.platform === "win32";
   const path = windows ? win32 : posix;
-  // The documentation names %USERPROFILE% and %APPDATA% on Windows.
+  // The documentation names %USERPROFILE% and %APPDATA% on Windows (and see Claude Desktop below).
   const home = (windows && options.env.USERPROFILE) || options.home;
   const appData = windows
     ? options.env.APPDATA || path.join(home, "AppData", "Roaming")
@@ -97,6 +97,14 @@ export function userConfigs(options: { platform: NodeJS.Platform; home: string; 
     configs.push(dir === undefined ? { client, file, key } : { client, file: path.join(dir, file), dir, key });
   };
   add("claude-desktop", path.join(appData, "Claude"), "claude_desktop_config.json");
+  // Claude Desktop installed from its MSIX package keeps its configuration in the package's own copy
+  // of AppData\Roaming, which Windows keeps under %LOCALAPPDATA%\Packages: on the Windows 10 machine
+  // this was checked on (Claude 1.6259.1.0, 2026-11-04) the file was there, and %APPDATA%\Claude did
+  // not exist. Both places are listed.
+  if (windows) {
+    const localAppData = options.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
+    add("claude-desktop", path.join(localAppData, "Packages", "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude"), "claude_desktop_config.json");
+  }
   add("claude-code", undefined, path.join(home, ".claude.json"));
   add("cursor", path.join(home, ".cursor"), "mcp.json");
   // On Linux VS Code keeps its user data under $XDG_CONFIG_HOME when that is set (userDataPath.ts in

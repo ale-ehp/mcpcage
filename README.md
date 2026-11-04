@@ -268,7 +268,7 @@ and never writes outside `~/.mcpcage` unless you pass `--fix`:
 
 | Client | Files |
 |---|---|
-| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `%APPDATA%\Claude\claude_desktop_config.json` (Windows), `~/.config/Claude/claude_desktop_config.json` (Linux) |
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `%APPDATA%\Claude\claude_desktop_config.json` and, installed from its MSIX package, `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json` (Windows), `~/.config/Claude/claude_desktop_config.json` (Linux) |
 | Claude Code | `~/.claude.json` (user servers and the servers of every project), `<project>/.mcp.json` |
 | Cursor | `~/.cursor/mcp.json`, `<project>/.cursor/mcp.json` |
 | VS Code | the user profile `mcp.json` (`~/Library/Application Support/Code/User/`, `%APPDATA%\Code\User\`, `~/.config/Code/User/` or `$XDG_CONFIG_HOME/Code/User/` on Linux, also Insiders) and the `mcp.json` of every named profile (`User/profiles/<id>/`), `<project>/.vscode/mcp.json`; comments and trailing commas are understood |

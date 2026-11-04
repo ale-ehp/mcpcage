@@ -270,8 +270,12 @@ describe("client configurations where the environment moves them", () => {
 
   it("counts the Windows clients under another APPDATA, and Devin under the usual one", () => {
     const windows = { home: "C:\\Users\\me", platform: "win32" as const };
-    const options = { ...windows, clients: clientPlaces({ platform: "win32", home: windows.home, env: { APPDATA: "D:\\Roaming" } }) };
+    const options = { ...windows, clients: clientPlaces({ platform: "win32", home: windows.home, env: { APPDATA: "D:\\Roaming", LOCALAPPDATA: "D:\\Local" } }) };
     expect(sensitivePath("D:\\Roaming\\Claude\\claude_desktop_config.json", options)).toBe("the MCP servers and settings of Claude Desktop in D:\\Roaming\\Claude");
+    // Claude Desktop installed from its MSIX package keeps its configuration in the package's copy of AppData\Roaming.
+    expect(sensitivePath("D:\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude\\claude_desktop_config.json", options)).toBe(
+      "the MCP servers and settings of Claude Desktop in D:\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude",
+    );
     expect(sensitivePath("d:/roaming/code/user/mcp.json", options)).toBe(`${vscode} in D:\\Roaming\\Code\\User`);
     expect(sensitivePath("D:\\Roaming\\devin", options)).toBe("the MCP servers and settings of Devin in D:\\Roaming\\devin");
     expect(sensitivePath("D:\\Roaming", options)).toBe("the MCP servers and settings of Claude Desktop in D:\\Roaming, which holds D:\\Roaming\\Claude");

@@ -88,7 +88,7 @@ function dirKey(dir: string): string {
 }
 
 /** The variables that say where clients keep their configurations (see userConfigs in clients.ts). */
-const PLACE_VARIABLES = ["COPILOT_HOME", "XDG_CONFIG_HOME", "APPDATA"];
+const PLACE_VARIABLES = ["COPILOT_HOME", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA"];
 
 /**
  * The variables of an entry's `env` that move, for the mcpcage it starts, the client

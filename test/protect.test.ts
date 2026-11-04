@@ -241,6 +241,7 @@ describe("configuration discovery", () => {
     const locations = discoverConfigs({ platform: "win32", home: "C:\\Users\\ignored", env, project: "C:\\work\\app" });
     expect(locations.map((location) => location.file)).toEqual([
       "C:\\Users\\me\\AppData\\Roaming\\Claude\\claude_desktop_config.json",
+      "C:\\Users\\me\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude\\claude_desktop_config.json",
       "C:\\Users\\me\\.claude.json",
       "C:\\work\\app\\.mcp.json",
       "C:\\Users\\me\\.cursor\\mcp.json",
@@ -256,6 +257,23 @@ describe("configuration discovery", () => {
       "C:\\work\\app\\.devin\\mcp_config.local.json",
     ]);
     expect(locations.every((location) => !location.exists)).toBe(true);
+  });
+
+  it("finds Claude Desktop's file in its MSIX package too, under %LOCALAPPDATA%", () => {
+    // Installed from its MSIX package, Claude Desktop keeps its configuration in the package's own
+    // copy of AppData\Roaming, and %APPDATA%\Claude may not exist at all.
+    const desktop = (env: NodeJS.ProcessEnv) =>
+      discoverConfigs({ platform: "win32", home: "C:\\Users\\me", env, project: "C:\\work" }).filter((location) => location.client === "claude-desktop").map((location) => location.file);
+    expect(desktop({ LOCALAPPDATA: "D:\\Local" })).toEqual([
+      "C:\\Users\\me\\AppData\\Roaming\\Claude\\claude_desktop_config.json",
+      "D:\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude\\claude_desktop_config.json",
+    ]);
+    // A server given that directory could add servers of its own to Claude Desktop: never mounted.
+    expect(broadAccessKind("C:\\Users\\me\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude", "C:\\Users\\me")).toBe(
+      "the MCP servers and settings of Claude Desktop in ~\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude",
+    );
+    // macOS and Linux have one place, as before.
+    expect(discoverConfigs({ platform: "linux", home: "/home/me", env: { LOCALAPPDATA: "/x" }, project: "/work" }).filter((location) => location.client === "claude-desktop")).toHaveLength(1);
   });
 
   it("lists ~/.cursor/mcp.json once when the project is the home directory", () => {
@@ -1407,8 +1425,10 @@ describe("mcpcage protect", () => {
     expect(line("devin-tool")).toMatch(/^ {2}devin-tool {4}npx -y @acme\/devin-tool +NOT CAGED$/);
     // The files that do not exist are counted on one line and their clients listed once each on the next, just before the summary.
     const absent = discoverConfigs({ platform: process.platform, home, env: {}, project }).filter((location) => !existsSync(location.file));
-    expect(absent.map((location) => location.clientName)).toEqual(["Cursor", "VS Code", "GitHub Copilot CLI", "Windsurf", "Windsurf", "Devin", "Devin"]);
-    expect(out).toContain(["", "Not found: 7 other configuration files", "  Cursor, VS Code, GitHub Copilot CLI, Windsurf, Devin", "", "Summary", ""].join("\n"));
+    // On Windows Claude Desktop has a second place, in its MSIX package, which this machine leaves empty.
+    const msix = process.platform === "win32" ? ["Claude Desktop"] : [];
+    expect(absent.map((location) => location.clientName)).toEqual([...msix, "Cursor", "VS Code", "GitHub Copilot CLI", "Windsurf", "Windsurf", "Devin", "Devin"]);
+    expect(out).toContain(["", `Not found: ${7 + msix.length} other configuration files`, `  ${[...msix, "Cursor", "VS Code", "GitHub Copilot CLI", "Windsurf", "Devin"].join(", ")}`, "", "Summary", ""].join("\n"));
     for (const location of absent) expect(out).not.toContain(location.scope === "user" ? tilde(location.file, home) : location.file);
     expect(out).not.toContain("(absent)");
     // ${input:token} is filled in by the client: not a secret written in the file.
@@ -1416,7 +1436,7 @@ describe("mcpcage protect", () => {
     expect(out).toContain(
       [
         "Summary",
-        "  12 servers in 7 configuration files (14 files checked, 7 absent).",
+        `  12 servers in 7 configuration files (${14 + msix.length} files checked, ${7 + msix.length} absent).`,
         "  8 run on your machine with your permissions and no cage.          -> mcpcage protect --fix",
         "  1 keeps a secret in clear text in a configuration file.",
         "  1 can reach your whole home directory, the disk or a directory with credentials.",
@@ -2543,13 +2563,15 @@ describe("an entry's env that moves the client configurations run refuses to mou
       same: wrapped({ COPILOT_HOME: copilotHome }),
       // VS Code reads it on Linux only.
       xdg: wrapped({ XDG_CONFIG_HOME: join(top, "never-printed") }),
+      // Claude Desktop installed from its MSIX package keeps its configuration there, on Windows.
+      local: wrapped({ LOCALAPPDATA: join(top, "never-printed") }),
     };
     const cursor = locationsFor(home, project)("cursor", "user");
     writeJsonFile(cursor, { mcpServers: servers });
     const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path, COPILOT_HOME: copilotHome });
     const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
     const line = (name: string) => `${" ".repeat(16)}env ${name}: differs from yours, so mcpcage run would look for the clients' configurations elsewhere, and its mount check would miss the real place`;
-    const moves = ["moved", "odd", ...(process.platform === "linux" ? ["xdg"] : [])];
+    const moves = ["moved", "odd", ...(process.platform === "linux" ? ["xdg"] : []), ...(process.platform === "win32" ? ["local"] : [])];
 
     const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
     expect(`${scan.stdout}${scan.stderr}`).not.toContain("never-printed");
@@ -2558,6 +2580,7 @@ describe("an entry's env that moves the client configurations run refuses to mou
     expect(scan.stdout).toContain(`${lineOf(scan.stdout, "odd")}\n${line("COPILOT_HOME")}\n  same `);
     expect(lineOf(scan.stdout, "same")).toMatch(/ {2}caged$/);
     if (process.platform !== "linux") expect(lineOf(scan.stdout, "xdg")).toMatch(/ {2}caged$/);
+    if (process.platform !== "win32") expect(lineOf(scan.stdout, "local")).toMatch(/ {2}caged$/);
     expect(scan.stdout).toContain(`  ${moves.length} run on your machine with your permissions and no cage.`);
     expect(scan.code).toBe(1);
 

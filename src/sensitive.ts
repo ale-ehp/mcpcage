@@ -73,7 +73,7 @@ export function thisMachine(): SensitiveOptions {
  * userConfigs): each file, and the client's own directory when the file is in one. The places in
  * the home directory below are only where the clients keep them by default: VS Code under an
  * absolute XDG_CONFIG_HOME on Linux, GitHub Copilot under COPILOT_HOME and the Windows clients
- * under another APPDATA were ordinary paths, mounted writable by `wrap`.
+ * under another APPDATA (or LOCALAPPDATA) were ordinary paths, mounted writable by `wrap`.
  */
 export function clientPlaces(options: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv }): Array<{ path: string; what: string }> {
   return userConfigs(options).flatMap((config) => {
@@ -133,6 +133,7 @@ const IN_HOME: ReadonlyArray<{ path: string; what: string; platform?: NodeJS.Pla
   { path: ".config/Cursor", what: settingsOf("Cursor"), platform: "linux" },
   { path: ".config/Windsurf", what: settingsOf("Windsurf"), platform: "linux" },
   { path: "AppData/Roaming/Claude", what: settingsOf("Claude Desktop"), platform: "win32" },
+  { path: "AppData/Local/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude", what: settingsOf("Claude Desktop"), platform: "win32" },
   { path: "AppData/Roaming/Code", what: settingsOf("VS Code"), platform: "win32" },
   { path: "AppData/Roaming/Code - Insiders", what: settingsOf("VS Code Insiders"), platform: "win32" },
   { path: "AppData/Roaming/Cursor", what: settingsOf("Cursor"), platform: "win32" },
