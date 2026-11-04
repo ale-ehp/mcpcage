@@ -37,6 +37,22 @@ export function nodeScript(entry: { command?: unknown; args?: unknown }, platfor
   return node && typeof script === "string" && win32.basename(script).toLowerCase() === "cli.js" && run === "run" ? script : undefined;
 }
 
+/**
+ * The path of a command that lives in npm's npx cache, as `npx mcpcage` runs mcpcage from it, or
+ * undefined. npx installs a package in <cache>/_npx/<hash>/node_modules and puts its .bin first on
+ * the PATH it gives the program; `npm cache npx rm` deletes that directory, and a later npx of the
+ * same package installs over it. Written into configurations, such a command made every caged
+ * server stop starting once it was gone. Looked at as written and with links followed: on macOS
+ * and Linux the bin is a link into the package.
+ */
+export function npxCached(command: McpcageCommand): string | undefined {
+  const files = typeof command === "string" ? [command] : [command.node, command.script];
+  return files.find((file) => [file, realFile(file)].some((path) => path !== undefined && NPX_CACHE.test(path)));
+}
+
+/** A path inside npx's directory of npm's cache: _npx, then the directory of one install, then its node_modules. */
+const NPX_CACHE = /(?:^|[\\/])_npx[\\/][^\\/]+[\\/]node_modules(?:[\\/]|$)/i;
+
 /** A command whose file depends on something not known here: the directory the client starts it from. */
 const UNKNOWN = Symbol("unknown");
 
