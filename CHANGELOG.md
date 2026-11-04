@@ -3,6 +3,28 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-11-04
+
+### Fixed
+
+- `protect --fix` and `wrap` run through `pnpm dlx`, `yarn dlx` or `bunx` wrote the runner's copy of
+  mcpcage into configurations (on Windows its `cli.js`, for pnpm the one in its store), which the
+  runner deletes or replaces (yarn as soon as mcpcage exits): every caged server then stopped
+  starting. 0.6.0 refused only npx's. They now refuse any mcpcage in a temporary place, the system's
+  temporary directory, npm's `_npx` or pnpm's dlx cache, an explicit `--command` included, and say
+  to install mcpcage (`npm install -g mcpcage`) or to pass `--command`. `protect` without `--fix`
+  still works from any of them.
+- `npx mcpcage protect` said of an entry caged by the installed mcpcage that it starts "not the
+  mcpcage on your PATH" (on Windows "not mcpcage's cli.js and your node") and counted it as running
+  uncaged, and `--fix` refused though mcpcage was installed; `pnpm dlx` and `bunx` likewise. The
+  runner puts its own directories first on the PATH it gives mcpcage, which took them for yours.
+  Run from a temporary place, mcpcage leaves out of your PATH the directories in a temporary place,
+  every `node_modules/.bin` and npm's `node-gyp-bin`, finds the installed mcpcage past them (on
+  Windows the `cli.js` npm installs next to its `mcpcage.cmd`), counts what it caged as caged, and
+  `--fix` writes it. An entry whose `PATH` names one of those directories is no longer taken for
+  one on yours, and a look-alike mcpcage in a project's `node_modules/.bin` is never taken for the
+  installed one.
+
 ## [0.6.0] - 2026-11-04
 
 Windows. Run on a Windows 10 PC for the first time, the unit suite gave 62 failed, 254 passed, and
