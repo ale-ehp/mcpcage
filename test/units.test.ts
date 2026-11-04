@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, parse, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
@@ -290,19 +290,21 @@ describe("sandbox command", () => {
   });
 
   // Byte for byte what mcpcage gave Docker before Windows had places of its own in the cage.
-  it("mounts each path at the same path on macOS and Linux", () => {
+  it("mounts each path at the same path on macOS and Linux, and gives the server its arguments as they are", () => {
     const mounts: Mount[] = [
       { source: "/Users/me/proj", target: "/Users/me/proj", readOnly: false },
       { source: "/Users/me/proj/.git", target: "/Users/me/proj/.git", readOnly: true },
       { source: "/Users/me/My Notes", target: "/Users/me/My Notes", readOnly: true },
     ];
+    const server = ["/Users/me/proj", "/Users/me/proj/src/../new.txt", "/USERS/ME/PROJ", "~/proj", "--root=/Users/me/proj", "C:\\Users\\me\\proj"];
     for (const platform of ["darwin", "linux"] as const) {
-      const args = runArgs({ ...base, mounts }, "img", platform);
+      const args = runArgs({ ...base, spec: { ...base.spec, args: server }, mounts }, "img", platform);
       expect(args.filter((arg, index) => args[index - 1] === "--mount")).toEqual([
         "type=bind,source=/Users/me/proj,target=/Users/me/proj",
         "type=bind,source=/Users/me/proj/.git,target=/Users/me/proj/.git,readonly",
         "type=bind,source=/Users/me/My Notes,target=/Users/me/My Notes,readonly",
       ]);
+      expect(args.slice(args.indexOf("img"))).toEqual(["img", ...server]);
     }
   });
 
@@ -328,7 +330,50 @@ describe("sandbox command", () => {
     }
   });
 
+  it("gives the server on Windows each argument that names a mounted path as its place in the cage", () => {
+    const mounts: Mount[] = [
+      { source: "C:\\Users\\me\\proj", target: "C:\\Users\\me\\proj", readOnly: false },
+      { source: "C:\\Users\\me\\proj\\.git", target: "C:\\Users\\me\\proj\\.git", readOnly: true },
+      { source: "D:\\My Notes", target: "D:\\My Notes", readOnly: true },
+    ];
+    const server: Array<[string, string]> = [
+      ["C:\\Users\\me\\proj", "/c/Users/me/proj"],
+      // Compared as Windows compares paths; the names below the mount stay as written.
+      ["c:/users/ME/Proj/Src/New File.txt", "/c/Users/me/proj/Src/New File.txt"],
+      ["C:\\Users\\me\\proj\\", "/c/Users/me/proj"],
+      ["C:\\Users\\me\\proj\\.git\\config", "/c/Users/me/proj/.git/config"],
+      ["D:\\My Notes\\a\\..\\b", "/d/My Notes/b"],
+      // Outside every mount, or not a whole path: as written.
+      ["C:\\Users\\me\\project", "C:\\Users\\me\\project"],
+      ["C:\\Users\\me\\proj\\..\\other", "C:\\Users\\me\\proj\\..\\other"],
+      ["--root=C:\\Users\\me\\proj", "--root=C:\\Users\\me\\proj"],
+      ["\\\\server\\share\\proj", "\\\\server\\share\\proj"],
+      ["proj", "proj"],
+      ["--flag", "--flag"],
+    ];
+    const args = runArgs({ ...base, spec: { ...base.spec, args: server.map(([arg]) => arg) }, mounts }, "img", "win32");
+    expect(args.slice(args.indexOf("img") + 1)).toEqual(server.map(([, given]) => given));
+    // Without a mount, nothing is a mounted path.
+    const alone = runArgs({ ...base, spec: { ...base.spec, args: ["C:\\Users\\me\\proj"] } }, "img", "win32");
+    expect(alone.at(-1)).toBe("C:\\Users\\me\\proj");
+  });
+
   describe.runIf(process.platform === "win32")("on Windows", () => {
+    it("gives the server a mounted path written from ~/, without a drive or with 8.3 short names as its place in the cage", () => {
+      const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "mcpcage-args-")));
+      const mounts = [parseMount(dir)];
+      const given = (arg: string) => runArgs({ ...base, spec: { ...base.spec, args: [arg] }, mounts }, "img").at(-1);
+      expect(given(join(dir, "notes.md"))).toBe(`${inCage(dir)}/notes.md`);
+      if (parse(process.cwd()).root.toLowerCase() === parse(dir).root.toLowerCase()) expect(given(dir.slice(2))).toBe(inCage(dir));
+      const home = runArgs({ ...base, spec: { ...base.spec, args: ["~/notes"] }, mounts: [{ source: join(homedir(), "notes"), target: join(homedir(), "notes"), readOnly: true }] }, "img");
+      expect(home.at(-1)).toBe(`${inCage(homedir())}/notes`);
+      if (existsSync("C:\\PROGRA~1")) {
+        const programs = [parseMount("C:\\PROGRA~1\\")];
+        const short = runArgs({ ...base, spec: { ...base.spec, args: ["C:\\PROGRA~1\\x", `${realpathSync.native("C:\\PROGRA~1")}\\x`] }, mounts: programs }, "img");
+        expect(short.slice(-2)).toEqual([`${inCage(programs[0]!.source)}/x`, `${inCage(programs[0]!.source)}/x`]);
+      }
+    });
+
     it("mounts a folder at one place in the cage however it is written, as the system spells it on disk", () => {
       // The container compares paths with case: a read-only mount spelled one way did not cover the
       // same folder in a writable mount spelled another way.

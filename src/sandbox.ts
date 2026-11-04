@@ -123,8 +123,49 @@ export function runArgs(
   for (const mount of options.mounts) {
     args.push("--mount", `type=bind,source=${mount.source},target=${cagePath(mount.target, platform)}${mount.readOnly ? ",readonly" : ""}`);
   }
-  args.push(image, ...options.spec.args);
+  args.push(image, ...cageArgs(options.spec.args, options.mounts, platform));
   return args;
+}
+
+/**
+ * The server's arguments as the server is given them in the cage. On Windows each argument that names
+ * a mounted path, or a path inside one, becomes its place there (cagePath): in the container
+ * C:\Users\me\notes names nothing, and server-filesystem, given it, stopped at start. Only whole
+ * arguments, absolute or starting with `~/`, as hostPath (config.ts) reads the paths `wrap` mounts;
+ * compared as Windows compares paths, without case and with either separator, each folder on the way
+ * also as the system spells it on disk, as hostMount spells the mounts: C:\Users\RUNNER~1\x is in a
+ * mount of C:\Users\runneradmin\x. The names below the mount stay as written. Every other argument
+ * stays as it is, and so does every argument on macOS and Linux, where the cage has the host's paths.
+ * Paths in tool calls are not translated: the model uses the ones the server lists.
+ */
+function cageArgs(args: string[], mounts: Mount[], platform: NodeJS.Platform): string[] {
+  if (platform !== "win32" || mounts.length === 0) return args;
+  const mounted = new Map<string, Mount>();
+  for (const mount of mounts) {
+    const key = win32.resolve(mount.source).toLowerCase();
+    if (!mounted.has(key)) mounted.set(key, mount);
+  }
+  // A Windows path can be looked up on Windows only.
+  const onDisk = (path: string) => {
+    if (process.platform !== "win32") return undefined;
+    try {
+      return realpathSync.native(path);
+    } catch {
+      return undefined;
+    }
+  };
+  return args.map((arg) => {
+    const written = arg.startsWith("~/") ? win32.join(homedir(), arg.slice(2)) : arg;
+    // \\server\share and the like are on no drive, so in no mount.
+    if (!win32.isAbsolute(written) || /^[\\/]{2}/.test(written)) return arg;
+    const below: string[] = [];
+    for (let dir = win32.resolve(written); ; dir = win32.dirname(dir)) {
+      const mount = mounted.get(dir.toLowerCase()) ?? mounted.get(onDisk(dir)?.toLowerCase() ?? "");
+      if (mount !== undefined) return [cagePath(mount.target, platform), ...below].join("/");
+      if (win32.dirname(dir) === dir) return arg;
+      below.unshift(win32.basename(dir));
+    }
+  });
 }
 
 /** `--mount ~/notes` mounts read-only at the same path; `--mount ~/out:rw` makes it writable. */
