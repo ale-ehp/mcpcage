@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -8,8 +8,23 @@ import { describe, expect, it, vi } from "vitest";
 import { unwrapConfig, wrapConfig } from "../src/config.js";
 import { parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
-import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep } from "../src/manifest.js";
+import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep, type Pin } from "../src/manifest.js";
+import { approvePending, loadPin, savePending } from "../src/pinstore.js";
 import { dockerfile, parseMount, runArgs } from "../src/sandbox.js";
+import { describeViolationsWithFindings } from "../src/suspicious.js";
+
+/** Runs `body` with mcpcage's data in a fresh directory, as the CLI sees it when MCPCAGE_HOME is set. */
+function inFreshHome(body: (home: string) => void): void {
+  const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+  const before = process.env.MCPCAGE_HOME;
+  process.env.MCPCAGE_HOME = home;
+  try {
+    body(home);
+  } finally {
+    if (before === undefined) delete process.env.MCPCAGE_HOME;
+    else process.env.MCPCAGE_HOME = before;
+  }
+}
 
 describe("launch parsing", () => {
   it("understands the npx forms MCP clients use", () => {
@@ -74,6 +89,44 @@ describe("manifest pinning", () => {
     expect(tooDeep([tool, { name: "over", inputSchema: objects(256) }])?.name).toBe("over");
     expect(tooDeep([tool, { name: "listed", inputSchema: arrays(256) }])?.name).toBe("listed");
     expect(tooDeep([{ name: "far", inputSchema: objects(100_000) }])?.name).toBe("far");
+  });
+
+  it("leaves a pending definition nested too deep out when it saves the next listing", () => {
+    inFreshHome((home) => {
+      // An older version saved this one; writing it again would run JSON.stringify out of stack.
+      const nested = `{"name":"nested","inputSchema":${'{"items":'.repeat(10_000)}{}${"}".repeat(10_000)}}`;
+      mkdirSync(join(home, "servers", "s"), { recursive: true });
+      writeFileSync(join(home, "servers", "s", "pending.json"), `{"serverId":"s","seenAt":"x","tools":[${nested}],"violations":[]}`);
+      const pending = savePending("s", [tool], [{ kind: "new-tool", name: "add", after: tool }]);
+      expect(pending.tools.map((saved) => saved.name)).toEqual(["add"]);
+      expect(JSON.parse(readFileSync(join(home, "servers", "s", "pending.json"), "utf8")).tools).toEqual([tool]);
+    });
+  });
+
+  it("leaves an approved definition nested too deep out of the pin it loads, so the tool needs a fresh approval", () => {
+    inFreshHome((home) => {
+      // An older version approved it, as deep as its stack allowed. Written as text: JSON.stringify recurses.
+      const nested = `{"name":"nested","inputSchema":${'{"items":'.repeat(5_000)}{}${"}".repeat(5_000)}}`;
+      const entry = (definition: string, hash: string) => `{"hash":"${hash}","definition":${definition}}`;
+      const tools = `{"add":${entry(JSON.stringify(tool), toolFingerprint(tool))},"nested":${entry(nested, "legacy")}}`;
+      mkdirSync(join(home, "servers", "s"), { recursive: true });
+      writeFileSync(join(home, "servers", "s", "pin.json"), `{"version":1,"serverId":"s","approvedAt":"x","tools":${tools}}`);
+      const warned: string[] = [];
+      const pin = loadPin("s", (message) => warned.push(message))!;
+      expect(Object.keys(pin.tools)).toEqual(["add"]);
+      expect(warned).toEqual([
+        'mcpcage: left out the approved tool "nested" of s: its definition is nested more than 256 levels deep, so it counts as new and needs a fresh approval',
+      ]);
+      // Listed again, it is a new tool: neither the explanation nor the approval touches the old definition.
+      const listed = { name: "nested", description: "Takes a list of lists." };
+      const violations = checkTools(pin, [tool, listed]);
+      expect(violations).toEqual([{ kind: "new-tool", name: "nested", after: listed }]);
+      expect(describeViolationsWithFindings(violations)).toContain('+ new tool "nested" was not in the approved manifest');
+      savePending("s", [tool, listed], violations);
+      expect(Object.keys(approvePending("s", () => {})!.tools)).toEqual(["add", "nested"]);
+      const written = JSON.parse(readFileSync(join(home, "servers", "s", "pin.json"), "utf8")) as Pin;
+      expect(written.tools.nested!.definition).toEqual(listed);
+    });
   });
 
   it("describes changes by path", () => {

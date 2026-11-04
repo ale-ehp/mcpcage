@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isJsonObject } from "./jsonc.js";
 import { LineSplitter, MAX_LINE_BYTES } from "./lines.js";
-import { isToolList, MAX_TOOLS, type ToolDefinition } from "./manifest.js";
+import { isToolList, MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, type ToolDefinition } from "./manifest.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const VERSION = packageVersion();
@@ -83,7 +83,8 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
       if (!isJsonObject(message)) return;
       if (typeof message.method === "string") {
         // A request from the server (ping, roots/list...): answer it, so the server does not wait for us.
-        if (message.id !== undefined && message.id !== null) {
+        // Only an id JSON-RPC allows is echoed back: a nested one would be serialized again.
+        if (typeof message.id === "string" || typeof message.id === "number") {
           send(message.method === "ping" ? { id: message.id, result: {} } : { id: message.id, error: { code: -32601, message: "Method not found" } });
         }
         return;
@@ -93,7 +94,12 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
       if (id === undefined || method === undefined) return;
       waiting.delete(id);
       if (message.error !== undefined) {
-        const reason = isJsonObject(message.error) && typeof message.error.message === "string" ? message.error.message : JSON.stringify(message.error);
+        const reason =
+          isJsonObject(message.error) && typeof message.error.message === "string"
+            ? message.error.message
+            : nestedDeeperThan(message.error, MAX_DEPTH)
+              ? "an error nested too deep to show"
+              : JSON.stringify(message.error);
         finish(new Error(`the server answered ${method} with an error: ${reason.slice(0, 300)}`));
         return;
       }

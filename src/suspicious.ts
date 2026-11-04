@@ -1,5 +1,5 @@
 import { canonicalJson } from "./canonical.js";
-import { describeViolation, type ToolDefinition, type Violation } from "./manifest.js";
+import { describeViolation, MAX_DEPTH, nestedDeeperThan, type ToolDefinition, type Violation } from "./manifest.js";
 
 /*
  * Explains why a tool definition looks dangerous, with fixed rules: no model, no network, no
@@ -331,7 +331,10 @@ export function resultTexts(response: { result?: unknown; error?: unknown }): Ar
     if (type === "text" && typeof text === "string") texts.push([`content[${index}].text`, text]);
     else if (type === "resource" && typeof resource?.text === "string") texts.push([`content[${index}].resource.text`, resource.text]);
   }
-  if (result.structuredContent !== undefined) texts.push(["structuredContent", JSON.stringify(result.structuredContent)]);
+  // Serialized only when it is shallow enough: JSON.stringify recurses (see scanResult).
+  if (result.structuredContent !== undefined && !nestedDeeperThan(result.structuredContent, MAX_DEPTH)) {
+    texts.push(["structuredContent", JSON.stringify(result.structuredContent)]);
+  }
   if (typeof error.message === "string") texts.push(["error.message", error.message]);
   return texts.filter(([, text]) => text !== "");
 }
@@ -341,8 +344,13 @@ export function resultTexts(response: { result?: unknown; error?: unknown }): Ar
  * as text too, so a sign found in both is one sign.
  */
 export function scanResult(response: { result?: unknown; error?: unknown }): Finding[] {
+  const findings = scanWithinBudget(resultTexts(response), scanResultText, RESULT_OVER_BUDGET);
+  // structuredContent nested too deep is not serialized to be read, and a sign says so.
+  if (nestedDeeperThan((response.result as { structuredContent?: unknown } | null | undefined)?.structuredContent, MAX_DEPTH)) {
+    findings.push({ ...RESULT_OVER_BUDGET, field: "structuredContent", snippet: `nested more than ${MAX_DEPTH} levels deep`, message: "too deep to read, so it was not checked" });
+  }
   const unique = new Map<string, Finding>();
-  for (const finding of tidy(scanWithinBudget(resultTexts(response), scanResultText, RESULT_OVER_BUDGET))) {
+  for (const finding of tidy(findings)) {
     const key = JSON.stringify([finding.rule, finding.snippet]);
     if (!unique.has(key)) unique.set(key, finding);
   }

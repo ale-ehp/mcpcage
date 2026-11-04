@@ -45,6 +45,12 @@ proxy, abuse inside the cage, mounts that undo it, and a first CodeQL scan.
 - The hidden-instruction rules read a text in windows of 1 MiB, at most 100 matches per rule per
   window, and at most 20,000 strings or 32 Mi characters per definition or result; a `scan-budget`
   sign stands for the rest.
+- Nothing a server sends that is nested more than 256 levels deep is serialized again or walked:
+  a tool result like that passes unchanged, unmeasured (`call-result` records no size) and with a
+  `scan-budget` sign; an answer nobody asked for or a batch message like that is dropped
+  (`deep-message`); a pin or pending entry like that, written by an older version, is left out and
+  the tool counts as new. The inspect client answers a server's requests only when their id is a
+  string or a number.
 - The cage gets no swap: `--memory-swap` equals `--memory`. Before, Docker allowed as much swap
   again on a host that has some, and the limit doubled.
 

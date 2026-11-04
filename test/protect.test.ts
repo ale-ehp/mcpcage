@@ -836,6 +836,19 @@ describe("listing a server's tools", () => {
     expect(tooDeep(tools)?.name).toBe("nested");
   });
 
+  it("echoes no id JSON-RPC does not allow, and shows a deep error without walking it", async () => {
+    // A request whose id is nested 10,000 levels deep, then an error as deep in answer to initialize.
+    const server = [
+      `const deep = "[".repeat(10_000) + "]".repeat(10_000);`,
+      `process.stdout.write('{"jsonrpc":"2.0","id":' + deep + ',"method":"ping"}\\n');`,
+      `process.stdin.once("data", () => process.stdout.write('{"jsonrpc":"2.0","id":1,"error":' + deep + '}\\n'));`,
+      `setInterval(() => {}, 1000);`,
+    ].join("\n");
+    await expect(listTools(process.execPath, ["-e", server], process.env, 15_000)).rejects.toThrow(
+      "the server answered initialize with an error: an error nested too deep to show",
+    );
+  });
+
   it("refuses a server that lists more than 10,000 tools, without keeping them", async () => {
     // One line of 200,000 tools: appending them in one call threw inside the line handler and ended the process.
     await expect(listTools(process.execPath, [hostileServer, "many"], process.env, 15_000)).rejects.toThrow(

@@ -4,7 +4,7 @@ import type { Readable, Writable } from "node:stream";
 import { AuditLog } from "./audit.js";
 import { canonicalJson, sha256 } from "./canonical.js";
 import { LineSplitter, MAX_LINE_BYTES } from "./lines.js";
-import { checkTools, isToolList, MAX_DEPTH, MAX_TOOLS, pinTools, tooDeep, type Pin, type ToolDefinition } from "./manifest.js";
+import { checkTools, isToolList, MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, pinTools, tooDeep, type Pin, type ToolDefinition } from "./manifest.js";
 import { loadPin, savePending, savePin } from "./pinstore.js";
 import { countFindings, countSuspicious, describeResultSigns, describeViolationsWithFindings, highSeveritySigns, scanResult } from "./suspicious.js";
 
@@ -62,7 +62,7 @@ type Message = { jsonrpc?: string; id?: Id | null; method?: string; params?: any
  */
 export function runProxy(options: ProxyOptions): Promise<number> {
   const { serverId, audit, log, strict, allowServerRequests } = options;
-  let pin: Pin | undefined = loadPin(serverId);
+  let pin: Pin | undefined = loadPin(serverId, log);
   let pinnedThisSession = false;
   /** Why the session is locked, once a listing was blocked: every call is refused from then on. */
   let locked: string | undefined;
@@ -211,20 +211,24 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     const request = isId(id) ? fromClient.get(id) : undefined;
     if (!isId(id) || !request) {
       // An answer to a request the client never sent, or a second answer to one it already got: a
-      // client could take it for the answer to a request of its own.
-      audit.write("unsolicited-response", { id: id ?? null });
-      log(`mcpcage: dropped a response from the server to a request the client is not waiting for (id ${JSON.stringify(id ?? null)})`);
+      // client could take it for the answer to a request of its own. An id nested too deep is not
+      // recorded as it is: writing it down would run out of stack.
+      const shown = nestedDeeperThan(id, MAX_DEPTH) ? `(nested more than ${MAX_DEPTH} levels deep)` : (id ?? null);
+      audit.write("unsolicited-response", { id: shown });
+      log(`mcpcage: dropped a response from the server to a request the client is not waiting for (id ${JSON.stringify(shown)})`);
       return undefined;
     }
     fromClient.delete(id);
 
     if (request.method === "tools/call") {
+      const answer = message.result ?? message.error ?? null;
       audit.write("call-result", {
         id,
         tool: request.tool,
         ok: message.error === undefined && message.result?.isError !== true,
         ms: Date.now() - request.started,
-        bytes: JSON.stringify(message.result ?? message.error ?? null).length,
+        // Measured by serializing it again, which a result nested too deep would run out of stack.
+        bytes: nestedDeeperThan(answer, MAX_DEPTH) ? null : JSON.stringify(answer).length,
       });
       resultSigns(id, request.tool ?? "", message);
       return message;
@@ -297,8 +301,17 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     const out = messages.map(fromServer).filter((message) => message !== undefined);
     if (out.length === 0) return;
     // A line passed whole reaches the client exactly as the server wrote it; a batch keeps only what passed.
-    if (out.length === values.length && out.every((message, index) => message === values[index])) toClient(line);
-    else toClient(out.length === 1 ? out[0]! : out);
+    if (out.length === values.length && out.every((message, index) => message === values[index])) {
+      toClient(line);
+      return;
+    }
+    // What is kept from a batch is serialized again: a message nested too deep would run out of stack.
+    const kept = out.filter((message) => !nestedDeeperThan(message, MAX_DEPTH));
+    if (kept.length < out.length) {
+      audit.write("deep-message", { dropped: out.length - kept.length });
+      log(`mcpcage: dropped ${out.length - kept.length} message(s) from a batch of the server, nested more than ${MAX_DEPTH} levels deep`);
+    }
+    if (kept.length > 0) toClient(kept.length === 1 ? kept[0]! : kept);
   };
   const serverLines = new LineSplitter(MAX_LINE_BYTES, fromServerLine, (bytes) => {
     audit.write("oversize-line", { bytes });

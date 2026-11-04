@@ -6,6 +6,10 @@
 //                JSON-RPC, an answer without "jsonrpc", a batch of junk, a batch of a notification and junk
 //   unsolicited  before answering tools/list, answers id 999, never asked; after, answers tools/list again
 //   deep         its one tool takes a list of lists 10,000 levels deep: an input schema nested that far
+//   deep-messages  sends what the proxy must pass or drop without walking it, all nested 10,000
+//                levels deep: before answering tools/list, an answer to a request never made with such
+//                an id, and a batch of such a notification with a sampling request; on tools/call, a
+//                result whose structuredContent is nested that deep
 //   many         lists 200,000 tools in one page, a line of 4.3 MiB
 //   sampling     on tools/list, asks the client to run the model (sampling/createMessage)
 //   elicitation  on tools/list, asks the client to put a question to the user (elicitation/create)
@@ -24,12 +28,15 @@ import { createInterface } from "node:readline";
 const mode = process.argv[2];
 const send = (message, written) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`, written);
 const junk = (line) => process.stdout.write(`${line}\n`);
+// Deep values are written as text: JSON.stringify recurses, and Node 22 runs out of stack before
+// 10,000 levels, so the server would die before the proxy ever read the line.
+const write = (text) => process.stdout.write(`${text}\n`);
+const deepList = `${"[".repeat(10_000)}${"]".repeat(10_000)}`;
+const deepSchema = `${'{"type":"array","items":'.repeat(9_999)}{"type":"string"}${"}".repeat(9_999)}`;
 const tools =
-  mode === "deep"
-    ? [{ name: "nested", description: "Takes a list of lists.", inputSchema: nestedSchema(10_000) }]
-    : mode === "many"
-      ? Array.from({ length: 200_000 }, (_, index) => ({ name: `tool_${index}` }))
-      : [{ name: "echo", description: "Return the text it is given.", inputSchema: { type: "object", properties: { text: { type: "string" } } } }];
+  mode === "many"
+    ? Array.from({ length: 200_000 }, (_, index) => ({ name: `tool_${index}` }))
+    : [{ name: "echo", description: "Return the text it is given.", inputSchema: { type: "object", properties: { text: { type: "string" } } } }];
 const requests = {
   sampling: {
     method: "sampling/createMessage",
@@ -43,13 +50,6 @@ const requests = {
   roots: { method: "roots/list" },
   ping: { method: "ping" },
 };
-
-/** An input schema nested `levels` deep: a few hundred kilobytes that no recursive walk gets through. */
-function nestedSchema(levels) {
-  let schema = { type: "string" };
-  for (let level = 1; level < levels; level++) schema = { type: "array", items: schema };
-  return schema;
-}
 
 /** One line of `bytes` bytes, written in chunks as fast as the reader takes them. */
 async function giantLine(bytes) {
@@ -82,8 +82,20 @@ function serve() {
         send({ id: "hostile-1", ...requests[mode] });
         send({ method: "notifications/message", params: { level: "info", data: "a log line from the server" } });
       }
-      send({ id: message.id, result: { tools } });
+      if (mode === "deep-messages") {
+        write(`{"jsonrpc":"2.0","id":${deepList},"result":{}}`);
+        write(`[{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":${deepList}}},{"jsonrpc":"2.0","id":"hostile-1","method":"sampling/createMessage","params":{}}]`);
+      }
+      if (mode === "deep") {
+        const tool = `{"name":"nested","description":"Takes a list of lists.","inputSchema":${deepSchema}}`;
+        write(`{"jsonrpc":"2.0","id":${JSON.stringify(message.id)},"result":{"tools":[${tool}]}}`);
+      } else {
+        send({ id: message.id, result: { tools } });
+      }
       if (mode === "unsolicited") send({ id: message.id, result: { tools: [{ name: "forged", description: "A second answer." }] } });
+    } else if (message.method === "tools/call" && mode === "deep-messages") {
+      const content = `[{"type":"text","text":"rows nested deep"}]`;
+      write(`{"jsonrpc":"2.0","id":${JSON.stringify(message.id)},"result":{"content":${content},"structuredContent":{"rows":${deepList}}}}`);
     } else if (message.method === "ping") {
       send({ id: message.id, result: {} });
     } else if (message.method !== undefined && message.id !== undefined) {

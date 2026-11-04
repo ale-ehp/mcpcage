@@ -194,7 +194,10 @@ is a response to a request the client never sent or already got an answer to. A 
 16 MiB is counted and thrown away as it streams in, so a server cannot exhaust mcpcage's memory. A
 listing of more than 10,000 tools, or with a definition nested more than 256 levels deep, is refused
 whole, before anything walks it: the client gets an error, nothing is pinned, and the session is
-locked. A server may ping the client and ask for its roots. A request to run the model
+locked. Nothing else a server sends that is nested more than 256 levels deep is serialized again or
+walked: a result passes unmeasured with a `scan-budget` sign, an unasked answer or a batch message
+like that is dropped, and a pin or pending entry like that is left out, so its tool needs a fresh
+approval. A server may ping the client and ask for its roots. A request to run the model
 (`sampling/createMessage`) or to put a question to you (`elicitation/create`) is a way in for a
 prompt injection and a way out for data: mcpcage answers it with an error unless you pass
 `--allow-server-requests`, and does the same with any request it does not know. Every drop and

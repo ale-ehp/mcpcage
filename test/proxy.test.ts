@@ -350,6 +350,37 @@ describe("definitions nested too deep", () => {
   });
 });
 
+describe("messages nested too deep", () => {
+  it("passes or drops what is nested 10,000 levels deep without walking it, and keeps serving", async () => {
+    const home = freshHome();
+    // Before, each of these ran JSON.stringify out of stack and ended the proxy: the result on Node 22,
+    // the id of the unasked answer on every version.
+    const session = rawSession(home, "deep-messages");
+    session.send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "raw", version: "0" } } });
+    await session.answer(1);
+    session.send({ method: "notifications/initialized" });
+    session.send({ id: 2, method: "tools/list" });
+    await session.answer(2);
+    session.send({ id: 3, method: "tools/call", params: { name: "echo", arguments: {} } });
+    await session.answer(3);
+    session.send({ id: 4, method: "ping" });
+    await session.answer(4);
+    await session.close();
+
+    // The result reached the client whole; the notification of the filtered batch did not.
+    expect(session.received().map((message) => message.id)).toEqual([1, 2, 3, 4]);
+    const result = session.lines().find((line) => line.startsWith('{"jsonrpc":"2.0","id":3,'))!;
+    expect(result).toContain(`"structuredContent":{"rows":${"[".repeat(10_000)}${"]".repeat(10_000)}}`);
+    expect(session.stderr()).toContain("mcpcage: dropped a response from the server to a request the client is not waiting for (id \"(nested more than 256 levels deep)\")");
+    expect(session.stderr()).toContain("mcpcage: dropped 1 message(s) from a batch of the server, nested more than 256 levels deep");
+    const entries = auditEntries(home, "hostile");
+    expect(entries).toContainEqual(expect.objectContaining({ event: "unsolicited-response", id: "(nested more than 256 levels deep)" }));
+    expect(entries).toContainEqual(expect.objectContaining({ event: "deep-message", dropped: 1 }));
+    expect(entries).toContainEqual(expect.objectContaining({ event: "call-result", id: 3, bytes: null }));
+    expect(entries).toContainEqual(expect.objectContaining({ event: "result-signs", id: 3, suspicious: { high: 0, medium: 1, low: 0 } }));
+  });
+});
+
 describe("listings with too many tools", () => {
   it("refuses a listing of 200,000 tools, pins nothing, and keeps serving", async () => {
     const home = freshHome();

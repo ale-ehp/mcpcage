@@ -14,7 +14,7 @@ import { listTools } from "./inspect.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, serverDir } from "./paths.js";
-import { approvePending, listServers, loadPending, loadPin, readJson, type Pending } from "./pinstore.js";
+import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, type Pending } from "./pinstore.js";
 import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, type ServerRecord } from "./sandbox.js";
@@ -401,8 +401,7 @@ async function approve(argv: string[]): Promise<number> {
  * as deep as their stack allowed: a definition 3,000 levels deep was saved, then crashed them.
  */
 function refuseTooDeep(serverId: string, pending: Pending): void {
-  const compared = pending.violations.flatMap((violation) => (violation.kind === "changed-tool" ? [violation.before, violation.after] : [violation.after]));
-  const deep = tooDeep([...pending.tools, ...compared]);
+  const deep = tooDeep(pendingDefinitions(pending));
   if (!deep) return;
   throw new Error(
     `the pending definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep, so it is neither shown nor approved. ` +

@@ -79,17 +79,25 @@ export const MAX_DEPTH = 256;
  */
 export const MAX_TOOLS = 10_000;
 
-/** The first definition that nests deeper than MAX_DEPTH, measured with a stack instead of recursion. */
+/**
+ * Whether `value` nests objects and arrays more than `limit` levels deep, measured with a stack
+ * instead of recursion. Anything from a server is checked with it before it is serialized or walked:
+ * JSON.stringify recurses, and runs out of stack a few thousand levels down (about 6,800 on Node 22).
+ */
+export function nestedDeeperThan(value: unknown, limit: number): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const stack: Array<[object, number]> = [[value, 1]];
+  while (stack.length > 0) {
+    const [current, depth] = stack.pop()!;
+    if (depth > limit) return true;
+    for (const inner of Object.values(current)) if (inner !== null && typeof inner === "object") stack.push([inner, depth + 1]);
+  }
+  return false;
+}
+
+/** The first definition that nests deeper than MAX_DEPTH. */
 export function tooDeep(definitions: ToolDefinition[]): ToolDefinition | undefined {
-  return definitions.find((definition) => {
-    const stack: Array<[object, number]> = [[definition, 1]];
-    while (stack.length > 0) {
-      const [value, depth] = stack.pop()!;
-      if (depth > MAX_DEPTH) return true;
-      for (const inner of Object.values(value)) if (inner !== null && typeof inner === "object") stack.push([inner, depth + 1]);
-    }
-    return false;
-  });
+  return definitions.find((definition) => nestedDeeperThan(definition, MAX_DEPTH));
 }
 
 /** Human-readable explanation of what changed, for the terminal and for `mcpcage diff`. */
