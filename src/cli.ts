@@ -12,7 +12,7 @@ import { banner } from "./banner.js";
 import { discoverConfigs } from "./clients.js";
 import { RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
-import { commandOnPath, npxCached, type McpcageCommand } from "./installed.js";
+import { commandOnPath, temporaryMcpcage, type McpcageCommand } from "./installed.js";
 import { npxArgv, parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, checkServerId, serverDir } from "./paths.js";
@@ -261,7 +261,7 @@ async function wrap(command: "wrap" | "unwrap", argv: string[]): Promise<number>
   if (positionals.length === 0) throw new Error(`usage: mcpcage ${command} <config.json> [--dry-run]`);
   // On macOS and Linux wrap writes mcpcage by its bare name, which the client looks up in its own PATH.
   const written = command === "wrap" ? (values.command ?? (process.platform === "win32" ? installedCommand() : undefined)) : undefined;
-  if (written !== undefined) refuseNpxCache(written, "wrap");
+  if (written !== undefined) refuseTemporary(written, "wrap");
   let status = 0;
   for (const file of positionals) {
     const outcome =
@@ -321,7 +321,7 @@ async function protect(argv: string[]): Promise<number> {
   const locations = discoverConfigs({ platform: process.platform, home, env: process.env, project: resolve(values.project ?? process.cwd()) });
   // Known before the scan: an entry that starts the command --fix writes is mcpcage, whatever its shim.
   const command = values.command ?? installedCommand();
-  if (values.fix) refuseNpxCache(command, "protect --fix");
+  if (values.fix) refuseTemporary(command, "protect --fix");
   const report = await scanConfigs({
     locations, home, offline: values.offline, cacheDir: join(cageHome(), "cache"), inspect: values.inspect ? inspectInCage : undefined, ownCommand: command,
   });
@@ -394,18 +394,18 @@ function installedCommand(): McpcageCommand {
 }
 
 /**
- * Refuses to write into configurations a command that lives in npm's npx cache (see npxCached), as
- * `npx mcpcage protect --fix` did: the cache's bin, which the PATH npx gives mcpcage finds first, or
- * on Windows the cache's cli.js. `npm cache npx rm` deletes that cache, and a later npx installs
- * over it: on the Windows PC, once it was gone, protect said of the entry --fix had written "starts
- * ...\_npx\...\cli.js with ...\node.exe, one of which was not found". An explicit --command in
- * the cache is refused the same way; any other is written as given.
+ * Refuses to write into configurations a mcpcage that lives in a temporary place (see
+ * temporaryMcpcage), as `npx mcpcage protect --fix` did, and `pnpm dlx`, `yarn dlx` and `bunx` too:
+ * the runner's bin, which the PATH it gives mcpcage finds first, or on Windows the cli.js it runs.
+ * Once that place was gone, on the Windows PC protect said of the entry --fix had written "starts
+ * ...\_npx\...\cli.js with ...\node.exe, one of which was not found". An explicit --command in such a
+ * place is refused the same way; any other is written as given.
  */
-function refuseNpxCache(command: McpcageCommand, what: string): void {
-  const cached = npxCached(command);
-  if (cached === undefined) return;
+function refuseTemporary(command: McpcageCommand, what: string): void {
+  const temporary = temporaryMcpcage(command);
+  if (temporary === undefined) return;
   throw new Error(
-    `${cached} is in npm's npx cache, which \`npm cache npx rm\` deletes and a later npx installs over: every server ${what} cages with it would stop starting once it is gone. ` +
+    `${temporary} is in a temporary place, where npx, pnpm dlx, yarn dlx or bunx put a package for one run: every server ${what} cages with it would stop starting once it is gone. ` +
       `Install mcpcage first (npm install -g mcpcage) and run mcpcage ${what} again, or pass --command with the full path of an installed mcpcage.`,
   );
 }

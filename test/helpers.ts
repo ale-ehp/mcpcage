@@ -102,11 +102,16 @@ export function mcpcage(home: string, ...args: string[]) {
  * that would point the CLI at this machine's real client configurations are left out. On Windows the
  * home directory is USERPROFILE, which os.homedir() reads instead of HOME, and the clients keep their
  * files under APPDATA: without them the CLI scanned the real profile of whoever ran the tests.
+ *
+ * The user's temporary directory is one of its own (TMPDIR, and TMP and TEMP on Windows), not the
+ * one the tests make their fake installs in: --fix and wrap refuse to write a mcpcage that lies in
+ * the temporary directory, which is where bunx and yarn dlx put the packages they run.
  */
 export function fakeUserEnv(home: string, cage: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const name of ["COPILOT_HOME", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "XDG_CONFIG_HOME"]) delete env[name];
-  return { ...env, HOME: home, ...windowsHome(home), MCPCAGE_HOME: cage, ...extra };
+  const temporary = mkdtempSync(join(tmpdir(), "mcpcage-user-tmp-"));
+  return { ...env, TMPDIR: temporary, TMP: temporary, TEMP: temporary, HOME: home, ...windowsHome(home), MCPCAGE_HOME: cage, ...extra };
 }
 
 /** The variables Windows sets for a user whose home directory is `home`; none elsewhere. */

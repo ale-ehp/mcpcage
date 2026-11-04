@@ -68,6 +68,14 @@ function fakeMcpcage(): { command: string; path: string } {
   return { command, path: `${join(prefix, "bin")}${delimiter}${process.env.PATH ?? ""}` };
 }
 
+/** What --fix (`protect --fix`) and wrap say, and do not write, of a mcpcage in a temporary place. */
+function temporaryRefusal(path: string, what: string): string {
+  return (
+    `mcpcage: ${path} is in a temporary place, where npx, pnpm dlx, yarn dlx or bunx put a package for one run: every server ${what} cages with it would stop starting once it is gone. ` +
+    `Install mcpcage first (npm install -g mcpcage) and run mcpcage ${what} again, or pass --command with the full path of an installed mcpcage.\n`
+  );
+}
+
 /**
  * How an entry names the installed mcpcage that the PATH finds first: by its bare name, as most
  * configurations do, except on Windows, where a client looks for a bare name in its current
@@ -2513,9 +2521,7 @@ describe("mcpcage started from npm's npx cache", () => {
     // the cache's cli.js, which node.exe would be given.
     const windows = process.platform === "win32";
     const inCache = windows ? realpathSync.native(npx.cli) : npx.command;
-    const refusal = (what: string) =>
-      `mcpcage: ${inCache} is in npm's npx cache, which \`npm cache npx rm\` deletes and a later npx installs over: every server ${what} cages with it would stop starting once it is gone. ` +
-      `Install mcpcage first (npm install -g mcpcage) and run mcpcage ${what} again, or pass --command with the full path of an installed mcpcage.\n`;
+    const refusal = (what: string) => temporaryRefusal(inCache, what);
 
     // Without --fix nothing is written: the report works from npx as from an installed mcpcage.
     const scan = mcpcageFromNpx("protect", "--project", project, "--offline");
@@ -2545,7 +2551,7 @@ describe("mcpcage started from npm's npx cache", () => {
 
     // A --command in the cache is refused as well, whoever gives it.
     const given = mcpcageFromNpx("wrap", "--no-build", "--command", npx.command, file);
-    expect(given.stderr).toBe(refusal("wrap").replace(inCache, npx.command));
+    expect(given.stderr).toBe(temporaryRefusal(npx.command, "wrap"));
     expect(readFileSync(file)).toEqual(original.file);
 
     // An installed mcpcage given with --command is written, from npx too.
@@ -2556,6 +2562,116 @@ describe("mcpcage started from npm's npx cache", () => {
     const wrappedWithCommand = mcpcageFromNpx("wrap", "--no-build", "--command", installed.command, file);
     expect(wrappedWithCommand.code, wrappedWithCommand.stderr).toBe(0);
     expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.notes.command).toBe(installed.command);
+  });
+});
+
+describe("mcpcage run by pnpm dlx, bunx or yarn dlx", () => {
+  const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+  // Hashes and names as the runners wrote them on macOS (pnpm 11.1.3, bun 1.4.0, yarn 4.18.1).
+  const HASH = "b489b5c1fe5d71f4d93d787598fab2c36fd70050c32eecae19857c1e3f765bae";
+
+  /** mcpcage's package where a runner put it; returns its cli.js. */
+  function packageAt(pkg: string): string {
+    for (const part of ["dist", "runtime"]) cpSync(join(root, part), join(pkg, part), { recursive: true });
+    copyFileSync(join(root, "package.json"), join(pkg, "package.json"));
+    const script = join(pkg, "dist", "cli.js");
+    chmodSync(script, 0o755);
+    return script;
+  }
+
+  /**
+   * The bin a runner puts first on the PATH it gives mcpcage, in `bin`: a link to the script (bun),
+   * or a script that starts node with it (pnpm, yarn); on Windows a .cmd.
+   */
+  function binFor(bin: string, script: string, link: boolean): string {
+    mkdirSync(bin, { recursive: true });
+    const windows = process.platform === "win32";
+    const command = join(bin, windows ? "mcpcage.cmd" : "mcpcage");
+    if (windows) writeText(command, `@node "${script}" %*\r\n`);
+    else if (link) symlinkSync(script, command);
+    else {
+      writeText(command, `#!/bin/sh\nexec node "${script}" "$@"\n`);
+      chmodSync(command, 0o755);
+    }
+    return command;
+  }
+
+  /**
+   * mcpcage as each runner runs it, nothing installed. pnpm dlx: the bin in its cache's
+   * dlx/<hash>/<install>/node_modules/.bin, the package in pnpm's store, where `pnpm add -g`
+   * installs it too. bunx: the package in <tmp>/bunx-<uid>-<spec>/node_modules, its .bin linked.
+   * yarn dlx: a project in <tmp>/xfs-<id>/dlx-<pid>, and its shims in another <tmp>/xfs-<id>.
+   * `refused` is what --fix and wrap name: on macOS and Linux the bin the PATH finds, which they
+   * would write; on Windows the cli.js, or pnpm's bin, whose script is in the store.
+   */
+  function runner(name: string, top: string, tmp: string): { cli: string; bin: string; command: string; refused: string } {
+    const windows = process.platform === "win32";
+    if (name === "pnpm dlx") {
+      const cli = packageAt(join(top, "pnpm-store", "v11", "links", "@", "mcpcage", "0.6.0", "19b85373db14d052f6e9935367678df2cf9c4452bd606ef7a1c4caf0e3393c51", "node_modules", "mcpcage"));
+      const bin = join(top, "pnpm-cache", "dlx", HASH, "1a1a8215878-1303d", "node_modules", ".bin");
+      const command = binFor(bin, cli, false);
+      return { cli, bin, command, refused: command };
+    }
+    if (name === "bunx") {
+      const modules = join(tmp, "bunx-501-mcpcage@latest", "node_modules");
+      const cli = packageAt(join(modules, "mcpcage"));
+      const command = binFor(join(modules, ".bin"), cli, true);
+      return { cli, bin: join(modules, ".bin"), command, refused: windows ? realpathSync.native(cli) : command };
+    }
+    const cli = packageAt(join(tmp, "xfs-dc57caf4", "dlx-78139", "node_modules", "mcpcage"));
+    const bin = join(tmp, "xfs-a043b06b");
+    const command = binFor(bin, cli, false);
+    return { cli, bin, command, refused: windows ? realpathSync.native(cli) : command };
+  }
+
+  it.each(["pnpm dlx", "bunx", "yarn dlx"])("from %s, --fix and wrap refuse to write it, an explicit --command too, and protect still reports", (name) => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-runner-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    for (const dir of [home, project]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    const servers = { notes: { command: "npx", args: ["-y", "@acme/notes-mcp"] } };
+    writeJsonFile(cursor, { mcpServers: servers });
+    const file = join(top, "mcp.json");
+    writeJsonFile(file, { mcpServers: servers });
+    const original = { cursor: readFileSync(cursor), file: readFileSync(file) };
+    const env = fakeUserEnv(home, join(top, "cage"), { CLAUDECODE: "1" });
+    // bunx and yarn dlx install in the temporary directory of whoever runs them.
+    const run = runner(name, top, env.TMPDIR!);
+    // The runner's bin first, then node's own directory: no other mcpcage.
+    env.PATH = `${run.bin}${delimiter}${dirname(process.execPath)}`;
+    const mcpcageFrom = (...args: string[]) => {
+      const result = spawnSync(process.execPath, [run.cli, ...args], { cwd: project, env, encoding: "utf8" });
+      return { code: result.status, stdout: result.stdout, stderr: result.stderr };
+    };
+
+    const scan = mcpcageFrom("protect", "--project", project, "--offline");
+    expect(scan.code, scan.stderr).toBe(1);
+    expect(lineOf(scan.stdout, "notes")).toMatch(/ {2}NOT CAGED$/);
+
+    const fix = mcpcageFrom("protect", "--project", project, "--offline", "--fix", "--yes", "--no-build");
+    expect(fix.stderr).toBe(temporaryRefusal(run.refused, "protect --fix"));
+    expect(fix.code).toBe(1);
+    expect(readFileSync(cursor)).toEqual(original.cursor);
+
+    // wrap writes a bare mcpcage on macOS and Linux; on Windows node.exe with the cli.js it runs.
+    const wrapped = mcpcageFrom("wrap", "--no-build", file);
+    if (process.platform === "win32") {
+      expect(wrapped.stderr).toBe(temporaryRefusal(run.refused, "wrap"));
+      expect(readFileSync(file)).toEqual(original.file);
+    } else {
+      expect(wrapped.code, wrapped.stderr).toBe(0);
+      writeFileSync(file, original.file);
+    }
+    const given = mcpcageFrom("wrap", "--no-build", "--command", run.command, file);
+    expect(given.stderr).toBe(temporaryRefusal(run.command, "wrap"));
+    expect(readFileSync(file)).toEqual(original.file);
+
+    // An installed mcpcage given with --command is written from there as well.
+    const installed = fakeMcpcage();
+    const withCommand = mcpcageFrom("protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    expect(withCommand.code, withCommand.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(cursor, "utf8")).mcpServers.notes.command).toBe(installed.command);
   });
 });
 

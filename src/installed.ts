@@ -1,5 +1,5 @@
 import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { readConfigFile } from "./clients.js";
 import { isJsonObject } from "./jsonc.js";
@@ -38,20 +38,73 @@ export function nodeScript(entry: { command?: unknown; args?: unknown }, platfor
 }
 
 /**
- * The path of a command that lives in npm's npx cache, as `npx mcpcage` runs mcpcage from it, or
- * undefined. npx installs a package in <cache>/_npx/<hash>/node_modules and puts its .bin first on
- * the PATH it gives the program; `npm cache npx rm` deletes that directory, and a later npx of the
- * same package installs over it. Written into configurations, such a command made every caged
- * server stop starting once it was gone. Looked at as written and with links followed: on macOS
- * and Linux the bin is a link into the package.
+ * The file of a command that lies in a temporary place (see inTemporaryPlace), as written or with
+ * links followed, or undefined. npx, pnpm dlx, yarn dlx and bunx install the package they run in
+ * such a place and put its bin first on the PATH they give the program: `npx mcpcage protect --fix`
+ * wrote npx's mcpcage into configurations, `pnpm dlx` its dlx cache's, `bunx` and `yarn dlx` one in
+ * the system's temporary directory, which yarn deletes as soon as mcpcage exits. Once it was gone,
+ * every caged server stopped starting. The running mcpcage counts too when it runs from such a place
+ * (see runningFrom): pnpm dlx runs the package from pnpm's store, where `pnpm add -g` installs it as
+ * well, and only the bin it puts on the PATH is in its dlx cache; on Windows --fix wrote that store's
+ * cli.js. That bin is then the file named.
  */
-export function npxCached(command: McpcageCommand): string | undefined {
+export function temporaryMcpcage(command: McpcageCommand): string | undefined {
   const files = typeof command === "string" ? [command] : [command.node, command.script];
-  return files.find((file) => [file, realFile(file)].some((path) => path !== undefined && NPX_CACHE.test(path)));
+  const found = files.find(isTemporary);
+  if (found !== undefined) return found;
+  const running = runningMcpcage();
+  return running !== undefined && files.some((file) => isAbsolute(file) && realFile(file) === running) ? runningFrom() : undefined;
 }
 
-/** A path inside npx's directory of npm's cache: _npx, then the directory of one install, then its node_modules. */
-const NPX_CACHE = /(?:^|[\\/])_npx[\\/][^\\/]+[\\/]node_modules(?:[\\/]|$)/i;
+/**
+ * Whether a file lies in a temporary place as written or with links followed. A bare name or a
+ * relative path is looked up by the client, in its own PATH and directory: it is no file here.
+ */
+function isTemporary(file: string): boolean {
+  if (inTemporaryPlace(file)) return true;
+  const real = isAbsolute(file) ? realFile(file) : undefined;
+  return real !== undefined && inTemporaryPlace(real);
+}
+
+/**
+ * Whether a path lies in a place that a package runner fills for one run, from which a file can go
+ * at any time: the system's temporary directory (os.tmpdir(), as written and with links followed:
+ * /var/folders/... and /private/var/folders/... on macOS), where bunx installs a package
+ * (<tmp>/bunx-<uid>-<spec>/node_modules) and yarn dlx a whole project and its shims (<tmp>/xfs-<id>),
+ * or a runner's own cache: npm's <cache>/_npx/<hash>/node_modules, which `npm cache npx rm` deletes
+ * and a later npx installs over, and pnpm's <cache>/dlx/<hash>/<dir>/node_modules, which pnpm dlx
+ * installs anew after a day and `pnpm store prune` then deletes. Seen with npm 11.19, pnpm 11.1.3,
+ * bun 1.4.0 and yarn 4.18.1. A path is compared without case on macOS and Windows, whose file
+ * systems ignore it; a temporary directory that is the root of a drive counts as none.
+ */
+export function inTemporaryPlace(path: string): boolean {
+  if (RUNNER_CACHE.test(path)) return true;
+  if (!isAbsolute(path)) return false;
+  const key = caseKey(resolve(path));
+  const temporary = tmpdir();
+  return [resolve(temporary), realFile(temporary)].some((dir) => dir !== undefined && key.startsWith(caseKey(dir) + sep));
+}
+
+/** npx's directory of npm's cache, then one install and its node_modules; pnpm's dlx cache, then a hash, one install, its node_modules. */
+const RUNNER_CACHE = /(?:^|[\\/])(?:_npx[\\/][^\\/]+|dlx[\\/][0-9a-f]{32,}[\\/][^\\/]+)[\\/]node_modules(?:[\\/]|$)/i;
+
+/**
+ * Where this mcpcage runs from when that is a temporary place (see inTemporaryPlace): its script, as
+ * npx, bunx and yarn dlx start it, or else the mcpcage first on the PATH it was given, when that is
+ * in a runner's cache: pnpm dlx starts the package in its store, through a bin in its dlx cache that
+ * it puts first on the PATH. Undefined when it runs from anywhere else.
+ */
+function runningFrom(): string | undefined {
+  const script = process.argv[1];
+  if (script !== undefined && isAbsolute(script) && isTemporary(script)) return script;
+  const found = onPath("mcpcage", process.env.PATH ?? "", false);
+  return typeof found === "string" && RUNNER_CACHE.test(found) ? found : undefined;
+}
+
+/** A path as the file system compares it: without case on macOS and Windows. */
+function caseKey(path: string): string {
+  return process.platform === "darwin" || process.platform === "win32" ? path.toLowerCase() : path;
+}
 
 /**
  * The extension of a command that is a batch file on Windows (".cmd" or ".bat", in lowercase), or

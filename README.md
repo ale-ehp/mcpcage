@@ -100,9 +100,10 @@ mcpcage protect --fix        # shows the plan, asks, writes a backup next to eac
 
 `protect --fix` writes the absolute path of `mcpcage` into the files, because desktop apps start
 with a minimal `PATH` (on Windows, `node.exe` with mcpcage's `cli.js`: see [Windows](#windows)). It
-must be an installed mcpcage: run from npm's npx cache (`npx mcpcage protect --fix`), `--fix` and
-`wrap` refuse to write the cache's copy, which `npm cache npx rm` deletes and a later npx replaces,
-and say to install mcpcage (`npm install -g mcpcage`) or to name one with `--command`. Two files
+must be an installed mcpcage: run from a temporary place (`npx mcpcage protect --fix`, or
+`pnpm dlx`, `yarn dlx`, `bunx`, or anything in the system's temporary directory), `--fix` and
+`wrap` refuse to write that copy, which the runner or the system deletes, and say to install
+mcpcage (`npm install -g mcpcage`) or to name one with `--command`. Two files
 are never rewritten: `~/.claude.json` while Claude Code is running (Claude Code rewrites it while it
 runs, so close it first) and VS Code's `mcp.json` when it has comments. For both, mcpcage prints the
 exact command to put in the file.

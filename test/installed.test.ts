@@ -1,9 +1,9 @@
 import { execSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { envFileOf, foreignPath, MAX_ENV_FILE_BYTES, mcpcageAt, nodeScript, parseEnvFile } from "../src/installed.js";
+import { envFileOf, foreignPath, MAX_ENV_FILE_BYTES, mcpcageAt, nodeScript, parseEnvFile, temporaryMcpcage } from "../src/installed.js";
 import { idleProgram, onWindows } from "./fake-programs.js";
 
 // What an entry's own env decides on the host for the mcpcage it starts. The report's lines and
@@ -127,6 +127,75 @@ describe("the mcpcage an entry starts", () => {
       expect(at(otherNode, script)).toBe("installed");
       // On macOS and Linux this is a node server like any other.
       expect(nodeScript({ command: node, args: [script, "run", ...server] }, "linux")).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("a mcpcage in a temporary place", () => {
+  it("is one a package runner put there for one run, never one installed to stay", () => {
+    const tmp = tmpdir();
+    const hash = "b489b5c1fe5d71f4d93d787598fab2c36fd70050c32eecae19857c1e3f765bae";
+    // Where npx, pnpm dlx, bunx and yarn dlx put mcpcage (seen with npm 11.19, pnpm 11.1.3, bun
+    // 1.4.0 and yarn 4.18.1), and the system's temporary directory however it is spelled.
+    const temporary = [
+      "/Users/me/.npm/_npx/42a5f783a5f9e73f/node_modules/.bin/mcpcage",
+      "C:\\Users\\me\\AppData\\Local\\npm-cache\\_npx\\9ca5ed00adf12b8e\\node_modules\\mcpcage\\dist\\cli.js",
+      `/Users/me/Library/Caches/pnpm/dlx/${hash}/1a1a8215878-1303d/node_modules/.bin/mcpcage`,
+      `C:\\Users\\me\\AppData\\Local\\pnpm-cache\\dlx\\${hash}\\1a1a8215878-1303d\\node_modules\\.bin\\mcpcage.cmd`,
+      join(tmp, "bunx-501-mcpcage@latest", "node_modules", ".bin", "mcpcage"),
+      join(realpathSync.native(tmp), "xfs-dc57caf4", "dlx-78139", ".yarn", "cache", "mcpcage-npm-0.6.0-6a7fe3cc27-705fa9ae40.zip", "node_modules", "mcpcage", "dist", "cli.js"),
+      join(tmp, "xfs-a043b06b", "mcpcage"),
+      join(tmp, "mcpcage"),
+    ];
+    if (process.platform === "darwin" || process.platform === "win32") temporary.push(join(tmp.toUpperCase(), "bunx-501-mcpcage@latest", "node_modules", ".bin", "mcpcage"));
+    for (const path of temporary) expect(temporaryMcpcage(path), path).toBe(path);
+    expect(temporaryMcpcage({ node: "C:\\Program Files\\nodejs\\node.exe", script: temporary[1]! })).toBe(temporary[1]);
+
+    // Where npm -g (Homebrew's node too), pnpm add -g, bun add -g, Volta and nvm install it, and
+    // npm link of a clone; and a bare name, which the client looks up in its own PATH.
+    const installed = [
+      "/usr/local/bin/mcpcage",
+      "/usr/local/lib/node_modules/mcpcage/dist/cli.js",
+      "/opt/homebrew/bin/mcpcage",
+      "/opt/homebrew/lib/node_modules/mcpcage/dist/cli.js",
+      "C:\\Users\\me\\AppData\\Roaming\\npm\\mcpcage.cmd",
+      "C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\mcpcage\\dist\\cli.js",
+      "/Users/me/Library/pnpm/mcpcage",
+      "/Users/me/Library/pnpm/global/v11/1309c-1a1a821d9dd/node_modules/mcpcage/dist/cli.js",
+      "/Users/me/Library/pnpm/store/v11/links/@/mcpcage/0.6.0/ec517a99282abea554de827deab9e30378de79624e846ace8ee50ea2feb9e6f9/node_modules/mcpcage/dist/cli.js",
+      "C:\\Users\\me\\AppData\\Local\\pnpm\\mcpcage.cmd",
+      "/Users/me/.bun/bin/mcpcage",
+      "/Users/me/.bun/install/global/node_modules/mcpcage/dist/cli.js",
+      "/Users/me/.volta/bin/mcpcage",
+      "/Users/me/.volta/tools/image/packages/mcpcage/lib/node_modules/mcpcage/dist/cli.js",
+      "/Users/me/.nvm/versions/node/v22.20.0/bin/mcpcage",
+      "/Users/me/.nvm/versions/node/v22.20.0/lib/node_modules/mcpcage/dist/cli.js",
+      "/Users/me/src/mcpcage/dist/cli.js",
+      "/Users/me/src/dlx/notes/node_modules/.bin/mcpcage",
+      "mcpcage",
+    ];
+    for (const path of installed) expect(temporaryMcpcage(path), path).toBeUndefined();
+    expect(temporaryMcpcage({ node: "C:\\Program Files\\nodejs\\node.exe", script: installed[5]! })).toBeUndefined();
+  });
+
+  it("is a link into one, whatever the link's own path", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-temporary-"));
+    const cache = join(top, "npm-cache", "_npx", "4d1f392c9a3fd6e1", "node_modules", "mcpcage", "dist");
+    mkdirSync(cache, { recursive: true });
+    writeFileSync(join(cache, "cli.js"), "");
+    // A link outside every temporary place: tmpdir() is the one the tests share, the PATH is not.
+    const stable = join(top, "stable");
+    vi.stubEnv("TMPDIR", stable);
+    vi.stubEnv("TMP", stable);
+    vi.stubEnv("TEMP", stable);
+    try {
+      const link = join(top, "bin", "mcpcage");
+      mkdirSync(dirname(link));
+      symlinkSync(join(cache, "cli.js"), link);
+      expect(temporaryMcpcage(link)).toBe(link);
+      expect(temporaryMcpcage(join(top, "bin", "other"))).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
     }
