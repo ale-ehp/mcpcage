@@ -154,12 +154,15 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 - **What stays in a server entry's `env`.** `PATH` stays, because it is often what lets the client
   find `node`. mcpcage runs `docker` from its usual install places (the `PATH` is searched only when
   none has it) and `npm` from next to the `node` that runs mcpcage, each with a `PATH` of those
-  places only; but the client finds that `node`, and a shim such as pnpm's finds `dirname`, `sed`
-  and `uname`, through the entry's `PATH`. So `protect` accepts an entry's `PATH` only when each of
-  its directories is one of the user's own `PATH`, compared as they resolve, without case on macOS
-  and Windows: an entry whose `PATH` has another directory, or a relative or empty one, is named and
-  not counted as caged, and `wrap` and `--fix` leave such an entry as it is, for the user to check
-  or remove that `PATH`, since they cannot know which one was meant. Run from a temporary place
+  places only, and on Windows with Windows' places (`ProgramData`, `ProgramFiles`, `SystemRoot`,
+  `APPDATA`, the home directory...) from Windows itself, its registry and the account, never from
+  mcpcage's environment, and `NoDefaultCurrentDirectoryInExePath` set; but the client finds that
+  `node`, and a shim such as pnpm's finds `dirname`, `sed` and `uname`, through the entry's `PATH`.
+  So `protect` accepts an entry's `PATH` only when each of its directories is one of the user's own
+  `PATH`, compared as they resolve, without case on macOS and Windows: an entry whose `PATH` has
+  another directory, or a relative or empty one, is named and not counted as caged, and `wrap` and
+  `--fix` leave such an entry as it is, for the user to check or remove that `PATH`, since they
+  cannot know which one was meant. Run from a temporary place
   (`npx`, `pnpm dlx`, `yarn dlx`, `bunx`), mcpcage leaves out of the user's own `PATH` what the
   runner put first on it: the directories in a temporary place, every `node_modules/.bin` and npm's
   `node-gyp-bin`. They are not the user's, and a look-alike mcpcage in a project's

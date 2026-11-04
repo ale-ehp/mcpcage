@@ -224,6 +224,15 @@ clients cannot start, and `--fix` gives it `node.exe` with `cli.js`, its options
 temporary place, mcpcage takes the `cli.js` of the mcpcage on your `PATH` as npm installs it, next
 to its `mcpcage.cmd` in `node_modules\mcpcage\dist` (after `npm link`, the clone's).
 
+**What docker and npm are given.** docker finds its plugins (`docker build` is buildx) through
+`ProgramData` and `ProgramFiles`, and with `ProgramData` not set, as the MCP SDK's clients leave it,
+in `Docker\cli-plugins` of the client's current directory, the project's. So mcpcage runs docker,
+and npm, with Windows' places taken from Windows, never from its own environment, which is the
+client's and the entry's: Windows' own directory, the account's home directory, the program folders
+from the registry, `APPDATA` and `LOCALAPPDATA` from your shell folders; and with
+`NoDefaultCurrentDirectoryInExePath` set, so that what they start by name never comes from the
+current directory.
+
 **`cmd /c npx`.** An entry that starts `cmd /c npx ...`, as many Windows setups do, counts as npx
 and is caged. `cmd /c` is kept after `--`, so `unwrap` gives the entry back as it was, but mcpcage
 never starts `cmd` for it: `run` reads the npx command line out of it. A `cmd /c` line that holds

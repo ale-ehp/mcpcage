@@ -10,6 +10,7 @@ import { cageHome, serverDir } from "./paths.js";
 import { readJson, writeJson } from "./pinstore.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
+import { WINDOWS_ENV, windowsEnv, windowsSources } from "./windows-places.js";
 
 /**
  * Base images, pinned by digest so a build today and a build next month start from the same bytes.
@@ -114,11 +115,12 @@ export function runArgs(
   ];
   if (!options.keepImageUser) args.push("--user", NONROOT);
   for (const variable of options.env) {
-    // docker takes the value of `-e NAME` from its own environment, and its PATH is not mcpcage's (see
-    // dockerProgram): the server is given mcpcage's PATH, as it is any other variable of mcpcage's,
-    // or keeps the image's own when mcpcage has none.
-    if (process.platform === "win32" ? /^path$/i.test(variable) : variable === "PATH") {
-      if (process.env.PATH !== undefined) args.push("-e", `${variable}=${process.env.PATH}`);
+    // docker takes the value of `-e NAME` from its own environment, whose PATH, and on Windows whose
+    // places, are not mcpcage's (see trustedEnv): the server is given mcpcage's value, as it is any
+    // other variable of mcpcage's, or keeps the image's own when mcpcage has none.
+    if (process.platform === "win32" ? [...WINDOWS_ENV, "PATH"].some((name) => name.toUpperCase() === variable.toUpperCase()) : variable === "PATH") {
+      const value = /^path$/i.test(variable) ? process.env.PATH : process.env[variable];
+      if (value !== undefined) args.push("-e", `${variable}=${value}`);
       continue;
     }
     args.push("-e", variable);
@@ -774,7 +776,8 @@ export interface HostProgram {
  * of these places and the directory it was found in, so what it starts comes from there too. The
  * rest of the environment stays: DOCKER_HOST, DOCKER_CONFIG and npm_config_* are the user's own
  * here, because `wrap` moves an entry's into the cage (HOST_ENV in config.ts). The places are POSIX
- * ones: on Windows docker.exe comes from the PATH, and runs with only its own directory as its PATH.
+ * ones: on Windows docker.exe comes from the PATH, and runs with only its own directory as its PATH,
+ * and with Windows' places from Windows (see windowsEnv).
  */
 function trustedPlaces(): string[] {
   if (process.platform === "win32") return [];
@@ -857,13 +860,30 @@ function foundNowhere(name: string): HostProgram | undefined {
   return process.platform === "win32" ? undefined : { file: name, args: [], env: trustedEnv([]) };
 }
 
-/** mcpcage's environment, with a PATH of `first` and the trusted places only. */
+/**
+ * mcpcage's environment, with a PATH of `first` and the trusted places only, and on Windows with
+ * Windows' places as Windows has them (see windowsEnv), in place of those mcpcage was given.
+ */
 function trustedEnv(first: string[]): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  // Windows compares names without case: a `Path` left next to the new PATH could be the one used.
-  if (process.platform === "win32") for (const name of Object.keys(env)) if (name.toUpperCase() === "PATH") delete env[name];
-  env.PATH = [...new Set([...first, ...trustedPlaces()])].join(delimiter);
+  const windows = process.platform === "win32";
+  const set = (name: string, value: string | undefined) => {
+    // Windows compares names without case: a `Path` left next to the new PATH could be the one used.
+    if (windows) for (const key of Object.keys(env)) if (key.toUpperCase() === name.toUpperCase()) delete env[key];
+    if (value === undefined) delete env[name];
+    else env[name] = value;
+  };
+  set("PATH", [...new Set([...first, ...trustedPlaces()])].join(delimiter));
+  if (windows) for (const [name, value] of Object.entries(windowsPlaces())) set(name, value);
   return env;
+}
+
+let asked: Record<string, string | undefined> | undefined;
+
+/** Windows' places on this machine (see windowsEnv), asked once: the registry takes a program for each key. */
+function windowsPlaces(): Record<string, string | undefined> {
+  asked ??= windowsEnv(windowsSources());
+  return asked;
 }
 
 /** The absolute directories of mcpcage's PATH: a relative one depends on the directory mcpcage was started in. */

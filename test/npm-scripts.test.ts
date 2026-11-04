@@ -26,6 +26,16 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/**
+ * What was started besides the reg.exe that mcpcage asks, once, for Windows' places (see windowsEnv):
+ * Windows' own, by its full path, with no environment and no shell.
+ */
+function started(): typeof spawned {
+  const registry = spawned.filter((call) => call.file.endsWith("\\System32\\reg.exe") && call.args[0] === "query");
+  for (const call of registry) expect({ env: call.options.env, shell: call.options.shell ?? false }).toEqual({ env: {}, shell: false });
+  return spawned.filter((call) => !registry.includes(call));
+}
+
 const lookup = (spec: string) => installScripts(spec, { offline: false, cacheDir: mkdtempSync(join(tmpdir(), "mcpcage-npm-")) });
 
 /** A node installed as Node's installer does it on Windows, npm's own script next to it; or without one. */
@@ -42,25 +52,25 @@ describe("the npm the install scripts lookup starts", () => {
     const { node, script } = nodeInstall(true);
     const spec = "@modelcontextprotocol/server-filesystem";
     expect(onWindows(() => lookup(spec), node)).toEqual({ status: "found", scripts: ["postinstall"], detail: "" });
-    expect(spawned).toHaveLength(1);
-    const [started] = spawned;
-    expect({ file: started!.file, args: started!.args.slice(0, 5), shell: started!.options.shell ?? false }).toEqual({
+    expect(started()).toHaveLength(1);
+    const [npm] = started();
+    expect({ file: npm!.file, args: npm!.args.slice(0, 5), shell: npm!.options.shell ?? false }).toEqual({
       file: node, args: [script, "view", spec, "scripts", "--json"], shell: false,
     });
     // npm runs with the PATH npm pack runs with: the node's own directory.
-    expect(started!.options.env?.PATH).toBe(dirname(node));
+    expect(npm!.options.env?.PATH).toBe(dirname(node));
 
     // What cmd.exe would read as commands or variables reaches npm as it is, one argument.
     const odd = 'x@1 & calc "%PATH%" ^& !PATH!|\r\nwhoami';
     expect(onWindows(() => lookup(odd), node)).toMatchObject({ status: "found" });
-    expect(spawned[1]!.args.slice(1, 3)).toEqual(["view", odd]);
+    expect(started()[1]!.args.slice(1, 3)).toEqual(["view", odd]);
   });
 
   it("on Windows without npm's script next to node, says npm is not installed and starts nothing", () => {
     const { node } = nodeInstall(false);
     // Started by name, npm would be looked for in the current directory first, where a project can keep an npm.exe.
     expect(onWindows(() => lookup("pkg@1"), node)).toEqual({ status: "unknown", scripts: [], detail: "npm is not installed" });
-    expect(spawned).toEqual([]);
+    expect(started()).toEqual([]);
   });
 
   it.skipIf(process.platform === "win32")("on macOS and Linux is the npm that packs a local package, with its PATH", () => {
@@ -90,6 +100,6 @@ describe("the npm that packs a local package", () => {
     };
     expect(() => onWindows(() => prepareSandbox(options), node)).toThrow(`npm pack ${pkg} failed: npm not found next to ${node}`);
     // Started by name, npm would be looked for in the current directory first, where a project can keep an npm.exe.
-    expect(spawned.map((call) => [call.file, call.args[0]])).toEqual([[join(bin, "docker.exe"), "version"]]);
+    expect(started().map((call) => [call.file, call.args[0]])).toEqual([[join(bin, "docker.exe"), "version"]]);
   });
 });

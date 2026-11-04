@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { dockerAvailable, dockerProgram, npmProgram, npxProgram, runArgs } from "../src/sandbox.js";
+import { WINDOWS_PLACES, windowsEnv } from "../src/windows-places.js";
 import { fakePrograms, isProgram, onWindows, STANDARD_PLACES, standardDocker } from "./fake-programs.js";
 import { connect, fakeServer, freshHome, mcpcageWithEnv } from "./helpers.js";
 
@@ -132,6 +133,202 @@ describe("on Windows, a docker or an npm found nowhere", () => {
     projectWithDecoys();
     const node = join(mkdtempSync(join(tmpdir(), "mcpcage-nodejs-")), "node.exe");
     expect(onWindows(() => npmProgram(), node)?.file).toBeUndefined();
+  });
+});
+
+describe("on Windows, the places docker and npm are given", () => {
+  // docker.exe loads its plugins from %ProgramData%\Docker\cli-plugins and
+  // %ProgramFiles%\Docker\cli-plugins, and with ProgramData not set, as the MCP SDK leaves it on
+  // Windows, from Docker\cli-plugins in the current directory, the project's: a cloned repository's
+  // docker-buildx.exe ran on the host at `docker build`. mcpcage gave docker its own environment,
+  // with only the PATH replaced.
+  const names = [...WINDOWS_PLACES, "USERPROFILE", "HOME", "NoDefaultCurrentDirectoryInExePath"];
+  const registry: Record<string, string> = {
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion": [
+      "",
+      "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
+      "    ProgramFilesDir    REG_SZ    D:\\Programs",
+      "    CommonFilesDir    REG_SZ    D:\\Programs\\Common Files",
+      "    ProgramFilesDir (x86)    REG_SZ    D:\\Programs (x86)",
+      "    CommonFilesDir (x86)    REG_SZ    D:\\Programs (x86)\\Common Files",
+      "    CommonW6432Dir    REG_SZ    D:\\Programs\\Common Files",
+      "    ProgramW6432Dir    REG_SZ    D:\\Programs",
+      "    MediaPathUnexpanded    REG_EXPAND_SZ    %SystemRoot%\\Media",
+      "",
+    ].join("\r\n"),
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders":
+      "\r\n    AppData    REG_EXPAND_SZ    %USERPROFILE%\\AppData\\Roaming\r\n    Local AppData    REG_EXPAND_SZ    F:\\Local\r\n",
+  };
+
+  it("are Windows' own, from its registry and the account's home directory, else where Windows puts them", () => {
+    const sources = { windows: "E:\\Windows", home: "E:\\Users\\me", registry: (key: string) => registry[key] };
+    const values = {
+      SystemRoot: "E:\\Windows",
+      windir: "E:\\Windows",
+      SystemDrive: "E:",
+      ComSpec: "E:\\Windows\\System32\\cmd.exe",
+      PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      ProgramData: "E:\\ProgramData",
+      ALLUSERSPROFILE: "E:\\ProgramData",
+      ProgramFiles: "D:\\Programs",
+      "ProgramFiles(x86)": "D:\\Programs (x86)",
+      ProgramW6432: "D:\\Programs",
+      CommonProgramFiles: "D:\\Programs\\Common Files",
+      "CommonProgramFiles(x86)": "D:\\Programs (x86)\\Common Files",
+      CommonProgramW6432: "D:\\Programs\\Common Files",
+      APPDATA: "E:\\Users\\me\\AppData\\Roaming",
+      LOCALAPPDATA: "F:\\Local",
+      TEMP: "F:\\Local\\Temp",
+      TMP: "F:\\Local\\Temp",
+      HOMEDRIVE: "E:",
+      HOMEPATH: "\\Users\\me",
+      USERPROFILE: "E:\\Users\\me",
+      HOME: "E:\\Users\\me",
+      NoDefaultCurrentDirectoryInExePath: "1",
+    };
+    expect(windowsEnv(sources)).toEqual(values);
+    expect(Object.keys(values).sort()).toEqual([...names].sort());
+    // A registry that cannot be read, or a value that names another variable, is relative, or was not read whole: Windows' defaults.
+    const defaults = {
+      ...values,
+      ProgramData: "E:\\ProgramData",
+      ProgramFiles: "E:\\Program Files",
+      "ProgramFiles(x86)": "E:\\Program Files (x86)",
+      ProgramW6432: "E:\\Program Files",
+      CommonProgramFiles: "E:\\Program Files\\Common Files",
+      "CommonProgramFiles(x86)": "E:\\Program Files (x86)\\Common Files",
+      CommonProgramW6432: "E:\\Program Files\\Common Files",
+      LOCALAPPDATA: "E:\\Users\\me\\AppData\\Local",
+      TEMP: "E:\\Users\\me\\AppData\\Local\\Temp",
+      TMP: "E:\\Users\\me\\AppData\\Local\\Temp",
+    };
+    expect(windowsEnv({ ...sources, registry: () => undefined })).toEqual(defaults);
+    const odd = (value: string) => (key: string) => registry[key]?.replace("D:\\Programs\r\n    CommonFilesDir", `${value}\r\n    CommonFilesDir`).replace("F:\\Local", value);
+    for (const value of ["%PUBLIC%\\Programs", "Programs", "D:\\Progr\uFFFDms", "D:\\Programs\\%x"]) {
+      expect(windowsEnv({ ...sources, registry: odd(value) })).toMatchObject({ ProgramFiles: "E:\\Program Files", LOCALAPPDATA: "E:\\Users\\me\\AppData\\Local" });
+    }
+  });
+
+  it("replace, each once whatever its case, those of mcpcage's environment for docker and npm", () => {
+    const bin = mkdtempSync(join(tmpdir(), "mcpcage-docker-bin-"));
+    writeFileSync(join(bin, "docker.exe"), "");
+    const npm = join(mkdtempSync(join(tmpdir(), "mcpcage-nodejs-")), "nodejs");
+    mkdirSync(join(npm, "node_modules", "npm", "bin"), { recursive: true });
+    writeFileSync(join(npm, "node_modules", "npm", "bin", "npm-cli.js"), "");
+    // As an entry's env, or a client, could leave them: chosen elsewhere, relative, or not there.
+    const chosen = "C:\\never-chosen";
+    for (const name of names) vi.stubEnv(name, chosen);
+    vi.stubEnv("ProgramData", undefined);
+    vi.stubEnv("TEMP", "temp");
+    vi.stubEnv("PATH", bin);
+    // Spelled otherwise, which Windows takes for the same variable: on Windows itself one of each is kept.
+    if (process.platform !== "win32") {
+      vi.stubEnv("Path", chosen);
+      vi.stubEnv("programfiles", chosen);
+    }
+    vi.stubEnv("MCPCAGE_TEST_KEPT", "kept");
+    try {
+      for (const program of [onWindows(() => dockerProgram())!, onWindows(() => npmProgram(), join(npm, "node.exe"))!]) {
+        const env = program.env;
+        // HOMEDRIVE and HOMEPATH only for a home directory on a drive, which the account's here, on macOS or Linux, is not.
+        const homeOnDrive = process.platform === "win32";
+        for (const name of [...names, "PATH"]) {
+          const spelled = Object.keys(env).filter((key) => key.toUpperCase() === name.toUpperCase());
+          expect(spelled, name).toEqual(/^HOME(?:DRIVE|PATH)$/.test(name) && !homeOnDrive ? [] : [name]);
+          expect(env[name], name).not.toBe(chosen);
+        }
+        for (const name of names.filter((name) => !["PATHEXT", "SystemDrive", "HOMEDRIVE", "NoDefaultCurrentDirectoryInExePath"].includes(name))) {
+          if (name === "HOMEPATH" && !homeOnDrive) continue;
+          expect(win32.isAbsolute(env[name]!), `${name}=${env[name]}`).toBe(true);
+        }
+        expect(env.NoDefaultCurrentDirectoryInExePath).toBe("1");
+        expect(env.PATHEXT).toBe(".COM;.EXE;.BAT;.CMD");
+        // The rest of the environment is mcpcage's.
+        expect(env.MCPCAGE_TEST_KEPT).toBe("kept");
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("give the server mcpcage's own value of a place it is given with --env, as its PATH", () => {
+    const base = { serverId: "x", spec: { kind: "npm" as const, packageName: "p", args: [] }, mounts: [], allowNet: false, memory: "512m", cpus: "1", keepImageUser: false };
+    vi.stubEnv("TEMP", "C:\\server-temp");
+    vi.stubEnv("APPDATA", "C:\\server-roaming");
+    vi.stubEnv("LOCALAPPDATA", undefined);
+    try {
+      const args = onWindows(() => runArgs({ ...base, env: ["TEMP", "APPDATA", "LOCALAPPDATA", "OTHER"] }, "img", "win32"));
+      expect(args).toContain("TEMP=C:\\server-temp");
+      expect(args).toContain("APPDATA=C:\\server-roaming");
+      expect(args).toContain("OTHER");
+      expect(args.filter((arg) => /^(?:TEMP|APPDATA|LOCALAPPDATA)$/.test(arg))).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  /** What Windows' own API says of its folders (SHGetKnownFolderPath, through .NET), not its registry. */
+  function knownFolders(): Record<string, string> {
+    const folders = ["CommonApplicationData", "ProgramFiles", "ProgramFilesX86", "CommonProgramFiles", "ApplicationData", "LocalApplicationData", "Windows", "UserProfile"];
+    const shell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const script = folders.map((folder) => `[Environment]::GetFolderPath('${folder}')`).join("; ");
+    const listed = spawnSync(shell, ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8" });
+    const lines = listed.stdout.trim().split(/\r?\n/);
+    return Object.fromEntries(folders.map((folder, index) => [folder, lines[index]!]));
+  }
+
+  it.runIf(process.platform === "win32")("are on Windows what its own API says, whatever mcpcage's environment says", () => {
+    const known = knownFolders();
+    const bin = mkdtempSync(join(tmpdir(), "mcpcage-docker-bin-"));
+    writeFileSync(join(bin, "docker.exe"), "");
+    for (const name of ["ProgramData", "ProgramFiles", "APPDATA", "SystemRoot", "USERPROFILE"]) vi.stubEnv(name, "C:\\never-chosen");
+    vi.stubEnv("LOCALAPPDATA", undefined);
+    vi.stubEnv("PATH", bin);
+    try {
+      const env = dockerProgram()!.env;
+      // Compared without case, as Windows compares paths: its API spells its own directory C:\WINDOWS.
+      const same = (name: string, folder: string) => expect(env[name]?.toLowerCase(), name).toBe(known[folder]!.toLowerCase());
+      same("ProgramData", "CommonApplicationData");
+      same("ProgramFiles", "ProgramFiles");
+      same("ProgramFiles(x86)", "ProgramFilesX86");
+      same("CommonProgramFiles", "CommonProgramFiles");
+      same("APPDATA", "ApplicationData");
+      same("LOCALAPPDATA", "LocalApplicationData");
+      same("SystemRoot", "Windows");
+      same("USERPROFILE", "UserProfile");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  const dockerOnPath = process.platform === "win32" && (process.env.PATH ?? "").split(delimiter).some((dir) => isAbsolute(dir) && existsSync(join(dir, "docker.exe")));
+  it.runIf(dockerOnPath)("never let docker.exe load a plugin from the current directory, ProgramData unset as the MCP SDK leaves it", () => {
+    // The project a client starts the server in, with a docker-buildx.exe where docker would look:
+    // node.exe under that name, which notes each start in a file (NODE_OPTIONS reaches it through docker).
+    const project = mkdtempSync(join(tmpdir(), "mcpcage-plugin-project-"));
+    const plugins = join(project, "Docker", "cli-plugins");
+    mkdirSync(plugins, { recursive: true });
+    const decoy = join(plugins, "docker-buildx.exe");
+    try {
+      linkSync(process.execPath, decoy);
+    } catch {
+      copyFileSync(process.execPath, decoy);
+    }
+    const marker = join(project, "ran");
+    const preload = join(project, "note.cjs");
+    writeFileSync(preload, `require("node:fs").appendFileSync(${JSON.stringify(marker)}, "docker-buildx.exe " + process.argv.slice(1).join(" ") + "\\n");\n`);
+    // Inside quotes NODE_OPTIONS reads a backslash as an escape: the path is given with forward slashes.
+    vi.stubEnv("NODE_OPTIONS", `--require "${preload.replace(/\\/g, "/")}"`);
+    vi.stubEnv("ProgramData", undefined);
+    process.chdir(project);
+    try {
+      const docker = dockerProgram()!;
+      const result = spawnSync(docker.file, ["buildx", "version"], { encoding: "utf8", env: docker.env, cwd: project });
+      expect(existsSync(marker) ? readFileSync(marker, "utf8") : "").toBe("");
+      expect(result.stdout, result.stderr).toMatch(/buildx/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
