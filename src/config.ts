@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
-import { mcpcageAt } from "./installed.js";
+import { foreignPath, mcpcageAt, movedPlaces, type ForeignPath } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
 import { parseLaunch } from "./launch.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
@@ -69,6 +69,70 @@ export function wrapConfig(file: string, options: { dryRun: boolean; command?: s
     const wrapped = wrapEntry(original.entry, { command, writable: options.writable });
     return "skip" in wrapped ? skip(name, wrapped.skip) : wrapped.entry;
   });
+}
+
+/** What the variables of an entry's `env`, or of its `envFile`, do on the host once it starts mcpcage: names only, never values. */
+export interface EnvEffects {
+  /** The variables that act on the host (see HOST_ENV), with what each does. */
+  hostEnv: Array<{ name: string; what: string }>;
+  /** The directories of its PATH that are not the user's (see foreignPath). */
+  foreignPath?: ForeignPath;
+  /** The variables that move the client configurations `run` refuses to mount (see movedPlaces). */
+  movedPlaces: string[];
+}
+
+/** What a set of variables (an entry's `env`, or what its `envFile` sets) does on the host once the entry starts mcpcage. */
+export function envEffects(variables: unknown): EnvEffects {
+  const hostEnv = isJsonObject(variables)
+    ? Object.entries(variables).flatMap(([name, value]) => {
+        const host = hostVariable(name, value);
+        return host === undefined ? [] : [{ name, what: host.what }];
+      })
+    : [];
+  const path = foreignPath(variables);
+  return { hostEnv, ...(path === undefined ? {} : { foreignPath: path }), movedPlaces: movedPlaces(variables) };
+}
+
+/** Whether any of them acts on the host. */
+export function actsOnHost(effects: EnvEffects): boolean {
+  return effects.hostEnv.length > 0 || effects.foreignPath !== undefined || effects.movedPlaces.length > 0;
+}
+
+/**
+ * Why an entry that starts mcpcage stays as it is because of what its `env` or its `envFile` sets,
+ * in words that say what to do, worst first; undefined when nothing does. The variables of `env`
+ * that act on the host are left out: wrap and --fix move them into the cage. Those of an envFile
+ * stay where they are, in a file VS Code loads as it is. `envFile` is undefined for an entry
+ * without one, and its `effects` when it could not be read.
+ */
+export function envReason(env: EnvEffects, envFile: { path?: string; effects?: EnvEffects } | undefined): string | undefined {
+  const file = envFile?.path === undefined ? "its envFile" : terminalSafe(envFile.path);
+  const fromFile = envFile?.effects;
+  if (fromFile !== undefined && fromFile.hostEnv.length > 0) {
+    const names = fromFile.hostEnv.map((variable) => variable.name);
+    const them = names.length === 1 ? "it" : "them";
+    return `its envFile sets ${listOf(names)}, which ${names.length === 1 ? "acts" : "act"} on your machine before the cage starts: move ${them} from ${file} into its "env", or remove ${them}`;
+  }
+  if (envFile !== undefined && fromFile === undefined) {
+    const what = envFile.path === undefined ? "its envFile is not a string" : `its envFile ${file} could not be read`;
+    return `${what}, so what it sets is unknown: check that file, or move what it sets into its "env"`;
+  }
+  const sources: Array<[string, EnvEffects | undefined, string]> = [["env", env, 'its "env"'], ["envFile", fromFile, file]];
+  for (const [from, effects, where] of sources) {
+    if (effects?.foreignPath !== undefined) return `its ${from} sets a PATH that picks other programs than yours: check that PATH, or remove it from ${where} by hand`;
+  }
+  for (const [from, effects, where] of sources) {
+    const names = effects?.movedPlaces ?? [];
+    const them = names.length === 1 ? "it" : "them";
+    if (names.length > 0) return `its ${from} sets ${listOf(names)} to another value than yours: check ${them}, or remove ${them} from ${where} by hand`;
+  }
+  return undefined;
+}
+
+/** `A`, `A and B`, `A, B and C`, each name safe to print. */
+function listOf(names: string[]): string {
+  const safe = names.map(terminalSafe);
+  return safe.length > 1 ? `${safe.slice(0, -1).join(", ")} and ${safe.at(-1)}` : (safe[0] ?? "");
 }
 
 /**

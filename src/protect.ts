@@ -3,9 +3,10 @@ import { join, posix, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
 import {
-  envValues, hostPath, hostVariable, isWrapped, moveHostEnv, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry, type ServerEntry, type ServerType,
+  actsOnHost, envEffects, envReason, envValues, hostPath, isWrapped, moveHostEnv, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry,
+  type EnvEffects, type ServerEntry, type ServerType,
 } from "./config.js";
-import { foreignPath, mcpcageAt, movedPlaces, type ForeignPath, type McpcageKind } from "./installed.js";
+import { envFileOf, mcpcageAt, type ForeignPath, type McpcageKind } from "./installed.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
@@ -65,6 +66,12 @@ export interface ServerReport {
   foreignPath?: ForeignPath;
   /** For a wrapped entry that starts mcpcage: the variables of its env that move the client configurations `run` refuses to mount (see movedPlaces). */
   movedPlaces: string[];
+  /**
+   * For npx entries and wrapped ones with an `envFile` (VS Code): the file as written, and what its
+   * variables do on this machine, as those of `env` above; `effects` is missing when the file could
+   * not be read, and `path` when the value is not a string.
+   */
+  envFile?: { path?: string; effects?: EnvEffects };
   /** What in the entry is not as a client expects it, such as an argument that is not a string. */
   problems: string[];
   /** Why the entry could not be described whole: the report says so on its lines and goes on. */
@@ -178,12 +185,12 @@ async function describeServer(
     if (server.protectedByMcpcage) server.opened = openedBy(entry);
     server.secrets = [...new Set([...secretNames(entry), ...shown.secrets])];
     server.broadAccess = type === "remote" ? [] : broadPaths(stringArgs(entry), options.home);
-    server.hostEnv = type === "npx" || type === "mcpcage" ? hostEnvOf(entry) : [];
-    // Its PATH chooses, on the host, the programs that start mcpcage and those that mcpcage starts;
-    // its client places, what `run` refuses to mount.
-    if (server.mcpcage === "installed") {
-      server.foreignPath = foreignPath(entry.env);
-      server.movedPlaces = movedPlaces(entry.env);
+    if (type === "npx" || type === "mcpcage") {
+      const installed = server.mcpcage === "installed";
+      Object.assign(server, effectsOf(entry.env, installed));
+      // VS Code adds the variables of the file an envFile names to those of env: they act the same way.
+      const envFile = envFileOf(entry, file.file);
+      if (envFile !== undefined) server.envFile = envFile.variables === undefined ? { path: envFile.path } : { path: envFile.path, effects: effectsOf(envFile.variables, installed) };
     }
     const odd = Array.isArray(entry.args) ? entry.args.filter((arg) => typeof arg !== "string").length : 0;
     if (odd > 0) server.problems.push(`args: ${odd === 1 ? "an argument that is not a string" : `${odd} arguments that are not strings`}`);
@@ -324,7 +331,8 @@ function npmLaunch(argv: string[]): NpmLaunch | undefined {
  * A server that runs on this machine with the user's permissions: npx outside mcpcage,
  * `mcpcage run --no-sandbox`, or a program that is only named mcpcage; or a caged one whose env
  * runs on this machine, in mcpcage, first, whose PATH has directories that are not the user's, or
- * that moves the places `run` refuses to mount. An mcpcage that cannot be found starts nothing.
+ * that moves the places `run` refuses to mount, its envFile's as well as its env's, or whose envFile
+ * could not be read. An mcpcage that cannot be found starts nothing.
  */
 export function isUncaged(server: ServerReport): boolean {
   if (server.type === "npx") return true;
@@ -332,7 +340,7 @@ export function isUncaged(server: ServerReport): boolean {
   // A wrapped entry that could not be described is not known to be caged.
   if (server.error !== undefined) return true;
   if (server.mcpcage === "not found") return false;
-  return !server.protectedByMcpcage || server.hostEnv.length > 0 || server.foreignPath !== undefined || server.movedPlaces.length > 0;
+  return !server.protectedByMcpcage || actsOnHost(server) || envFileActs(server);
 }
 
 /**
@@ -393,13 +401,28 @@ export function writableWarning(name: string, path: string): string {
   return `WARNING ${terminalSafe(name)} can change files in ${terminalSafe(path)}, code and settings that git, editors and build tools run included (--writable)`;
 }
 
-/** The variables of an entry's env that act on the host once it starts mcpcage, with what each does. */
-function hostEnvOf(entry: ServerEntry): ServerReport["hostEnv"] {
-  if (!isJsonObject(entry.env)) return [];
-  return Object.entries(entry.env).flatMap(([name, value]) => {
-    const host = hostVariable(name, value);
-    return host === undefined ? [] : [{ name, what: host.what }];
-  });
+/**
+ * What an entry's env, or its envFile, does on the host once it starts mcpcage (see envEffects): the
+ * variables that act there, for npx entries and wrapped ones; the PATH and the client places too for
+ * an entry that starts mcpcage, whose own PATH decides nothing before it is wrapped.
+ */
+function effectsOf(variables: unknown, installed: boolean): EnvEffects {
+  const effects = envEffects(variables);
+  return installed ? effects : { hostEnv: effects.hostEnv, movedPlaces: [] };
+}
+
+/** An envFile that acts on the host, or that could not be read, so what it sets is unknown. */
+function envFileActs(server: ServerReport): boolean {
+  return server.envFile !== undefined && (server.envFile.effects === undefined || actsOnHost(server.envFile.effects));
+}
+
+/**
+ * What `wrap` and `protect --fix` say of an entry they cage that keeps its envFile: VS Code loads it
+ * as it is, now into mcpcage's environment, and the server gets only the variables named with --env.
+ */
+export function envFileNote(entry: ServerEntry): string | undefined {
+  if (typeof entry.envFile !== "string") return undefined;
+  return `its envFile stays: VS Code loads ${terminalSafe(entry.envFile)}, and its variables reach mcpcage on your machine (the server gets only those named with --env)`;
 }
 
 /** `mcpcage run --no-sandbox -- ...`: pinned and audited, but started on the host without isolation. */
@@ -469,9 +492,11 @@ function serverLines(server: ServerReport, home: string): string[] {
   if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(terminalSafe).join(", ")}`);
   if (server.installScripts) details.push(installLine(server.installScripts));
   // Before what --inspect found, whose signs belong under its own line.
-  for (const variable of server.hostEnv) details.push(`env ${terminalSafe(variable.name)}: ${variable.what}`);
-  if (server.foreignPath !== undefined) details.push(...pathLines(server.foreignPath));
-  for (const name of server.movedPlaces) details.push(`env ${terminalSafe(name)}: ${MOVED_PLACE}`);
+  details.push(...effectLines("env", server));
+  if (server.envFile?.effects !== undefined) details.push(...effectLines("envFile", server.envFile.effects));
+  else if (server.envFile !== undefined) {
+    details.push(`envFile: ${server.envFile.path === undefined ? "its value is not a string" : `${terminalSafe(server.envFile.path)} could not be read`}, so what it sets is unknown`);
+  }
   details.push(...server.opened);
   for (const skipped of server.inspection?.skipped ?? []) details.push(`inspected without ${terminalSafe(tilde(skipped.path, home))}: ${terminalSafe(skipped.reason)}`);
   const findings: string[] = [];
@@ -502,9 +527,11 @@ function status(server: ServerReport): string {
       if (server.mcpcage === "not found") return `starts ${command}, which ${/[/\\]/.test(command) ? "was not found" : "is not on your PATH"}`;
       if (!server.protectedByMcpcage) return "mcpcage --no-sandbox: pinning and audit only, no isolation";
       // The env acts first, on the host, before any cage exists.
-      if (server.hostEnv.length > 0) return "caged, but its env runs on your machine";
-      if (server.foreignPath !== undefined) return "caged, but its PATH picks other programs";
-      if (server.movedPlaces.length > 0) return "caged, but its env moves what run refuses to mount";
+      const fromFile = server.envFile?.effects;
+      if (server.hostEnv.length > 0 || (fromFile?.hostEnv.length ?? 0) > 0) return "caged, but its env runs on your machine";
+      if (server.envFile !== undefined && fromFile === undefined) return "caged, but what its envFile sets is unknown";
+      if (server.foreignPath !== undefined || fromFile?.foreignPath !== undefined) return "caged, but its PATH picks other programs";
+      if (server.movedPlaces.length > 0 || (fromFile?.movedPlaces.length ?? 0) > 0) return "caged, but its env moves what run refuses to mount";
       return server.opened.length > 0 ? "caged, with the cage opened" : "caged";
     }
     case "remote":
@@ -518,13 +545,21 @@ function status(server: ServerReport): string {
   }
 }
 
+/** What the variables of an entry's env, or of its envFile, do on the host, one line each: `from` says which. */
+function effectLines(from: "env" | "envFile", effects: EnvEffects): string[] {
+  const lines = effects.hostEnv.map((variable) => `${from} ${terminalSafe(variable.name)}: ${variable.what}`);
+  if (effects.foreignPath !== undefined) lines.push(...pathLines(from, effects.foreignPath));
+  for (const name of effects.movedPlaces) lines.push(`${from} ${terminalSafe(name)}: ${MOVED_PLACE}`);
+  return lines;
+}
+
 /** The directories of an entry's PATH that are not the user's, a few by name and the others counted: a PATH can be long. */
-function pathLines(path: ForeignPath): string[] {
+function pathLines(from: "env" | "envFile", path: ForeignPath): string[] {
   const why = "it decides which programs start mcpcage and which mcpcage starts";
-  if (path.notString) return [`env PATH: its value is not a string, so the directories it names are not known; ${why}`];
-  const lines = path.dirs.slice(0, PATH_LINES).map((dir) => `env PATH: ${dir === "" ? '""' : terminalSafe(dir)} is not on your PATH; ${why}`);
+  if (path.notString) return [`${from} PATH: its value is not a string, so the directories it names are not known; ${why}`];
+  const lines = path.dirs.slice(0, PATH_LINES).map((dir) => `${from} PATH: ${dir === "" ? '""' : terminalSafe(dir)} is not on your PATH; ${why}`);
   const more = path.dirs.length - lines.length;
-  if (more > 0) lines.push(`env PATH: and ${more} more ${more === 1 ? "directory" : "directories"} that ${more === 1 ? "is" : "are"} not on your PATH`);
+  if (more > 0) lines.push(`${from} PATH: and ${more} more ${more === 1 ? "directory" : "directories"} that ${more === 1 ? "is" : "are"} not on your PATH`);
   return lines;
 }
 
@@ -634,7 +669,7 @@ export function fixConfigs(options: FixOptions): FixOutcome {
     const onHost = servers.filter((server) => server.type === "mcpcage" && server.mcpcage === "installed" && !server.protectedByMcpcage && server.error === undefined);
     // A PATH is often what lets the client find node at all, and a client place may be meant for the
     // server: which ones were meant, only the user knows.
-    const picked = servers.filter((server) => (server.foreignPath !== undefined || server.movedPlaces.length > 0) && server.error === undefined && !targets.includes(server));
+    const picked = servers.filter((server) => envReason(server, server.envFile) !== undefined && server.error === undefined && !targets.includes(server));
     if (targets.length === 0 && onHost.length === 0 && picked.length === 0) continue;
     try {
       files.push(fixFile(file, targets, onHost, picked, options, home));
@@ -683,14 +718,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const server of onHost) {
     fixed.skipped.push({ name: server.name, label: server.label, reason: "it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand" });
   }
-  for (const server of picked) {
-    const names = server.movedPlaces.map(terminalSafe);
-    const reason =
-      server.foreignPath !== undefined
-        ? `its env sets a PATH that picks other programs than yours: check that PATH, or remove it from its "env" by hand`
-        : `its env sets ${names.join(" and ")} to another value than yours: check ${names.length === 1 ? "it" : "them"}, or remove ${names.length === 1 ? "it" : "them"} from its "env" by hand`;
-    fixed.skipped.push({ name: server.name, label: server.label, reason });
-  }
+  for (const server of picked) fixed.skipped.push({ name: server.name, label: server.label, reason: envReason(server, server.envFile)! });
   for (const skipped of fixed.skipped) options.log(`  not changed: ${terminalSafe(skipped.name)} in ${where(skipped.label)}: ${terminalSafe(skipped.reason)}`);
   if (fixed.changed.length === 0) return fixed;
 
@@ -733,6 +761,8 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const change of fixed.changed) {
     options.log(`  ${options.dryRun ? "cage" : "caged"} ${terminalSafe(change.name)} in ${where(change.label)}`);
     for (const warning of warnings(change)) options.log(`    ${warning}`);
+    const note = envFileNote(change.after);
+    if (note !== undefined) options.log(`    ${note}`);
   }
   if (fixed.backup) options.log(`  backup: ${terminalSafe(file.scope === "user" ? tilde(fixed.backup, home) : fixed.backup)}`);
   return fixed;

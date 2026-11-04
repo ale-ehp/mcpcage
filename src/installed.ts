@@ -1,6 +1,7 @@
 import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { readConfigFile } from "./clients.js";
 import { isJsonObject } from "./jsonc.js";
 import { clientPlaces } from "./sensitive.js";
 
@@ -9,8 +10,9 @@ import { clientPlaces } from "./sensitive.js";
  * write a file can name it mcpcage, and put a package.json that says "mcpcage" next to it: a
  * look-alike with one was reported caged, and left alone by --fix, while it ran on the host. Only two
  * files are known to be mcpcage: the command `wrap` and `protect --fix` write into configurations,
- * and the mcpcage that is running now. And what else the entry's own `env` decides on the host for
- * the mcpcage it starts: the programs its PATH picks, and the places `run` refuses to mount.
+ * and the mcpcage that is running now. And what else the entry's own `env`, and the `envFile` VS
+ * Code loads with it, decide on the host for the mcpcage it starts: the programs its PATH picks, and
+ * the places `run` refuses to mount.
  */
 
 /** An mcpcage known to this one, another program (or one that cannot be told apart), or nothing that can be found. */
@@ -107,6 +109,104 @@ export function movedPlaces(env: unknown): string[] {
     if (variable === undefined) return [];
     return typeof value !== "string" || places({ ...process.env, [variable]: value }) !== yours ? [name] : [];
   });
+}
+
+/** The file an entry's `envFile` names, and what it sets (see envFileOf). */
+export interface EnvFile {
+  /** The value of `envFile`, as written; undefined when it is not a string. */
+  path?: string;
+  /** Its variables, when the file could be read; undefined when it could not, so what it sets is unknown. */
+  variables?: Record<string, string>;
+}
+
+/** The most an envFile may weigh for mcpcage to read it: a .env file holds a few lines. */
+export const MAX_ENV_FILE_BYTES = 1024 * 1024;
+
+/**
+ * The file VS Code loads for an entry with an `envFile`, and what it sets; undefined for an entry
+ * without one. VS Code adds its variables to the environment it starts the entry with, as it adds
+ * those of `env`: once the entry starts mcpcage, they act on the host the same way. An entry with
+ * `"envFile": "${workspaceFolder}/.env"` whose .env set NODE_OPTIONS was reported caged, and its
+ * preload ran on the host. The file is read as a configuration is (a regular file, without waiting
+ * on a FIFO), up to MAX_ENV_FILE_BYTES. Of the variables VS Code fills in, `${workspaceFolder}` is
+ * known in a project's own configuration only, and `${userHome}` always: a file named with another,
+ * or by a relative path, depends on what the editor has open, and counts as one that could not be
+ * read. `configFile` is the configuration that holds the entry.
+ */
+export function envFileOf(entry: { [field: string]: unknown }, configFile: string): EnvFile | undefined {
+  const value = entry.envFile;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") return {};
+  const file = envFilePath(value, configFile);
+  return { path: value, variables: file === undefined ? undefined : readEnvFile(file) };
+}
+
+/** The absolute path an `envFile` names, its variables filled in, or undefined when that is not known here. */
+function envFilePath(value: string, configFile: string): string | undefined {
+  const workspace = workspaceOf(resolve(configFile));
+  let known = true;
+  const path = value.replace(/\$\{([^}]*)\}/g, (whole, name: string) => {
+    if (name === "workspaceFolder" && workspace !== undefined) return workspace;
+    if (name === "userHome") return homedir();
+    if (name === "/" || name === "pathSeparator") return sep;
+    known = false;
+    return whole;
+  });
+  return known && isAbsolute(path) ? path : undefined;
+}
+
+/**
+ * The folder `${workspaceFolder}` stands for in a project's own configuration: the one that holds its
+ * .vscode (or .cursor) directory. ~/.cursor/mcp.json is Cursor's user configuration, whose
+ * `${workspaceFolder}` is whichever folder is open.
+ */
+function workspaceOf(configFile: string): string | undefined {
+  const dir = dirname(configFile);
+  if (basename(dir) !== ".vscode" && basename(dir) !== ".cursor") return undefined;
+  const workspace = dirname(dir);
+  return dirKey(workspace) === dirKey(homedir()) ? undefined : workspace;
+}
+
+/** The variables of an envFile, or undefined when it cannot be read: not there, not a regular file, too large. */
+function readEnvFile(file: string): Record<string, string> | undefined {
+  try {
+    // Looked at before it is read, so that a large file is not read at all; readConfigFile reads
+    // only a regular file, and stops past its own, larger, limit.
+    if (statSync(file).size > MAX_ENV_FILE_BYTES) return undefined;
+    const bytes = readConfigFile(file);
+    return bytes.length > MAX_ENV_FILE_BYTES ? undefined : parseEnvFile(bytes.toString("utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The variables of a dotenv file, read so that every one VS Code could find is found: blank lines and
+ * `#` comments skipped, an `export ` prefix, NAME=value with any name before the first `=` (a
+ * BASH_FUNC_name%% too), and `NAME: value` as the dotenv package also reads it. Each line counts on
+ * its own, one inside a value quoted over several lines too: a variable too many is a line too many
+ * in the report, one too few would act on the host unreported. A value in quotes is what they hold;
+ * any other is kept whole, a `#` included, since parsers differ on it: a PATH that one of them would
+ * cut is then a directory that is not the user's, rather than the user's PATH. Collected, then made
+ * into an object at once, as wrapEntry does (a variable named __proto__).
+ */
+export function parseEnvFile(text: string): Record<string, string> {
+  const variables: Array<[string, string]> = [];
+  for (const raw of text.split(/\r\n?|\n/)) {
+    const line = raw.trim().replace(/^export\s+/, "");
+    if (line === "" || line.startsWith("#")) continue;
+    const equals = line.indexOf("=");
+    if (equals > 0) variables.push([line.slice(0, equals).trim(), envValue(line.slice(equals + 1))]);
+    const colon = /^([\w.-]+):\s(.*)$/.exec(line);
+    if (colon !== null) variables.push([colon[1]!, envValue(colon[2]!)]);
+  }
+  return Object.fromEntries(variables);
+}
+
+/** A value of a dotenv line: what its quotes hold, before a comment at most, or the whole of it. */
+function envValue(raw: string): string {
+  const value = raw.trim();
+  return /^(['"`])(.*?)\1\s*(?:#.*)?$/.exec(value)?.[2] ?? value;
 }
 
 /** The file a command names here, symlinks followed, looked up in this process's PATH; undefined when there is none. */

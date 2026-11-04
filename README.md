@@ -162,7 +162,13 @@ one, and does not count the entry as caged; `--fix` leaves that `PATH` for you t
 A `PATH` made of your own directories, such as the `/opt/homebrew/bin:/usr/bin:/bin` of many
 Claude Desktop configurations, is fine. The same goes for `COPILOT_HOME`, `XDG_CONFIG_HOME` and
 `APPDATA` set to another place than yours: `mcpcage run` looks for the clients' configurations,
-which it refuses to mount, where they say.
+which it refuses to mount, where they say. VS Code also adds the variables of the file an entry's
+`envFile` names to that environment: `protect` reads it as it reads `env` (a regular file, up to
+1 MiB), names what in it would act on your machine (`envFile NODE_OPTIONS: ...`), and does not
+count the entry as caged when something does, or when the file cannot be read (`${workspaceFolder}`
+is known only in a project's own `.vscode/mcp.json` or `.cursor/mcp.json`). `wrap` and `--fix` keep
+the `envFile`, which VS Code loads as it is, and say that its variables reach mcpcage: the server
+gets only those named with `--env`.
 
 **Writable mounts are your choice.** A server that can write in a directory can change what your
 machine later runs from it: the code you run and build, and the files that git, editors and build

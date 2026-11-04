@@ -2462,6 +2462,79 @@ describe("an entry's env that moves the client configurations run refuses to mou
   });
 });
 
+describe("an entry's envFile", () => {
+  // VS Code loads the file an entry's envFile names and adds its variables to the environment it
+  // starts the entry with: after wrap, mcpcage's. An entry whose .env set NODE_OPTIONS was reported
+  // caged, and its preload ran on the host.
+  it("does not count as caged an entry whose envFile acts on the host or cannot be read, and --fix keeps envFile and says where it goes", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-envfile-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const installed = fakeMcpcage();
+    writeText(join(project, ".env"), "NODE_OPTIONS=--require ./never-printed.cjs\nAPI_KEY=never-printed-key\n");
+    writeText(join(project, "clean.env"), "API_KEY=never-printed-key\nNODE_ENV=production\n");
+    const run = ["run", "--", "npx", "-y", "@acme/notes-mcp"];
+    const servers = {
+      tuned: { type: "stdio", command: installed.command, args: run, envFile: "${workspaceFolder}/.env" },
+      missing: { type: "stdio", command: installed.command, args: run, envFile: "${workspaceFolder}/missing.env" },
+      clean: { type: "stdio", command: installed.command, args: run, envFile: "${workspaceFolder}/clean.env" },
+      fresh: { type: "stdio", command: "npx", args: ["-y", "@acme/fresh-mcp"], envFile: "${workspaceFolder}/clean.env" },
+    };
+    const vscode = locationsFor(home, project)("vscode", "project");
+    writeJsonFile(vscode, { servers });
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
+    const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+    const indent = " ".repeat(16);
+
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(`${scan.stdout}${scan.stderr}`).not.toContain("never-printed");
+    expect(scan.stdout).toContain(
+      `${lineOf(scan.stdout, "tuned")}\n${indent}envFile NODE_OPTIONS: can make Node run code on your machine before the cage starts\n  missing `,
+    );
+    expect(lineOf(scan.stdout, "tuned")).toMatch(/ {2}caged, but its env runs on your machine$/);
+    expect(scan.stdout).toContain(`${lineOf(scan.stdout, "missing")}\n${indent}envFile: \${workspaceFolder}/missing.env could not be read, so what it sets is unknown\n  clean `);
+    expect(lineOf(scan.stdout, "missing")).toMatch(/ {2}caged, but what its envFile sets is unknown$/);
+    expect(lineOf(scan.stdout, "clean")).toMatch(/ {2}caged$/);
+    expect(lineOf(scan.stdout, "fresh")).toMatch(/ {2}NOT CAGED$/);
+    expect(scan.stdout).toContain("  3 run on your machine with your permissions and no cage.");
+    expect(scan.stdout).toContain("  1 already runs through mcpcage.");
+    expect(scan.code).toBe(1);
+
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    expect(`${fix.stdout}${fix.stderr}`).not.toContain("never-printed");
+    expect(fix.stdout).toContain(
+      [
+        "\nPlan",
+        `  not changed: tuned in ${vscode}: its envFile sets NODE_OPTIONS, which acts on your machine before the cage starts: move it from \${workspaceFolder}/.env into its "env", or remove it`,
+        `  not changed: missing in ${vscode}: its envFile \${workspaceFolder}/missing.env could not be read, so what it sets is unknown: check that file, or move what it sets into its "env"`,
+        `  cage fresh in ${vscode}`,
+        "    its envFile stays: VS Code loads ${workspaceFolder}/clean.env, and its variables reach mcpcage on your machine (the server gets only those named with --env)",
+        "",
+      ].join("\n"),
+    );
+    expect(JSON.parse(readFileSync(vscode, "utf8")).servers).toEqual({ ...servers, fresh: { ...servers.fresh, command: installed.command, args: ["run", "--", "npx", "-y", "@acme/fresh-mcp"] } });
+    expect(fix.code).toBe(1); // tuned and missing are not caged
+  });
+
+  it("wrap keeps an entry's envFile and says where its variables go", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-envfile-"));
+    const project = join(top, "work");
+    const file = join(project, ".vscode", "mcp.json");
+    writeText(join(project, "clean.env"), "API_KEY=never-printed-key\n");
+    const clean = { type: "stdio", command: "npx", args: ["-y", "@acme/clean-mcp"], envFile: "${workspaceFolder}/clean.env" };
+    writeJsonFile(file, { servers: { clean } });
+    const result = mcpcageWithEnv(fakeUserEnv(join(top, "home"), join(top, "cage")), "wrap", file, "--no-build", "--command", "/opt/mcpcage");
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      "  caged clean: /opt/mcpcage run -- npx -y @acme/clean-mcp\n    its envFile stays: VS Code loads ${workspaceFolder}/clean.env, and its variables reach mcpcage on your machine (the server gets only those named with --env)\n",
+    );
+    expect(`${result.stdout}${result.stderr}`).not.toContain("never-printed");
+    expect(JSON.parse(readFileSync(file, "utf8")).servers.clean).toEqual({ ...clean, command: "/opt/mcpcage", args: ["run", "--", "npx", "-y", "@acme/clean-mcp"] });
+  });
+});
+
 describe("an env variable named __proto__", () => {
   // JSON.parse makes "__proto__" an own key like any other. Assigned on `{}`, it set the prototype
   // instead: wrap wrote the entry without its value and with its `--env __proto__`. Compared as JSON

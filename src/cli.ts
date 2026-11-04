@@ -15,7 +15,7 @@ import { parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, checkServerId, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, refuseTooMany, type Pending } from "./pinstore.js";
-import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, writableMounts, writableWarning, type Inspector } from "./protect.js";
+import { envFileNote, fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, writableMounts, writableWarning, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
@@ -365,6 +365,9 @@ function report(outcome: WrapOutcome, command: string, dryRun: boolean): void {
     print(`  ${command === "wrap" ? "caged" : "restored"} ${change.name}: ${[change.after.command, ...(command === "wrap" ? withoutEnvValues(args) : args)].join(" ")}`);
     // Only --writable makes wrap write :rw: what that lets the server change is said for each mount.
     if (command === "wrap") for (const path of writableMounts(change.after)) print(`    ${writableWarning(change.name, path)}`);
+    // VS Code loads an envFile as it is, now for mcpcage: said for each entry that keeps one.
+    const note = command === "wrap" ? envFileNote(change.after) : undefined;
+    if (note !== undefined) print(`    ${note}`);
   }
   for (const skipped of outcome.skipped) print(`  skipped ${skipped.name}: ${skipped.reason}`);
   if (outcome.backup) print(`  backup: ${outcome.backup}`);
