@@ -1,5 +1,7 @@
 # mcpcage
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ale-ehp/mcpcage/badge)](https://scorecard.dev/viewer/?uri=github.com/ale-ehp/mcpcage)
+
 **Run any MCP server in a cage: tool definitions pinned, hidden instructions explained, calls audited, the server sandboxed in a hardened container.**
 
 ![mcpcage demo: a stolen key stopped, a rug pull blocked and explained, exposed servers found](docs/demo.webp)
