@@ -13,7 +13,7 @@ import { isLocalPath, parseLaunch, serverIdFor, splitPackageSpec } from "../src/
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep, type Pin, type ToolDefinition } from "../src/manifest.js";
 import { approvePending, loadPin, pendingCount, savePending, savePin } from "../src/pinstore.js";
-import { cagePath, dockerfile, parseMount, placesInCage, runArgs, SETTINGS_LIMITS, within, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
+import { cagePath, dockerfile, hostMount, offDrive, parseMount, placesInCage, runArgs, SETTINGS_LIMITS, within, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
 import { describeViolationsWithFindings } from "../src/suspicious.js";
 import { fakeUserEnv, literal, mcpcageWithEnv } from "./helpers.js";
 
@@ -418,6 +418,16 @@ describe("sandbox command", () => {
     it("refuses a network share or a device path, which has no place in the cage", () => {
       for (const path of ["\\\\localhost\\C$\\Windows", "\\\\?\\C:\\Windows", "\\\\.\\C:\\Windows"]) {
         expect(() => parseMount(path), path).toThrow(`--mount: ${path} is not a path on a drive`);
+      }
+    });
+
+    it("refuses the start of a share or a device path written alone, which the system takes for the root of the drive", () => {
+      // Found by the property-based test of Windows paths: hostMount resolved \\ to C:\ before it
+      // looked for a drive, and mounted the whole drive; run did the same with --mount \\.
+      for (const path of ["\\\\", "//", "\\/", "/\\", "\\\\.", "//."]) {
+        expect(offDrive(path), path).toBe(true);
+        expect(() => hostMount(path, true), path).toThrow(`${path} is not a path on a drive`);
+        expect(() => parseMount(`${path}:rw`), path).toThrow(`--mount: ${path} is not a path on a drive`);
       }
     });
   });

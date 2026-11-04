@@ -190,8 +190,10 @@ export function parseMount(value: string): Mount {
  * what holds what by the paths, would have counted it as covered.
  */
 export function hostMount(path: string, readOnly: boolean): Mount {
-  // Checked before the disk is asked: a network path makes existsSync wait on the network.
-  if (process.platform === "win32") cagePath(resolve(path));
+  // Checked before the disk is asked: a network path makes existsSync wait on the network. A path off
+  // any drive as written is refused as written: resolved, \\ alone (or //, \\.) became C:\, and the
+  // whole drive was mounted.
+  if (process.platform === "win32") cagePath(offDrive(path) ? path : resolve(path));
   if (!existsSync(path)) throw new Error(`${path} does not exist`);
   const source = process.platform === "win32" ? realpathSync.native(path) : path;
   // A folder on a mapped network drive is spelled on disk as the share it is on.
@@ -608,8 +610,9 @@ function mountPath(value: string): { path: string; readOnly: boolean } {
     path = path.slice(0, -3);
   }
   if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
-  // On Windows \Users\me is absolute without a drive: resolved, it is on the current one.
-  if (!isAbsolute(path) || process.platform === "win32") path = resolve(path);
+  // On Windows \Users\me is absolute without a drive: resolved, it is on the current one. A path off
+  // any drive stays as written, for hostMount to refuse (see offDrive).
+  if (!offDrive(path) && (!isAbsolute(path) || process.platform === "win32")) path = resolve(path);
   return { path, readOnly };
 }
 
