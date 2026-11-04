@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +18,8 @@ const SPELLED = "[U+001B][2J\\r[U+009B][U+202E][U+200B]";
 const SPELLED_IN_JSON = "\\u001b[2J\\r[U+009B][U+202E][U+200B]";
 /** macOS and Windows compare names without case, so a writable mount there cannot hold a file setting (see withSettingsReadOnly). */
 const FOLDS_CASE = process.platform === "darwin" || process.platform === "win32";
+/** A mounted path as mcpcage names it: on Windows as the system spells it on disk, long names for 8.3 short ones (C:\Users\RUNNER~1). */
+const onDisk = (path: string) => (process.platform === "win32" ? realpathSync.native(path) : path);
 
 describe("cli", () => {
   it("prints help and version", () => {
@@ -236,7 +238,7 @@ describe("cli", () => {
     symlinkSync(join(top, "elsewhere"), join(project, ".vscode"));
     const refused = mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server);
     expect(refused.code).toBe(1);
-    expect(refused.stderr).toContain(`mcpcage: --mount ${project}:rw: ${join(project, ".vscode")} is a symlink`);
+    expect(refused.stderr).toContain(`mcpcage: --mount ${onDisk(project)}:rw: ${join(onDisk(project), ".vscode")} is a symlink`);
     // Read-only, the same directory needs nothing on top of it.
     expect(mcpcageWithEnv(env, "run", "--mount", project, ...server).stderr).toContain("Docker is required");
   });
@@ -272,15 +274,16 @@ describe("cli", () => {
     const system = process.platform === "win32" ? "Windows" : "macOS";
     const refused = mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server);
     expect(refused.code).toBe(1);
+    const shown = onDisk(project);
     expect(refused.stderr).toBe(
-      `mcpcage: --mount ${project}:rw: ${join(project, ".mcp.json")} is a file, and on ${system} the server could change it as ${join(project, ".MCP.JSON")}, ` +
-        `the same file under another case of its name, which a read-only mount does not cover. Mount a narrower directory, or mount ${project} read-only by dropping :rw.\n`,
+      `mcpcage: --mount ${shown}:rw: ${join(shown, ".mcp.json")} is a file, and on ${system} the server could change it as ${join(shown, ".MCP.JSON")}, ` +
+        `the same file under another case of its name, which a read-only mount does not cover. Mount a narrower directory, or mount ${shown} read-only by dropping :rw.\n`,
     );
     expect(mcpcageWithEnv(env, "run", "--mount", project, ...server).stderr).toContain("Docker is required");
     // Looked for at every run: a .git file that appeared since is refused the same way.
     expect(mcpcageWithEnv(env, "run", "--mount", `${join(project, "app")}:rw`, ...server).stderr).toContain("Docker is required");
     writeFileSync(join(project, "app", ".git"), "gitdir: ../meta\n");
-    expect(mcpcageWithEnv(env, "run", "--mount", `${join(project, "app")}:rw`, ...server).stderr).toContain(`${join(project, "app", ".git")} is a file, and on ${system}`);
+    expect(mcpcageWithEnv(env, "run", "--mount", `${join(project, "app")}:rw`, ...server).stderr).toContain(`${join(shown, "app", ".git")} is a file, and on ${system}`);
   });
 
   it("refuses a mount of the account's own ~/.ssh when HOME names another directory", () => {

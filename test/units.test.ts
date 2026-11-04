@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { join, parse, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
@@ -12,9 +12,14 @@ import { isLocalPath, parseLaunch, serverIdFor, splitPackageSpec } from "../src/
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep, type Pin, type ToolDefinition } from "../src/manifest.js";
 import { approvePending, loadPin, pendingCount, savePending, savePin } from "../src/pinstore.js";
-import { dockerfile, parseMount, runArgs, SETTINGS_LIMITS, within, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
+import { cagePath, dockerfile, parseMount, runArgs, SETTINGS_LIMITS, within, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
 import { describeViolationsWithFindings } from "../src/suspicious.js";
-import { fakeUserEnv, mcpcageWithEnv } from "./helpers.js";
+import { fakeUserEnv, literal, mcpcageWithEnv } from "./helpers.js";
+
+/** Where docker is told to put a path of this system in the cage: on Windows at /c/..., in the Linux container. */
+function inCage(path: string): string {
+  return process.platform === "win32" ? `/${path[0]!.toLowerCase()}${path.slice(2).split("\\").join("/")}` : path;
+}
 
 /** Runs `body` with mcpcage's data in a fresh directory, as the CLI sees it when MCPCAGE_HOME is set. */
 function inFreshHome(body: (home: string) => void): void {
@@ -276,9 +281,80 @@ describe("sandbox command", () => {
     const args = runArgs({ ...base, allowNet: true, env: ["API_KEY"], mounts: [parseMount(dir), parseMount(`${dir}:rw`)] }, "img").join(" ");
     expect(args).toContain("--network bridge");
     expect(args).toContain("-e API_KEY");
-    expect(args).toContain(`type=bind,source=${dir},target=${dir},readonly`);
-    expect(args).toMatch(new RegExp(`target=${dir}(?!,readonly)`));
+    // On Windows the folder as the system spells it on disk, at /c/... in the Linux container.
+    const source = process.platform === "win32" ? realpathSync.native(dir) : dir;
+    const target = inCage(source);
+    expect(args).toContain(`type=bind,source=${source},target=${target},readonly`);
+    expect(args).toMatch(new RegExp(`target=${literal(target)}(?!,readonly)`));
     expect(() => parseMount("/definitely/not/here")).toThrow(/does not exist/);
+  });
+
+  // Byte for byte what mcpcage gave Docker before Windows had places of its own in the cage.
+  it("mounts each path at the same path on macOS and Linux", () => {
+    const mounts: Mount[] = [
+      { source: "/Users/me/proj", target: "/Users/me/proj", readOnly: false },
+      { source: "/Users/me/proj/.git", target: "/Users/me/proj/.git", readOnly: true },
+      { source: "/Users/me/My Notes", target: "/Users/me/My Notes", readOnly: true },
+    ];
+    for (const platform of ["darwin", "linux"] as const) {
+      const args = runArgs({ ...base, mounts }, "img", platform);
+      expect(args.filter((arg, index) => args[index - 1] === "--mount")).toEqual([
+        "type=bind,source=/Users/me/proj,target=/Users/me/proj",
+        "type=bind,source=/Users/me/proj/.git,target=/Users/me/proj/.git,readonly",
+        "type=bind,source=/Users/me/My Notes,target=/Users/me/My Notes,readonly",
+      ]);
+    }
+  });
+
+  it("gives each mount on Windows its place in the Linux container: the drive letter in lowercase, then the names with /", () => {
+    // Docker refused target=C:\Users\me\proj, a Windows path, as a place in a Linux container.
+    const mounts: Mount[] = [
+      { source: "C:\\Users\\me\\proj", target: "C:\\Users\\me\\proj", readOnly: false },
+      { source: "C:\\Users\\me\\proj\\.git", target: "C:\\Users\\me\\proj\\.git", readOnly: true },
+      { source: "D:\\My Notes", target: "D:\\My Notes", readOnly: true },
+    ];
+    const args = runArgs({ ...base, mounts }, "img", "win32");
+    expect(args.filter((arg, index) => args[index - 1] === "--mount")).toEqual([
+      "type=bind,source=C:\\Users\\me\\proj,target=/c/Users/me/proj",
+      "type=bind,source=C:\\Users\\me\\proj\\.git,target=/c/Users/me/proj/.git,readonly",
+      "type=bind,source=D:\\My Notes,target=/d/My Notes,readonly",
+    ]);
+    expect(cagePath("c:/Users/me/proj/", "win32")).toBe("/c/Users/me/proj");
+    expect(cagePath("C:\\", "win32")).toBe("/c");
+    expect(cagePath("C:\\Users\\me", "linux")).toBe("C:\\Users\\me");
+    // A network share or a device path is on no drive: it has no place there.
+    for (const path of ["\\\\server\\share\\notes", "//server/share/notes", "\\\\?\\C:\\notes", "\\\\.\\C:\\notes"]) {
+      expect(() => cagePath(path, "win32")).toThrow(`${path} is not a path on a drive, and only those have a place in the cage on Windows`);
+    }
+  });
+
+  describe.runIf(process.platform === "win32")("on Windows", () => {
+    it("mounts a folder at one place in the cage however it is written, as the system spells it on disk", () => {
+      // The container compares paths with case: a read-only mount spelled one way did not cover the
+      // same folder in a writable mount spelled another way.
+      const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "mcpcage-Mount-")));
+      mkdirSync(join(dir, "Sub"));
+      const expected = { source: dir, target: dir, readOnly: true };
+      for (const spelled of [dir, dir.toUpperCase(), dir.toLowerCase(), dir.split("\\").join("/"), `${dir}\\`]) expect(parseMount(spelled), spelled).toEqual(expected);
+      // \Users\me is on the current drive.
+      if (parse(process.cwd()).root.toLowerCase() === parse(dir).root.toLowerCase()) expect(parseMount(dir.slice(2))).toEqual(expected);
+      const mounts = withSettingsReadOnly([parseMount(`${dir.toUpperCase()}:rw`), parseMount(join(dir.toLowerCase(), "SUB"))]);
+      const targets = runArgs({ ...base, mounts }, "img").filter((arg) => arg.startsWith("type=bind")).map((arg) => /target=([^,]*)/.exec(arg)![1]!);
+      expect(targets).toEqual([inCage(dir), `${inCage(dir)}/Sub`]);
+    });
+
+    // GitHub's Windows runners spell TEMP so (C:\Users\RUNNER~1); C:\PROGRA~1 is on most machines.
+    it.runIf(existsSync("C:\\PROGRA~1"))("mounts a folder written with 8.3 short names by its long names", () => {
+      const long = realpathSync.native("C:\\PROGRA~1");
+      expect(long).not.toContain("~");
+      expect(parseMount("C:\\PROGRA~1")).toEqual({ source: long, target: long, readOnly: true });
+    });
+
+    it("refuses a network share or a device path, which has no place in the cage", () => {
+      for (const path of ["\\\\localhost\\C$\\Windows", "\\\\?\\C:\\Windows", "\\\\.\\C:\\Windows"]) {
+        expect(() => parseMount(path), path).toThrow(`--mount: ${path} is not a path on a drive`);
+      }
+    });
   });
 
   it("installs with lifecycle scripts disabled and runs distroless as nonroot", () => {
@@ -422,9 +498,9 @@ describe("settings in a writable mount", () => {
     );
 
     const args = runArgs({ ...base, mounts }, "img").filter((arg) => arg.startsWith("type=bind"));
-    expect(args).toContain(`type=bind,source=${dir},target=${dir}`);
+    expect(args).toContain(`type=bind,source=${dir},target=${inCage(dir)}`);
     for (const path of [".git", ".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"]) {
-      expect(args).toContain(`type=bind,source=${join(dir, path)},target=${join(dir, path)},readonly`);
+      expect(args).toContain(`type=bind,source=${join(dir, path)},target=${inCage(join(dir, path))},readonly`);
     }
     expect(args).toHaveLength(10);
     // However the directory is spelled, each setting is mounted at its own place.
@@ -511,8 +587,8 @@ describe("settings in a writable mount", () => {
       expect(at(mounts, join(dir, "a/b"))).toBeLessThan(at(mounts, join(dir, "a/b/c")));
       expect(at(mounts, join(dir, "a/b/c"))).toBeLessThan(at(mounts, join(dir, "a/b/c/.git")));
       const args = runArgs({ ...base, mounts }, "img");
-      expect(args).toContain(`type=bind,source=${join(dir, "a/b")},target=${join(dir, "a/b")}`);
-      expect(args).toContain(`type=bind,source=${join(dir, "a/b/c/.git")},target=${join(dir, "a/b/c/.git")},readonly`);
+      expect(args).toContain(`type=bind,source=${join(dir, "a/b")},target=${inCage(join(dir, "a/b"))}`);
+      expect(args).toContain(`type=bind,source=${join(dir, "a/b/c/.git")},target=${inCage(join(dir, "a/b/c/.git"))},readonly`);
     });
 
     it("puts a mount the user gave inside such a directory after it", () => {

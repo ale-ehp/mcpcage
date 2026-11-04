@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256 } from "./canonical.js";
 import type { LaunchSpec } from "./launch.js";
@@ -22,6 +22,7 @@ export const NONROOT = "65532:65532";
 
 export interface Mount {
   source: string;
+  /** Where the server finds it, as this system spells paths: runArgs gives Docker its place in the cage (cagePath). */
   target: string;
   readOnly: boolean;
 }
@@ -84,7 +85,11 @@ export function prepareSandbox(options: SandboxOptions): Prepared {
   return { command: program.file, args: runArgs(options, record.imageId), env: program.env, record };
 }
 
-export function runArgs(options: Pick<SandboxOptions, "serverId" | "spec" | "mounts" | "env" | "allowNet" | "memory" | "cpus" | "keepImageUser">, image: string): string[] {
+export function runArgs(
+  options: Pick<SandboxOptions, "serverId" | "spec" | "mounts" | "env" | "allowNet" | "memory" | "cpus" | "keepImageUser">,
+  image: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
   const args = [
     "run", "--rm", "-i", "--init",
     "--name", `mcpcage-${options.serverId}-${randomBytes(3).toString("hex")}`,
@@ -116,7 +121,7 @@ export function runArgs(options: Pick<SandboxOptions, "serverId" | "spec" | "mou
     args.push("-e", variable);
   }
   for (const mount of options.mounts) {
-    args.push("--mount", `type=bind,source=${mount.source},target=${mount.target}${mount.readOnly ? ",readonly" : ""}`);
+    args.push("--mount", `type=bind,source=${mount.source},target=${cagePath(mount.target, platform)}${mount.readOnly ? ",readonly" : ""}`);
   }
   args.push(image, ...options.spec.args);
   return args;
@@ -125,9 +130,49 @@ export function runArgs(options: Pick<SandboxOptions, "serverId" | "spec" | "mou
 /** `--mount ~/notes` mounts read-only at the same path; `--mount ~/out:rw` makes it writable. */
 export function parseMount(value: string): Mount {
   const { path, readOnly } = mountPath(value);
-  if (!existsSync(path)) throw new Error(`--mount: ${path} does not exist`);
-  if (path.includes(",")) throw new Error(`--mount: paths containing commas are not supported (${path})`);
-  return { source: path, target: path, readOnly };
+  try {
+    return hostMount(path, readOnly);
+  } catch (error) {
+    throw new Error(`--mount: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * The mount of `path`, an absolute path of this machine, at its place in the cage (see cagePath).
+ * On Windows the path is taken as the system spells it on disk (realpathSync.native: each name in
+ * its case, long names for 8.3 short ones, C:\PROGRA~1 as C:\Program Files), because the
+ * container compares paths with case: a read-only mount spelled one way did not cover the same
+ * directory inside a writable mount spelled another way, and withSettingsReadOnly, which tells
+ * what holds what by the paths, would have counted it as covered.
+ */
+export function hostMount(path: string, readOnly: boolean): Mount {
+  // Checked before the disk is asked: a network path makes existsSync wait on the network.
+  if (process.platform === "win32") cagePath(resolve(path));
+  if (!existsSync(path)) throw new Error(`${path} does not exist`);
+  const source = process.platform === "win32" ? realpathSync.native(path) : path;
+  // A folder on a mapped network drive is spelled on disk as the share it is on.
+  if (process.platform === "win32") cagePath(source);
+  if (source.includes(",")) throw new Error(`paths containing commas are not supported (${source})`);
+  return { source, target: source, readOnly };
+}
+
+/**
+ * Where the server finds the path `path` of this machine (absolute) in the cage. On macOS and Linux
+ * at the same path. On Windows the cage is a Linux container: Docker refused
+ * `target=C:\Users\me\notes`, and a server given `C:\Users\me\notes` there looks for a file of
+ * that name in its working directory. So a Windows path has one place there: the drive letter in
+ * lowercase as the first name, then its names with `/`, in their case, since the container compares
+ * paths with case (see hostMount): C:\Users\me\notes is /c/Users/me/notes. A path that is not on a
+ * drive (\\server\share, \\?\..., \\.\...) has no place there.
+ */
+export function cagePath(path: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== "win32") return path;
+  const normal = win32.normalize(path);
+  const drive = /^([A-Za-z]):\\/.exec(normal);
+  if (drive === null) {
+    throw new Error(`${path} is not a path on a drive, and only those have a place in the cage on Windows: mount a folder such as C:\\Users\\me\\notes, not a network share or a device path (\\\\server\\share, \\\\?\\..., \\\\.\\...)`);
+  }
+  return `/${drive[1]!.toLowerCase()}${normal.slice(2).split("\\").filter(Boolean).map((name) => `/${name}`).join("")}`;
 }
 
 /*
@@ -460,7 +505,8 @@ function mountPath(value: string): { path: string; readOnly: boolean } {
     path = path.slice(0, -3);
   }
   if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
-  if (!isAbsolute(path)) path = resolve(path);
+  // On Windows \Users\me is absolute without a drive: resolved, it is on the current one.
+  if (!isAbsolute(path) || process.platform === "win32") path = resolve(path);
   return { path, readOnly };
 }
 
