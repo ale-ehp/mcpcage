@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { isJsonObject, parseJsonc } from "./jsonc.js";
 
@@ -55,8 +55,16 @@ export function discoverConfigs(options: { platform: NodeJS.Platform; home: stri
   add("claude-code", "project", path.join(project, ".mcp.json"));
   add("cursor", "user", path.join(home, ".cursor", "mcp.json"));
   add("cursor", "project", path.join(project, ".cursor", "mcp.json"));
-  add("vscode", "user", path.join(appData, "Code", "User", "mcp.json"), "servers");
-  add("vscode", "user", path.join(appData, "Code - Insiders", "User", "mcp.json"), "servers");
+  // On Linux VS Code keeps its user data under $XDG_CONFIG_HOME when that is set (userDataPath.ts in
+  // VS Code's sources); a relative value is ignored, as the XDG specification says.
+  const xdg = options.env.XDG_CONFIG_HOME;
+  const vscodeData = options.platform === "linux" && xdg && posix.isAbsolute(xdg) ? xdg : appData;
+  for (const product of ["Code", "Code - Insiders"]) {
+    const user = path.join(vscodeData, product, "User");
+    add("vscode", "user", path.join(user, "mcp.json"), "servers");
+    // Each named profile has its own mcp.json; only the ones that exist are listed.
+    for (const file of profileFiles(path.join(user, "profiles"), path)) add("vscode", "user", file, "servers");
+  }
   add("vscode", "project", path.join(project, ".vscode", "mcp.json"), "servers");
   add("copilot", "user", path.join(options.env.COPILOT_HOME || path.join(home, ".copilot"), "mcp-config.json"));
   add("windsurf", "user", path.join(home, ".codeium", "windsurf", "mcp_config.json"));
@@ -86,6 +94,17 @@ export function claudeCodeSections(config: unknown): Array<{ path: string[]; lab
     }
   }
   return sections;
+}
+
+/** `<profiles>/<id>/mcp.json` for every VS Code profile that has one, in a stable order. */
+function profileFiles(profiles: string, path: typeof posix): string[] {
+  let ids: string[];
+  try {
+    ids = readdirSync(profiles).sort();
+  } catch {
+    return []; // no profiles yet
+  }
+  return ids.map((id) => path.join(profiles, id, "mcp.json")).filter((file) => existsSync(file));
 }
 
 /** A file that cannot be read or parsed has only its root section; the scan reports the error. */

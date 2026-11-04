@@ -237,6 +237,73 @@ describe("configuration discovery", () => {
   });
 });
 
+describe("VS Code under XDG_CONFIG_HOME and in profiles", () => {
+  /** VS Code's user files in the order listed, each with whether it exists. */
+  const vscodeUser = (locations: ReturnType<typeof discoverConfigs>) =>
+    locations.filter((location) => location.client === "vscode" && location.scope === "user").map(({ file, exists, key, jsonc }) => ({ file, exists, key, jsonc }));
+  const user = (file: string, exists: boolean) => ({ file, exists, key: "servers", jsonc: true });
+
+  it("follows an absolute XDG_CONFIG_HOME on Linux, and only on Linux", () => {
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+    const project = mkdtempSync(join(tmpdir(), "mcpcage-project-"));
+    const xdg = join(home, "xdg");
+    writeJsonFile(join(xdg, "Code", "User", "mcp.json"), { servers: {} });
+    const linux = discoverConfigs({ platform: "linux", home, env: { XDG_CONFIG_HOME: xdg }, project });
+    expect(vscodeUser(linux)).toEqual([user(join(xdg, "Code", "User", "mcp.json"), true), user(join(xdg, "Code - Insiders", "User", "mcp.json"), false)]);
+    // Only VS Code's files move: the other clients' documentation names ~/.config itself.
+    expect(linux.find((location) => location.client === "devin" && location.scope === "user")!.file).toBe(join(home, ".config", "devin", "mcp_config.json"));
+
+    const relativeXdg = discoverConfigs({ platform: "linux", home, env: { XDG_CONFIG_HOME: "xdg" }, project });
+    expect(vscodeUser(relativeXdg).map((location) => location.file)).toEqual([
+      join(home, ".config", "Code", "User", "mcp.json"),
+      join(home, ".config", "Code - Insiders", "User", "mcp.json"),
+    ]);
+    const darwin = discoverConfigs({ platform: "darwin", home, env: { XDG_CONFIG_HOME: xdg }, project });
+    expect(vscodeUser(darwin).map((location) => location.file)).toEqual([
+      join(home, "Library", "Application Support", "Code", "User", "mcp.json"),
+      join(home, "Library", "Application Support", "Code - Insiders", "User", "mcp.json"),
+    ]);
+  });
+
+  it("lists the mcp.json of every profile that has one, after the product's default file", () => {
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+    const project = mkdtempSync(join(tmpdir(), "mcpcage-project-"));
+    const code = join(home, "Library", "Application Support", "Code", "User");
+    const insiders = join(home, "Library", "Application Support", "Code - Insiders", "User");
+    const profiles = [join(code, "profiles", "-1a2b3c4d", "mcp.json"), join(code, "profiles", "5e6f7a8b", "mcp.json"), join(insiders, "profiles", "9c0d1e2f", "mcp.json")];
+    for (const file of profiles) writeJsonFile(file, { servers: {} });
+    mkdirSync(join(code, "profiles", "no-servers"), { recursive: true }); // a profile without mcp.json
+    const locations = discoverConfigs({ platform: "darwin", home, env: {}, project });
+    expect(vscodeUser(locations)).toEqual([
+      user(join(code, "mcp.json"), false), // the default file stays listed although absent
+      user(profiles[0]!, true),
+      user(profiles[1]!, true),
+      user(join(insiders, "mcp.json"), false),
+      user(profiles[2]!, true),
+    ]);
+    expect(locations.filter((location) => location.exists).map((location) => location.file)).toEqual(profiles);
+  });
+
+  it("finds profiles under XDG_CONFIG_HOME too, and needs no profiles directory", () => {
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+    const project = mkdtempSync(join(tmpdir(), "mcpcage-project-"));
+    const xdg = join(home, "xdg");
+    const profile = join(xdg, "Code", "User", "profiles", "work", "mcp.json");
+    writeJsonFile(profile, { servers: {} });
+    expect(vscodeUser(discoverConfigs({ platform: "linux", home, env: { XDG_CONFIG_HOME: xdg }, project })).map((location) => location.file)).toEqual([
+      join(xdg, "Code", "User", "mcp.json"),
+      profile,
+      join(xdg, "Code - Insiders", "User", "mcp.json"),
+    ]);
+    // A home where VS Code never ran: the two default files, absent, as before.
+    const empty = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+    expect(vscodeUser(discoverConfigs({ platform: "linux", home: empty, env: {}, project }))).toEqual([
+      user(join(empty, ".config", "Code", "User", "mcp.json"), false),
+      user(join(empty, ".config", "Code - Insiders", "User", "mcp.json"), false),
+    ]);
+  });
+});
+
 describe("JSON with comments", () => {
   it("drops comments and trailing commas outside strings only", () => {
     const text = '{\n  // a comment\n  "url": "http://x/*not a comment*/", /* block\n comment */ "list": [1, 2,],\n  "slashes": "a // b",\n}\n';
