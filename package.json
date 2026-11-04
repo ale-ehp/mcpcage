@@ -27,8 +27,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && vitest run --exclude 'test/**/*.docker.test.ts'",
-    "test:docker": "npm run build && vitest run test/*.docker.test.ts",
-    "demo:webp": "bash demo/record.sh"
+    "test:docker": "npm run build && vitest run test/*.docker.test.ts"
   },
   "keywords": [
     "mcp",
