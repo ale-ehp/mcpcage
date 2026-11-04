@@ -103,6 +103,20 @@ describe("cli", () => {
     expect(allowed.stderr).toContain("Docker is required"); // past the check, stopped where Docker is needed
   });
 
+  it("refuses a writable mount of a shell startup file unless --allow-sensitive-mount is given", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
+    const home = join(top, "home");
+    const cage = join(top, "cage");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, ".zshrc"), "# runs at every new terminal\n");
+    const env = fakeUserEnv(home, cage, { PATH: join(top, "no-docker-here") });
+
+    const refused = mcpcageWithEnv(env, "run", "--mount", "~/.zshrc:rw", "--", "npx", "-y", "something");
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toBe(`mcpcage: --mount ${join(home, ".zshrc")}: the commands your shell runs in ~/.zshrc. Pass --allow-sensitive-mount if you really want this.\n`);
+    expect(existsSync(cage)).toBe(false);
+  });
+
   it("refuses host commands unless --no-sandbox is explicit", () => {
     const home = freshHome();
     const result = mcpcage(home, "run", "--", "python3", "server.py");

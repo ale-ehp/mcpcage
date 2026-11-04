@@ -594,11 +594,13 @@ function broadPaths(args: string[], home: string): string[] {
 /**
  * Plain words for a path that opens the whole disk, the whole home directory or more, or a directory
  * with credentials, as sensitive.ts decides for every mount; undefined for an ordinary one. A home
- * directory written like C:\Users\me means Windows paths.
+ * directory written like C:\Users\me means Windows paths. This machine's PATH counts only for paths
+ * of this machine's kind: it is written in that syntax.
  */
 export function broadAccessKind(path: string, home: string): string | undefined {
   const platform = /^[A-Za-z]:/.test(home) ? "win32" : process.platform === "win32" ? "linux" : process.platform;
-  return sensitivePath(expandHome(path, home), { home, platform, cage: cageHome() });
+  const pathEnv = platform === process.platform ? process.env.PATH : undefined;
+  return sensitivePath(expandHome(path, home), { home, platform, cage: cageHome(), path: pathEnv });
 }
 
 function expandHome(path: string, home: string): string {

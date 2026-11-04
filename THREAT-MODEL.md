@@ -54,10 +54,13 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 - **What you mount or allow.** A server can use what it is given: a `--mount`, `--allow-net`.
   Mounts are read-only unless `:rw` is written explicitly. `wrap` and `protect --fix` mount the
   paths a server is configured with read-write, because the server is expected to work there, but
-  never the whole disk, the home directory or a directory with credentials or system files
-  (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `/etc`, the Docker socket, mcpcage's own
-  `~/.mcpcage`...): a server that needs one is left uncaged, with the reason, and the report names
-  the path. `mcpcage run` refuses such a `--mount` unless `--allow-sensitive-mount` is given; with
+  never the whole disk, the home directory, a directory with credentials or system files
+  (`~/.ssh`, `~/.aws`, `~/.config/gh`, `/etc`, the Docker sockets, mcpcage's own `~/.mcpcage`...),
+  nor a place the machine runs commands from: other clients' MCP and agent configurations
+  (`~/.cursor`, `~/.claude`...), shell and login startup files, git's configuration and any
+  repository's `.git`, a project's editor and agent settings (`.vscode`, `.mcp.json`...), and the
+  programs on the PATH and where they are installed (`~/.local/bin`, `~/.npm`, `/usr/local`...): a
+  server that needs one is left uncaged, with the reason, and the report names the path. `mcpcage run` refuses such a `--mount` unless `--allow-sensitive-mount` is given; with
   it, the server can use that path like any other.
 - **Sensitive paths during `protect --inspect`.** To list a server's tools, `--inspect` mounts its
   path arguments read-only, without network, the sensitive ones included. In that time a server

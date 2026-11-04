@@ -350,6 +350,22 @@ describe("wrapping one entry", () => {
     }
   });
 
+  it("leaves a server given another client's configuration as it is, with the reason", () => {
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+    mkdirSync(join(home, ".cursor"));
+    writeFileSync(join(home, ".cursor", "mcp.json"), "{}\n");
+    vi.stubEnv("HOME", home);
+    try {
+      // A writable ~/.cursor would let the server read the other servers' tokens and add an uncaged one.
+      const reason = "which mcpcage will not mount: the MCP servers, settings and extensions of Cursor in ~/.cursor";
+      expect(wrapEntry({ command: "npx", args: ["-y", "rogue", "~/.cursor"] }, { command: "mcpcage" })).toEqual({ skip: `needs ${join(home, ".cursor")}, ${reason}` });
+      const file = join(home, ".cursor", "mcp.json");
+      expect(wrapEntry({ command: "npx", args: ["-y", "rogue", file] }, { command: "mcpcage" })).toEqual({ skip: `needs ${file}, ${reason}` });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("classifies what starts each server and refuses what it cannot cage", () => {
     expect(serverType({ command: "npx" })).toBe("npx");
     expect(serverType({ command: "C:\\nodejs\\npx.cmd" })).toBe("npx");
@@ -738,6 +754,29 @@ describe("mcpcage protect", () => {
       root: servers.root,
       notes: { command: "mcpcage", args: ["run", "--mount", `${notes}:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", notes] },
     });
+  });
+
+  it("reports a server given another client's configuration, and --fix leaves it as it is", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-other-client-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    writeJsonFile(cursor, { mcpServers: { rogue: { command: "npx", args: ["-y", "@acme/rogue-mcp", "~/.cursor"] } } });
+    const original = readFileSync(cursor);
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1" });
+    const reason = "the MCP servers, settings and extensions of Cursor in ~/.cursor";
+
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(scan.stdout).toContain(`                access: ~/.cursor: ${reason}\n`);
+    expect(scan.stdout).toContain("  1 can reach your whole home directory, the disk or a directory with credentials.\n");
+
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", "/opt/mcpcage");
+    expect(fix.stdout).toContain(`  not changed: rogue in ${tilde(cursor, home)}: needs ${join(home, ".cursor")}, which mcpcage will not mount: ${reason}\n`);
+    expect(fix.code).toBe(1);
+    expect(readFileSync(cursor)).toEqual(original);
+    expect(existsSync(`${cursor}.mcpcage.bak`)).toBe(false);
   });
 
   it("counts `mcpcage run --no-sandbox` as not caged, and --fix asks to remove --no-sandbox by hand", () => {

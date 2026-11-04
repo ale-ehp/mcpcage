@@ -130,8 +130,12 @@ or put `mcpcage run` in front of a server command yourself:
 `wrap` and `protect --fix` add that `--mount` for you: every path a server is given as an argument
 and that exists on your machine is mounted read-write at the same path, and `~/` is expanded,
 because inside the cage HOME is `/tmp`. The exception is a path that would undo the cage: the whole
-disk, your home directory, or a directory with credentials or system files (`~/.ssh`, `~/.aws`,
-`~/.config/gcloud`, `/etc`, the Docker socket, mcpcage's own `~/.mcpcage`...). A server given one
+disk, your home directory, a directory with credentials or system files (`~/.ssh`, `~/.aws`,
+`~/.config/gh`, `/etc`, the Docker sockets, mcpcage's own `~/.mcpcage`...), or a place your machine
+runs commands from: other clients' MCP and agent configurations (`~/.cursor`, `~/.claude`, Claude
+Desktop's), shell and login startup files (`~/.zshrc`, `~/Library/LaunchAgents`), git's
+configuration and any repository's `.git`, a project's `.vscode` or `.mcp.json`, and the programs
+you run (`~/.local/bin`, `~/.npm`, `/usr/local`, every directory on your PATH). A server given one
 is left as it is, uncaged, and the reason is printed; `mcpcage run` refuses such a `--mount` unless
 you add `--allow-sensitive-mount`. Images are built right away, so the client's first start does
 not wait for a build.
@@ -283,7 +287,7 @@ mcpcage doctor                                         check Docker and the loca
 ```
 
 Run options: `--mount <path>[:rw]`, `--allow-sensitive-mount` (without it, a `--mount` of the whole
-disk, your home directory or a directory with credentials is refused), `--env <NAME[=value]>`,
+disk, your home directory or another path that would undo the cage is refused), `--env <NAME[=value]>`,
 `--allow-net`, `--allow-server-requests` (without it, a server's requests to run the model or to
 question you are refused), `--strict`, `--id`, `--memory`, `--cpus`, `--keep-image-user` (with
 `--image`), `--rebuild`, `--no-sandbox`.

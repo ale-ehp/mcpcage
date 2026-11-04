@@ -122,7 +122,7 @@ export function parseMount(value: string): Mount {
  */
 export function sensitiveMount(value: string): { path: string; reason: string } | undefined {
   const { path } = mountPath(value);
-  const reason = sensitivePath(path, { home: homedir(), platform: process.platform, cage: cageHome() });
+  const reason = sensitivePath(path, { home: homedir(), platform: process.platform, cage: cageHome(), path: process.env.PATH });
   return reason === undefined ? undefined : { path, reason };
 }
 

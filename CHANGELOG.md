@@ -29,6 +29,15 @@ and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `$id` and `$ref`, and the address, name, title and description of a `resource_link` or an
   embedded resource in a tool's result. They are now read like any other text, a key counts toward
   the 20,000 strings of the scan budget, and its path ends with `(key)`.
+- `wrap` and `protect --fix` mounted read-write, and `run --mount` accepted, the places where a
+  writable mount lets a server out of the cage: a caged server given `~/.cursor` read the GitHub
+  token of another server in `mcp.json` and added an uncaged server of its own. Other clients' MCP
+  and agent configurations, shell and login startup files, git's configuration and any
+  repository's `.git`, a project's `.vscode`, `.idea`, `.claude` or `.mcp.json`, more credentials
+  (`~/.config/gh`, `~/.pypirc`, `~/.cargo/credentials`...), the programs on the PATH and where they
+  are installed, and the sockets of Rancher Desktop, Lima, Docker Desktop and rootless Docker or
+  Podman now count like `~/.ssh`: the entry is left as it is with the reason, `run` refuses the
+  mount without `--allow-sensitive-mount`, and `protect` names the path.
 
 ## [0.4.0] - 2026-11-04
 

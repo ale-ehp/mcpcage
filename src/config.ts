@@ -73,7 +73,7 @@ export function wrapEntry(entry: ServerEntry, options: { command: string }): { e
   const npxPart = args.slice(0, args.length - serverArgs.length);
   const paths = serverArgs.map((arg) => hostPath(arg));
   for (const path of paths) {
-    const reason = path === undefined ? undefined : sensitivePath(path, { home: homedir(), platform: process.platform, cage: cageHome() });
+    const reason = path === undefined ? undefined : sensitivePath(path, { home: homedir(), platform: process.platform, cage: cageHome(), path: process.env.PATH });
     if (reason !== undefined) return { skip: `needs ${path}, which mcpcage will not mount: ${reason}` };
   }
   const envFlags = Object.keys(entry.env ?? {}).flatMap((variable) => ["--env", variable]);
