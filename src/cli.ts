@@ -8,6 +8,7 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
+import { banner } from "./banner.js";
 import { discoverConfigs } from "./clients.js";
 import { RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
@@ -71,6 +72,9 @@ Protect options:
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
+  // For a person at a terminal only (see banner.ts): never on run's stdout, the MCP channel.
+  const shown = banner(command, process.stdout, VERSION);
+  if (shown !== undefined) process.stdout.write(`${shown}\n\n`);
   switch (command) {
     case "run":
       return run(rest);
