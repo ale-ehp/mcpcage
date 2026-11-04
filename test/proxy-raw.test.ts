@@ -19,7 +19,7 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", (l
   try { message = JSON.parse(line); } catch { return; }
   if (message.id === undefined || message.id === null) return;
   if (message.method === "tools/list") send({ id: message.id, result: { tools } });
-  else if (message.method === "tools/call") send({ id: message.id, result: { content: [{ type: "text", text: "called " + JSON.stringify(message.params.name) }] } });
+  else if (message.method === "tools/call") send({ id: message.id, result: { content: [{ type: "text", text: "called " + JSON.stringify(message.params?.name) }] } });
   else if (message.method === "ping") send({ id: message.id, result: {} });
 });
 `;
@@ -87,5 +87,28 @@ describe("calls a client writes by hand", () => {
       ["delete_everything", 'tool "delete_everything" is not in the approved manifest'],
       ["constructor", 'tool "constructor" is not in the approved manifest'],
     ]);
+  });
+
+  it("refuses a call whose tool name is not a string, even with a tool named with nothing approved", async () => {
+    // Found by the proxy's property-based test: such a call was taken for a call to the tool named "".
+    const home = freshHome();
+    const session = rawSession(home, [{ name: "", description: "A tool with an empty name.", inputSchema: { type: "object" } }]);
+    session.send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    await session.answer(1);
+    session.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { arguments: {} } });
+    session.send(call(5, 3));
+    session.send(call(null, 4));
+    session.send(call(["x"], 5));
+    session.send({ jsonrpc: "2.0", id: 6, method: "tools/call" });
+    // The tool named "" is approved, and its calls pass.
+    session.send(call("", 7));
+    expect((await session.answer(7)).result).toEqual({ content: [{ type: "text", text: 'called ""' }] });
+    for (const id of [2, 3, 4, 5, 6]) {
+      expect(await session.answer(id)).toMatchObject({ error: { code: -32001, message: "mcpcage blocked tools/call: its tool name is not a string. Run `mcpcage diff raw` to review." } });
+    }
+    expect(await session.close()).toBe(0);
+    expect(session.got().map((line) => line.id)).toEqual([1, 7]);
+    const blocked = audit(home).filter((entry) => entry.event === "call-blocked");
+    expect(blocked.map((entry) => [entry.id, entry.reason])).toEqual([2, 3, 4, 5, 6].map((id) => [id, "its tool name is not a string"]));
   });
 });

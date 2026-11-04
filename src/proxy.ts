@@ -131,16 +131,20 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       // Every call is filtered, a notification too: sent without an id, a call to a tool never approved
       // reached the server, which can act on it as on any other.
       if (message.method === "tools/call") {
-        const tool = typeof message.params?.name === "string" ? message.params.name : "";
+        // A name that is not a string names no tool. It was taken for "", and a server that had a tool
+        // named "" approved was given calls without a name, or with a number or a list for one.
+        const tool = typeof message.params?.name === "string" ? message.params.name : undefined;
         // Only a tool approved under that very name passes: looked up plainly, "constructor",
         // "toString", "__proto__" and the other names every object inherits passed unlisted.
         const reason = locked
           ? `this session is locked because ${locked}`
           : !pin
             ? "no approved tool manifest yet (the client must list tools first)"
-            : !own(pin.tools, tool)
-              ? `tool "${tool}" is not in the approved manifest`
-              : undefined;
+            : tool === undefined
+              ? "its tool name is not a string"
+              : !own(pin.tools, tool)
+                ? `tool "${tool}" is not in the approved manifest`
+                : undefined;
         if (reason) {
           audit.write("call-blocked", { id: message.id, tool, reason });
           if (id !== undefined) refuse(id, `mcpcage blocked tools/call: ${reason}. Run \`mcpcage diff ${serverId}\` to review.`);
