@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256 } from "./canonical.js";
 import type { LaunchSpec } from "./launch.js";
@@ -113,6 +113,95 @@ export function parseMount(value: string): Mount {
   if (!existsSync(path)) throw new Error(`--mount: ${path} does not exist`);
   if (path.includes(",")) throw new Error(`--mount: paths containing commas are not supported (${path})`);
   return { source: path, target: path, readOnly };
+}
+
+/*
+ * What stays read-only inside a writable mount, wherever it is found there. Each entry is read by a
+ * program on the host when the user opens the project, and can name a program for it to run: a
+ * server that could change one could get its own command run outside the cage, without the user
+ * doing anything. Names are compared in lowercase, because on macOS and Windows `.GIT` is `.git`.
+ */
+const HOST_SETTINGS: ReadonlySet<string> = new Set([
+  // git runs the commands its repository configuration names (core.fsmonitor, core.hooksPath, hooks,
+  // filters, diff drivers), and editors run `git status` in the background as soon as a folder is
+  // open. In a worktree or a submodule, .git is a file that says where the repository is.
+  ".git",
+  // VS Code, and the editors built on it: tasks that can run when the folder opens, settings that
+  // name programs, and the project's MCP servers in .vscode/mcp.json.
+  ".vscode",
+  // JetBrains IDEs: run configurations, and the tasks they can start when the project opens.
+  ".idea",
+  // Cursor: the project's MCP servers in .cursor/mcp.json, and the rules its agent follows.
+  ".cursor",
+  // Claude Code: project settings, whose hooks run shell commands and which can enable MCP servers.
+  ".claude",
+  // Devin: the project's MCP servers in .devin/mcp_config.json.
+  ".devin",
+  // Windsurf: the rules and workflows its agent follows in the project.
+  ".windsurf",
+  // Claude Code: the project's MCP servers, started when the project opens.
+  ".mcp.json",
+]);
+
+/** How far the search for those settings goes in one writable mount, and how many mounts it may add in all. */
+export const SETTINGS_LIMITS = { entries: 100_000, mounts: 1_000 };
+
+/**
+ * The mounts a server gets: those given, then each existing entry named like a host setting above,
+ * found at any depth inside a writable directory, mounted read-only on top at the same path. Run
+ * at every start, so it sees the directory as it is then; a server can still create such an entry
+ * where none existed. The walk is breadth-first, never follows a symlink, and does not go into
+ * node_modules or into the settings themselves. A writable mount the user gave for a setting itself
+ * is an explicit choice: it gets nothing on top of it or inside it. Anything that would leave a
+ * setting writable, or take too long to find them all, refuses the start instead.
+ */
+export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS): Mount[] {
+  const isSetting = (name: string) => HOST_SETTINGS.has(name.toLowerCase());
+  // Compared resolved: docker refuses two mounts at one place, however it is spelled.
+  const given = new Set(mounts.map((mount) => resolve(mount.target)));
+  const added: Mount[] = [];
+  const seen = new Set<string>();
+  for (const mount of mounts) {
+    if (mount.readOnly || isSetting(basename(mount.source)) || !statSync(mount.source).isDirectory()) continue;
+    const refuse = (problem: string, remedy = "Mount a narrower directory") =>
+      new Error(`--mount ${mount.source}:rw: ${problem}. ${remedy}, or mount ${mount.source} read-only by dropping :rw.`);
+    let visited = 0;
+    const queue = [mount.source];
+    for (let next = 0; next < queue.length; next++) {
+      const dir = queue[next]!;
+      let entries: Dirent[];
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch (error) {
+        // A directory mcpcage cannot read may still hold a setting the server can reach by its name.
+        throw refuse(`cannot look inside ${dir} for git's and the editors' settings (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})`);
+      }
+      for (const entry of entries) {
+        if (++visited > limits.entries) {
+          throw refuse(`more than ${limits.entries.toLocaleString("en-US")} entries to look through for git's and the editors' settings, which mcpcage keeps read-only in a writable mount`);
+        }
+        const path = join(dir, entry.name);
+        if (!isSetting(entry.name)) {
+          if (entry.isDirectory() && entry.name !== "node_modules") queue.push(path);
+          continue;
+        }
+        if (entry.isSymbolicLink()) {
+          throw refuse(`${path} is a symlink, and mcpcage keeps git's and the editors' settings read-only in a writable mount: a read-only mount would follow the link to wherever it points`, "Replace the link with what it points to");
+        }
+        // docker's --mount takes comma-separated fields, and the server names the directories of its
+        // writable mount: in `<dir>/x,source=/home/me/.ssh,target=/k/.git` it would write fields of its own.
+        if (path.includes(",")) throw refuse(`${path} cannot be kept read-only, because paths containing commas are not supported`, "Rename it");
+        const target = resolve(mount.target, relative(mount.source, path));
+        if (given.has(target) || seen.has(target)) continue;
+        seen.add(target);
+        added.push({ source: path, target, readOnly: true });
+        if (added.length > limits.mounts) {
+          throw refuse(`more than ${limits.mounts.toLocaleString("en-US")} of git's and the editors' settings to keep read-only (${[...HOST_SETTINGS].join(", ")})`);
+        }
+      }
+    }
+  }
+  return [...mounts, ...added];
 }
 
 /**

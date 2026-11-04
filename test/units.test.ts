@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -11,7 +11,7 @@ import { parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep, type Pin, type ToolDefinition } from "../src/manifest.js";
 import { approvePending, loadPin, savePending, savePin } from "../src/pinstore.js";
-import { dockerfile, parseMount, runArgs } from "../src/sandbox.js";
+import { dockerfile, parseMount, runArgs, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
 import { describeViolationsWithFindings } from "../src/suspicious.js";
 
 /** Runs `body` with mcpcage's data in a fresh directory, as the CLI sees it when MCPCAGE_HOME is set. */
@@ -237,6 +237,108 @@ describe("sandbox command", () => {
     expect(text).toMatch(/FROM gcr\.io\/distroless\/nodejs22-debian12:nonroot@sha256:[0-9a-f]{64}/);
     expect(text).toContain("RUN npm install --ignore-scripts --omit=dev pkg@1");
     expect(text).toContain("USER 65532:65532");
+  });
+});
+
+describe("settings in a writable mount", () => {
+  const base = { serverId: "x", spec: { kind: "npm" as const, packageName: "p", args: [] }, env: [], allowNet: false, memory: "512m", cpus: "1", keepImageUser: false };
+
+  /** A project as an editor sees it: repositories, a worktree, editor settings, dependencies and ordinary files. */
+  function project(): string {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-project-"));
+    const files: Record<string, string> = {
+      ".git/config": "[core]\n",
+      ".git/hooks/pre-commit.sample": "#!/bin/sh\n",
+      "sub/.git/config": "[core]\n",
+      // A worktree's .git is a file that says where its repository is.
+      "worktree/.git": "gitdir: /elsewhere/.git/worktrees/worktree\n",
+      ".vscode/settings.json": "{}\n",
+      // On macOS and Windows this is .vscode too.
+      "app/.VSCode/settings.json": "{}\n",
+      ".mcp.json": "{}\n",
+      // Dependencies are not looked through, and .github is an ordinary directory.
+      "node_modules/x/.git/config": "[core]\n",
+      ".github/workflows/ci.yml": "on: push\n",
+      "src/index.js": "\n",
+    };
+    for (const [path, text] of Object.entries(files)) {
+      mkdirSync(join(dir, path, ".."), { recursive: true });
+      writeFileSync(join(dir, path), text);
+    }
+    return dir;
+  }
+
+  const rw = (path: string): Mount => ({ source: path, target: path, readOnly: false });
+  const ro = (path: string): Mount => ({ source: path, target: path, readOnly: true });
+  const byTarget = (mounts: Mount[]) => [...mounts].sort((left, right) => left.target.localeCompare(right.target));
+
+  it("mounts every existing git and editor setting read-only on top of a writable directory, at any depth", () => {
+    const dir = project();
+    const mounts = withSettingsReadOnly([rw(dir)]);
+    expect(mounts[0]).toEqual(rw(dir));
+    expect(byTarget(mounts.slice(1))).toEqual(byTarget([".git", ".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"].map((path) => ro(join(dir, path)))));
+
+    const args = runArgs({ ...base, mounts }, "img").filter((arg) => arg.startsWith("type=bind"));
+    expect(args).toContain(`type=bind,source=${dir},target=${dir}`);
+    for (const path of [".git", ".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"]) {
+      expect(args).toContain(`type=bind,source=${join(dir, path)},target=${join(dir, path)},readonly`);
+    }
+    expect(args).toHaveLength(7);
+    // However the directory is spelled, each setting is mounted at its own place.
+    expect(byTarget(withSettingsReadOnly([rw(`${dir}/src/..`)]).slice(1))).toEqual(byTarget(mounts.slice(1)));
+  });
+
+  it("adds nothing to a read-only mount, nor on top of or inside a writable mount given for a setting itself", () => {
+    const dir = project();
+    expect(withSettingsReadOnly([ro(dir)])).toEqual([ro(dir)]);
+    // An explicit choice: `--mount <dir>/.git:rw` leaves that repository writable, and only that.
+    const mounts = withSettingsReadOnly([rw(dir), rw(join(dir, ".git"))]);
+    expect(mounts.filter((mount) => mount.target === join(dir, ".git"))).toEqual([rw(join(dir, ".git"))]);
+    expect(byTarget(mounts.slice(2))).toEqual(byTarget([".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"].map((path) => ro(join(dir, path)))));
+    // A directory mounted writable twice, as itself and inside its parent, gets each setting once.
+    const twice = withSettingsReadOnly([rw(dir), rw(join(dir, "sub"))]);
+    expect(twice.filter((mount) => mount.target === join(dir, "sub", ".git"))).toEqual([ro(join(dir, "sub", ".git"))]);
+  });
+
+  it("refuses to start when a setting is a symlink, which a read-only mount would follow", () => {
+    const dir = project();
+    const elsewhere = mkdtempSync(join(tmpdir(), "mcpcage-elsewhere-"));
+    symlinkSync(elsewhere, join(dir, "sub", ".vscode"));
+    expect(() => withSettingsReadOnly([rw(dir)])).toThrow(
+      `--mount ${dir}:rw: ${join(dir, "sub", ".vscode")} is a symlink, and mcpcage keeps git's and the editors' settings read-only in a writable mount: ` +
+        `a read-only mount would follow the link to wherever it points. Replace the link with what it points to, or mount ${dir} read-only by dropping :rw.`,
+    );
+    // Read-only, the directory needs nothing on top, so the link does not matter.
+    expect(withSettingsReadOnly([ro(dir)])).toEqual([ro(dir)]);
+  });
+
+  it("refuses to start when there are too many entries to look through or too many settings to mount", () => {
+    const dir = project();
+    expect(() => withSettingsReadOnly([rw(dir)], { entries: 10, mounts: 1_000 })).toThrow(
+      `--mount ${dir}:rw: more than 10 entries to look through for git's and the editors' settings, which mcpcage keeps read-only in a writable mount. ` +
+        `Mount a narrower directory, or mount ${dir} read-only by dropping :rw.`,
+    );
+    expect(() => withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 5 })).toThrow(`--mount ${dir}:rw: more than 5 of git's and the editors' settings to keep read-only`);
+    expect(withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 6 })).toHaveLength(7);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("refuses to start when a directory cannot be looked through", () => {
+    const dir = project();
+    mkdirSync(join(dir, "locked"));
+    chmodSync(join(dir, "locked"), 0o000);
+    try {
+      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(
+        `--mount ${dir}:rw: cannot look inside ${join(dir, "locked")} for git's and the editors' settings (EACCES). Mount a narrower directory, or mount ${dir} read-only by dropping :rw.`,
+      );
+    } finally {
+      chmodSync(join(dir, "locked"), 0o700);
+    }
+  });
+
+  it("refuses a setting whose path holds a comma, which would add fields to docker's --mount", () => {
+    const dir = project();
+    mkdirSync(join(dir, "a,source=", "b", ".git"), { recursive: true });
+    expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`${join(dir, "a,source=", "b", ".git")} cannot be kept read-only, because paths containing commas are not supported`);
   });
 });
 

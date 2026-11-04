@@ -17,7 +17,7 @@ import { cageHome, checkServerId, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, type Pending } from "./pinstore.js";
 import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
-import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, type ServerRecord } from "./sandbox.js";
+import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
 import { boundedLog, terminalSafe } from "./terminal.js";
 
@@ -175,7 +175,8 @@ async function run(argv: string[]): Promise<number> {
     const prepared = prepareSandbox({
       serverId,
       spec,
-      mounts: values.mount.map(parseMount),
+      // Looked for at every start: git's and the editors' settings inside a writable mount stay read-only.
+      mounts: withSettingsReadOnly(values.mount.map(parseMount)),
       env: values.env,
       allowNet: values["allow-net"],
       memory: values.memory,

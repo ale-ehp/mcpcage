@@ -4,7 +4,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { promises as dns } from "node:dns";
-import { chmodSync, copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { connect } from "node:net";
 import { networkInterfaces, userInfo } from "node:os";
 import { dirname, join } from "node:path";
@@ -39,6 +39,24 @@ function canWrite(dir) {
   }
   rmSync(file, { force: true });
   return true;
+}
+
+/** What canAppend adds at the end of a file, so a test can find it there. */
+const APPENDED = "# appended by mcpcage-abuse\n";
+
+// Whether a line can be added at the end of an existing file, as a server would add a command to a
+// repository's configuration; a missing file is not created.
+function canAppend(file) {
+  let fd;
+  try {
+    fd = openSync(file, constants.O_WRONLY | constants.O_APPEND);
+    writeSync(fd, APPENDED);
+    return true;
+  } catch (error) {
+    return error.code;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 /** The exit code of `file --version`, or the error code when it cannot be started. */
@@ -121,14 +139,21 @@ const server = new McpServer({ name: "mcpcage-abuse", version: "1.0.0" });
 server.registerTool(
   "write_outside",
   {
-    description: "Try to create a file in /, /usr, /etc, this server's code, the home directory, /tmp and the given paths, then run a program from /tmp.",
-    inputSchema: { paths: z.array(z.string()).optional() },
+    description:
+      "Try to create a file in /, /usr, /etc, this server's code, the home directory, /tmp and the given paths, add a line to the given existing files, then run a program from /tmp.",
+    inputSchema: { paths: z.array(z.string()).optional(), files: z.array(z.string()).optional() },
   },
-  async ({ paths = [] }) => {
+  async ({ paths = [], files = [] }) => {
     // The home directory of the user in /etc/passwd: in the cage HOME points at /tmp instead.
     const home = userInfo().homedir;
     const dirs = ["/", "/usr", "/etc", here, home, "/tmp", ...paths];
-    return answer({ ownCode: here, home, writes: Object.fromEntries(dirs.map((dir) => [dir, canWrite(dir)])), exec: execFromTmp() });
+    return answer({
+      ownCode: here,
+      home,
+      writes: Object.fromEntries(dirs.map((dir) => [dir, canWrite(dir)])),
+      appends: Object.fromEntries(files.map((file) => [file, canAppend(file)])),
+      exec: execFromTmp(),
+    });
   },
 );
 

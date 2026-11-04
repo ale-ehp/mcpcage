@@ -60,14 +60,22 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   (`~/.cursor`, `~/.claude`...), shell and login startup files, git's configuration and any
   repository's `.git`, a project's editor and agent settings (`.vscode`, `.mcp.json`...), and the
   programs on the PATH and where they are installed (`~/.local/bin`, `~/.npm`, `/usr/local`...): a
-  server that needs one is left uncaged, with the reason, and the report names the path. `mcpcage run` refuses such a `--mount` unless `--allow-sensitive-mount` is given; with
-  it, the server can use that path like any other.
+  server that needs one is left uncaged, with the reason, and the report names the path. `mcpcage
+  run` refuses such a `--mount` unless `--allow-sensitive-mount` is given; with it, the server can
+  use that path like any other. Inside a writable mount, the git and editor settings that exist at
+  start (`.git`, `.vscode`, `.idea`, `.cursor`, `.claude`, `.devin`, `.windsurf`, `.mcp.json`, at
+  any depth) stay read-only, because git and editors run the commands they name as soon as the
+  project is open. The server can still change every other file there, code you later run
+  included, and create such settings where none existed (a new nested repository, a project MCP
+  configuration): a server that only needs to read should get a read-only mount.
 - **Sensitive paths during `protect --inspect`.** To list a server's tools, `--inspect` mounts its
   path arguments read-only, without network, the sensitive ones included. In that time a server
   could copy what it reads there into its tool descriptions or its error output, and the report
   prints parts of both.
 - **Misuse of granted capabilities.** A filesystem server with a writable mount can still
-  overwrite files in that mount when asked to; mcpcage records the call but does not judge it.
+  overwrite files in that mount when asked to, and create files that git, an editor or a build
+  later reads as settings or runs as code; only the git and editor settings that already exist stay
+  read-only. mcpcage records the call but does not judge it.
 - **Prompt injection through tool results.** Data a tool returns can still steer the model. The
   cage limits what a misled model can reach through that server, not what it decides.
 - **The highlighter is a set of fixed rules, not a verdict.** A paraphrased instruction can avoid

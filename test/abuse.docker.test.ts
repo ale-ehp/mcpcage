@@ -3,7 +3,7 @@
 // a way out in its environment and reach the network. Every attack must fail the way the cage
 // promises, and mcpcage must come through each one.
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
@@ -27,6 +27,8 @@ interface WriteReport {
   home: string;
   /** For each directory: true when a new file could be created there, or the error code. */
   writes: Record<string, true | string>;
+  /** For each existing file: true when a line could be added at its end, or the error code. */
+  appends: Record<string, true | string>;
   exec: { program: string; inPlace: number | string; copiedToTmp: boolean; madeExecutable: boolean; fromTmp: number | string | null };
 }
 
@@ -203,6 +205,38 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
     } finally {
       rmSync(readOnly, { recursive: true, force: true });
       rmSync(writable, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("cannot change git's or the editors' settings in a read-write mount, only the other files there", async () => {
+    // A project as an editor opens it. Everything is open to every user, so only the mounts can refuse
+    // the server: git would run a command written into .git/config or .git/hooks on the host.
+    const project = mkdtempSync(join(root, "test", "fixtures", "abuse-project-"));
+    const config = join(project, ".git", "config");
+    const hooks = join(project, ".git", "hooks");
+    const settings = join(project, ".vscode", "settings.json");
+    const notes = join(project, "notes.md");
+    mkdirSync(hooks, { recursive: true });
+    mkdirSync(join(project, ".vscode"));
+    writeFileSync(config, "[core]\n\trepositoryformatversion = 0\n");
+    writeFileSync(settings, "{}\n");
+    writeFileSync(notes, "# Notes\n");
+    for (const dir of [project, join(project, ".git"), hooks, join(project, ".vscode")]) chmodSync(dir, 0o777);
+    for (const file of [config, settings, notes]) chmodSync(file, 0o666);
+    try {
+      const report = await call<WriteReport>("write_outside", {
+        args: { paths: [hooks, project], files: [config, settings, notes] },
+        runArgs: ["--mount", `${project}:rw`],
+      });
+      expect(report.writes).toMatchObject({ [hooks]: "EROFS", [project]: true });
+      expect(report.appends).toEqual({ [config]: "EROFS", [settings]: "EROFS", [notes]: true });
+      // The ordinary file changed on the host; the settings are as they were.
+      expect(readFileSync(notes, "utf8")).toBe("# Notes\n# appended by mcpcage-abuse\n");
+      expect(readFileSync(config, "utf8")).toBe("[core]\n\trepositoryformatversion = 0\n");
+      expect(readFileSync(settings, "utf8")).toBe("{}\n");
+      expect(readdirSync(hooks)).toEqual([]);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
     }
   }, 120_000);
 

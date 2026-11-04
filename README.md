@@ -140,6 +140,13 @@ is left as it is, uncaged, and the reason is printed; `mcpcage run` refuses such
 you add `--allow-sensitive-mount`. Images are built right away, so the client's first start does
 not wait for a build.
 
+Inside a writable mount, the git and editor settings that exist when the server starts (`.git`,
+`.vscode`, `.idea`, `.cursor`, `.claude`, `.devin`, `.windsurf`, `.mcp.json`, at any depth) are
+mounted read-only on top, because git and editors run the commands they name as soon as you open
+the project. The server can still change every other file there, code you later run included, and
+create such settings where none existed (a new nested repository, a project MCP configuration):
+give a server that only needs to read a read-only mount, without `:rw`.
+
 ## How it works
 
 ```text
@@ -248,7 +255,7 @@ entries of each file in the file's own style, leaves a server that needs a sensi
 | Control | Setting |
 |---|---|
 | Network | `--network none` (opt in with `--allow-net`) |
-| Filesystem | read-only root, `noexec` tmpfs at `/tmp`, no host paths unless `--mount` (read-only by default) |
+| Filesystem | read-only root, `noexec` tmpfs at `/tmp`, no host paths unless `--mount` (read-only by default; in a writable one, existing git and editor settings stay read-only) |
 | User | `65532:65532` (nonroot) |
 | Privileges | `--cap-drop ALL`, `no-new-privileges` |
 | Resources | 512 MB memory and no swap, 1 CPU, 128 processes (configurable) |

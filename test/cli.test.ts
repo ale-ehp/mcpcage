@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -193,6 +193,24 @@ describe("cli", () => {
     expect(refused.code).toBe(1);
     expect(refused.stderr).toBe(`mcpcage: --mount ${join(home, ".zshrc")}: the commands your shell runs in ~/.zshrc. Pass --allow-sensitive-mount if you really want this.\n`);
     expect(existsSync(cage)).toBe(false);
+  });
+
+  it("looks for git's and the editors' settings in a writable mount at every run, and refuses a symlinked one", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
+    const project = join(top, "project");
+    mkdirSync(join(project, ".git"), { recursive: true });
+    // No docker on the PATH: a run that got past the settings would stop there.
+    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), { PATH: join(top, "no-docker-here") });
+    const server = ["--", "npx", "-y", "something"];
+    expect(mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server).stderr).toContain("Docker is required");
+
+    mkdirSync(join(top, "elsewhere"));
+    symlinkSync(join(top, "elsewhere"), join(project, ".vscode"));
+    const refused = mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain(`mcpcage: --mount ${project}:rw: ${join(project, ".vscode")} is a symlink`);
+    // Read-only, the same directory needs nothing on top of it.
+    expect(mcpcageWithEnv(env, "run", "--mount", project, ...server).stderr).toContain("Docker is required");
   });
 
   it("refuses host commands unless --no-sandbox is explicit", () => {
