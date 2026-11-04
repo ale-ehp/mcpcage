@@ -398,7 +398,10 @@ function pointer(file: string, prefix: string, refuse: (problem: string) => Erro
  * place on the way that does. Errors other than a missing entry are thrown, ELOOP after 40 links.
  */
 function locate(base: string, path: string, link: (at: string) => void): { real: string; exists: boolean } {
-  const names = (spelled: string) => spelled.split(sep === "\\" ? /[\\/]/ : "/");
+  // The names after the root, for an absolute path. On Windows the root of `C:/x` is `C:/`, and its
+  // `C:` is no name to look for in it: taken for one, every absolute path, which is how git writes
+  // a worktree's or a separate repository's on Windows, led to a `C:\C:` that does not exist.
+  const names = (spelled: string) => (isAbsolute(spelled) ? spelled.slice(parse(spelled).root.length) : spelled).split(sep === "\\" ? /[\\/]/ : "/");
   let current = isAbsolute(path) ? parse(path).root : base;
   const pending = names(path);
   let links = 0;

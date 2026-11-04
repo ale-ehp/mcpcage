@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
@@ -374,6 +374,20 @@ describe("settings in a writable mount", () => {
       writeFileSync(join(dir, "p10", "app", ".git"), `gitdir: ${join(realpathSync.native(dir), "p10", "meta")}\n`);
       const mount = join(dir, "P10");
       expect(byTarget(settings([rw(mount)]))).toEqual(byTarget([rw(mount), rw(join(mount, "app")), ro(join(mount, "app", ".git")), ro(join(mount, "meta"))]));
+    });
+
+    it("follows a .git file in a read-only mount to its repository by the absolute path git writes on Windows", () => {
+      // `git worktree add` and `git init --separate-git-dir` write where the repository is in full, with
+      // forward slashes on Windows (C:/Users/...). A .git file the user mounted read-only is accepted
+      // there; the repository it names, in the writable mount around it, is kept read-only too.
+      for (const [platform] of systems) {
+        const dir = mkdtempSync(join(tmpdir(), "mcpcage-case-"));
+        mkdirSync(join(dir, "app"));
+        mkdirSync(join(dir, "meta", "hooks"), { recursive: true });
+        writeFileSync(join(dir, "meta", "config"), "[core]\n");
+        writeFileSync(join(dir, "app", ".git"), `gitdir: ${join(realpathSync.native(dir), "meta").replaceAll(sep, "/")}\n`);
+        expect(withSettingsReadOnly([rw(dir), ro(join(dir, "app"))], SETTINGS_LIMITS, platform)).toContainEqual(ro(join(dir, "meta")));
+      }
     });
   });
 
