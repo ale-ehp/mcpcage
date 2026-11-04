@@ -220,9 +220,10 @@ say("\n$ mcpcage protect");
 // CLAUDECODE, set when the demo runs inside Claude Code.
 const protectEnv = { ...env };
 for (const name of ["CLAUDECODE", "COPILOT_HOME", "APPDATA", "USERPROFILE", "XDG_CONFIG_HOME"]) delete protectEnv[name];
-// mcpcage installed as on a user's machine: protect counts an entry as caged only when its command
-// is an installed mcpcage. `npm install -g` links bin/mcpcage to the package's dist/cli.js and makes
-// that file executable; this is the repository's own build, whose package.json names it mcpcage.
+// mcpcage installed as on a user's machine: protect counts an entry as caged only when its command is
+// the mcpcage that --fix would write, the one found first on PATH, or the mcpcage that is running.
+// `npm install -g` links bin/mcpcage to the package's dist/cli.js and makes that file executable; this
+// link, first on PATH, leads to the repository's own build, which is also the mcpcage protect runs.
 const bin = join(work, "bin");
 mkdirSync(bin, { recursive: true });
 rmSync(join(bin, "mcpcage"), { force: true }); // a work directory used before keeps its link

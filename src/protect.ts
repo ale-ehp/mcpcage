@@ -1,11 +1,11 @@
-import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, posix, win32 } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
 import {
   envValues, hostPath, hostVariable, isWrapped, moveHostEnv, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry, type ServerEntry, type ServerType,
 } from "./config.js";
+import { mcpcageAt, type McpcageKind } from "./installed.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
@@ -39,14 +39,14 @@ export interface ServerReport {
   packageSpec?: string;
   /**
    * Started through `mcpcage run` with its sandbox: false for `mcpcage run --no-sandbox`, which runs
-   * on the host, and for a command that is not an installed mcpcage.
+   * on the host, and for a command that is not the mcpcage --fix writes or the one running.
    */
   protectedByMcpcage: boolean;
   /**
-   * For a wrapped entry, what its command is (see mcpcageAt): an installed mcpcage, another program
-   * that only has the name, or nothing that can be found on this machine.
+   * For a wrapped entry, what its command is (see mcpcageAt): the mcpcage --fix writes or the one
+   * running ("installed"), another program that only has the name, or nothing that can be found.
    */
-  mcpcage?: "installed" | "other program" | "not found";
+  mcpcage?: McpcageKind;
   /** For a caged entry: each run option that opens its cage, in plain words. */
   opened: string[];
   /** Names of the env variables, headers and arguments whose value looks like a secret. */
@@ -97,7 +97,7 @@ export interface ScanOptions {
   inspect?: Inspector;
   /**
    * The mcpcage command --fix writes into configurations (`--command`, or the one found in PATH): an
-   * entry that starts the same file counts as an installed mcpcage, whatever its shim (see mcpcageAt).
+   * entry that starts the same file, or the running mcpcage, counts as mcpcage (see mcpcageAt).
    */
   ownCommand?: string;
 }
@@ -164,8 +164,8 @@ async function describeServer(
   try {
     const shown = shownCommand(entry, type);
     server.command = shown.line;
-    // Any program can be named mcpcage: only an installed one cages anything.
-    if (type === "mcpcage") server.mcpcage = mcpcageAt(entry.command as string, options.ownCommand);
+    // Any program can be named mcpcage, next to any package.json: only mcpcage itself cages anything.
+    if (type === "mcpcage") server.mcpcage = mcpcageAt(entry as ServerEntry & { command: string }, options.ownCommand);
     server.protectedByMcpcage = server.mcpcage === "installed" && !withoutSandbox(entry);
     if (server.protectedByMcpcage) server.opened = openedBy(entry);
     server.secrets = [...new Set([...secretNames(entry), ...shown.secrets])];
@@ -321,74 +321,6 @@ export function isUncaged(server: ServerReport): boolean {
 }
 
 /**
- * What a wrapped entry's command is on this machine. An absolute path is taken as written, a bare
- * name is looked up in PATH as `which` would; symlinks are followed (a global npm install links
- * bin/mcpcage to the package's dist/cli.js) and the nearest package.json a few directories up must
- * say "mcpcage". `/tmp/evil/mcpcage run -- ...` was reported caged, and left alone by --fix, for its
- * name alone. The same file as `own`, the command --fix writes, is mcpcage whatever it is: pnpm and
- * Volta install a script or a program of their own, not a link into the package, and an entry --fix
- * wrote with one was a look-alike at the next scan, rewritten again by every --fix.
- */
-export function mcpcageAt(command: string, own?: string): NonNullable<ServerReport["mcpcage"]> {
-  const real = realCommand(command);
-  if (real === undefined) return "not found";
-  if (own !== undefined && realCommand(own) === real) return "installed";
-  // npm on Windows installs a mcpcage.cmd script next to node_modules\mcpcage, not a link.
-  if (process.platform === "win32" && /\.(cmd|ps1)$/i.test(real) && packageName(join(dirname(real), "node_modules", "mcpcage")) === "mcpcage") return "installed";
-  let dir = dirname(real);
-  for (let level = 0; level < 4; level++) {
-    if (existsSync(join(dir, "package.json"))) return packageName(dir) === "mcpcage" ? "installed" : "other program";
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return "other program";
-}
-
-/** The file a command starts here, symlinks followed, or undefined when there is none. */
-function realCommand(command: string): string | undefined {
-  const found = onThisMachine(command);
-  if (found === undefined) return undefined;
-  try {
-    return realpathSync(found);
-  } catch {
-    return undefined;
-  }
-}
-
-/** The file a command names here: an absolute path that exists, or a bare name's first match in PATH. */
-function onThisMachine(command: string): string | undefined {
-  if (isAbsolute(command)) return existsSync(command) ? command : undefined;
-  // A relative path depends on the directory the client starts it from, which is not known here.
-  if (/[/\\]/.test(command)) return undefined;
-  const windows = process.platform === "win32";
-  const extensions = windows && !/\.[^.]+$/.test(command) ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean) : [""];
-  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
-    if (!isAbsolute(dir)) continue;
-    for (const extension of extensions) {
-      const file = join(dir, `${command}${extension}`);
-      try {
-        if (!statSync(file).isFile()) continue;
-        if (!windows) accessSync(file, constants.X_OK);
-        return file;
-      } catch {
-        // not here, or not a program: on to the next
-      }
-    }
-  }
-  return undefined;
-}
-
-function packageName(dir: string): unknown {
-  try {
-    const manifest = JSON.parse(readConfigFile(join(dir, "package.json")).toString("utf8")) as unknown;
-    return isJsonObject(manifest) ? manifest.name : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
  * The run options of a caged entry that open its cage, in plain words: each was written on purpose,
  * so --fix leaves them, and the report is where they show. Options that `mcpcage run` refuses start
  * nothing, and open nothing.
@@ -526,7 +458,7 @@ function status(server: ServerReport): string {
       return "NOT CAGED";
     case "mcpcage": {
       const command = terminalSafe(commandOf(server.command));
-      if (server.mcpcage === "other program") return `starts ${command}, which is not an installed mcpcage`;
+      if (server.mcpcage === "other program") return `starts ${command}, which is not the mcpcage on your PATH`;
       if (server.mcpcage === "not found") return `starts ${command}, which ${/[/\\]/.test(command) ? "was not found" : "is not on your PATH"}`;
       if (!server.protectedByMcpcage) return "mcpcage --no-sandbox: pinning and audit only, no isolation";
       // The env acts first, on the host, before any cage exists.
@@ -736,7 +668,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
  */
 function rewrite(entry: ServerEntry, command: string): { entry: ServerEntry; envOnly?: boolean } | { skip: string } {
   if (serverType(entry) !== "mcpcage") return wrapEntry(entry, { command });
-  const found = mcpcageAt(entry.command as string, command);
+  const found = mcpcageAt(entry as ServerEntry & { command: string }, command);
   if (found === "other program") {
     const inner = unwrapEntry(entry);
     return "skip" in inner ? inner : wrapEntry(inner.entry, { command });

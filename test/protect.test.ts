@@ -9,12 +9,13 @@ import { sha256 } from "../src/canonical.js";
 import { discoverConfigs, type ClientId } from "../src/clients.js";
 import { moveHostEnv, serverType, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
 import { listTools } from "../src/inspect.js";
+import { mcpcageAt } from "../src/installed.js";
 import { hasComments, parseJsonc } from "../src/jsonc.js";
 import { parseLaunch, serverIdFor } from "../src/launch.js";
 import { tooDeep } from "../src/manifest.js";
 import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
-import { broadAccessKind, fixConfigs, inspectionSandbox, mcpcageAt, renderReport, scanConfigs } from "../src/protect.js";
+import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs } from "../src/protect.js";
 import { runArgs } from "../src/sandbox.js";
 import { cli, fakeServer, fakeUserEnv, hostileServer, mcpcageWithEnv, root } from "./helpers.js";
 
@@ -1410,7 +1411,8 @@ describe("mcpcage protect", () => {
       },
     });
     const original = readFileSync(cursor);
-    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: fakeMcpcage().path });
+    const installed = fakeMcpcage();
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
 
     const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
     expect(scan.stdout).toMatch(/^ {2}hosted {8}mcpcage run --no-sandbox -- npx -y @acme\/hosted-mcp +mcpcage --no-sandbox: pinning and audit only, no isolation$/m);
@@ -1421,7 +1423,7 @@ describe("mcpcage protect", () => {
     expect(scan.stdout).toContain("  1 already runs through mcpcage.");
     expect(scan.code).toBe(1);
 
-    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", "/opt/mcpcage");
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
     expect(fix.stdout).toContain(
       `\nPlan\n  not changed: hosted in ${tilde(cursor, home)}: it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand\n  nothing that mcpcage can change by itself.\n`,
     );
@@ -1591,7 +1593,7 @@ describe("mcpcage protect", () => {
     expect(again.code).toBe(0);
   });
 
-  it("counts a wrapped entry as caged only when it starts an installed mcpcage, and --fix cages what a look-alike starts", () => {
+  it("counts a wrapped entry as caged only when it starts the mcpcage --fix writes, and --fix cages what a look-alike starts", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-look-alike-"));
     const home = join(top, "home");
     const project = join(top, "work");
@@ -1622,16 +1624,16 @@ describe("mcpcage protect", () => {
     const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: join(top, "no-mcpcage-here") });
     const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
 
-    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
     expect(scan.stderr).toBe("");
     expect(lineOf(scan.stdout, "real")).toMatch(/ {2}caged$/);
-    expect(lineOf(scan.stdout, "evil")).toContain(`npx -y rogue  starts ${evil}, which is not an installed mcpcage`);
-    expect(lineOf(scan.stdout, "tuned")).toContain(`--env NODE_OPTIONS=*** -- npx -y @acme/tuned-mcp  starts ${evil}, which is not an installed mcpcage`);
-    expect(lineOf(scan.stdout, "other")).toMatch(/ {2}starts .*, which is not an installed mcpcage$/);
+    expect(lineOf(scan.stdout, "evil")).toContain(`npx -y rogue  starts ${evil}, which is not the mcpcage on your PATH`);
+    expect(lineOf(scan.stdout, "tuned")).toContain(`--env NODE_OPTIONS=*** -- npx -y @acme/tuned-mcp  starts ${evil}, which is not the mcpcage on your PATH`);
+    expect(lineOf(scan.stdout, "other")).toMatch(/ {2}starts .*, which is not the mcpcage on your PATH$/);
     expect(lineOf(scan.stdout, "bare")).toMatch(/ {2}starts mcpcage, which is not on your PATH$/);
     expect(lineOf(scan.stdout, "gone")).toContain(`  starts ${gone}, which was not found`);
     // What a look-alike starts runs with your permissions: its install scripts would too.
-    expect(scan.stdout).toContain("which is not an installed mcpcage\n                install scripts: unknown (offline, not in cache)\n  tuned ");
+    expect(scan.stdout).toContain("which is not the mcpcage on your PATH\n                install scripts: unknown (offline, not in cache)\n  tuned ");
     expect(scan.stdout).not.toContain("never-printed");
     expect(scan.stdout).toContain("  3 run on your machine with your permissions and no cage.");
     expect(scan.stdout).toContain("  1 already runs through mcpcage.\n  2 start an mcpcage that could not be found.\n");
@@ -1652,11 +1654,10 @@ describe("mcpcage protect", () => {
         env: { API_KEY: "${input:key}" },
       },
     });
-    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
     expect(again.stdout).toContain("  1 runs on your machine with your permissions and no cage."); // other, which is not npx
     expect(again.stdout).toContain("  3 already run through mcpcage.\n  2 start an mcpcage that could not be found.\n");
-    // A relative path depends on the directory the client starts it from: it is never taken for one.
-    expect([installed.command, evil, other, gone, "./mcpcage"].map((command) => mcpcageAt(command))).toEqual(["installed", "other program", "other program", "not found", "not found"]);
+    expect([installed.command, evil, other, gone].map((command) => mcpcageAt({ command }, installed.command))).toEqual(["installed", "other program", "other program", "not found"]);
   });
 
   it("counts the command --fix writes as an installed mcpcage whatever its shim, so a second --fix leaves its entries alone", () => {
@@ -1696,7 +1697,7 @@ describe("mcpcage protect", () => {
 
     // When it is not the command --fix writes, the same script is a look-alike, and --fix cages what it starts.
     const other = protect();
-    expect(lineOf(other.stdout, "notes")).toContain(`  starts ${shim}, which is not an installed mcpcage`);
+    expect(lineOf(other.stdout, "notes")).toContain(`  starts ${shim}, which is not the mcpcage on your PATH`);
     expect(other.code).toBe(1);
     const installed = fakeMcpcage();
     expect(fix(installed.command).stdout).toContain(`\nPlan\n  cage notes in ${where}\n`);
@@ -1705,7 +1706,12 @@ describe("mcpcage protect", () => {
     const link = join(top, "link", "mcpcage");
     mkdirSync(dirname(link));
     symlinkSync(shim, link);
-    expect([mcpcageAt(shim), mcpcageAt(shim, shim), mcpcageAt(link, shim), mcpcageAt(shim, link)]).toEqual(["other program", "installed", "installed", "installed"]);
+    expect([mcpcageAt({ command: shim }), mcpcageAt({ command: shim }, shim), mcpcageAt({ command: link }, shim), mcpcageAt({ command: shim }, link)]).toEqual([
+      "other program",
+      "installed",
+      "installed",
+      "installed",
+    ]);
   });
 
   it("--fix says which env variables to take out by hand when it cannot rewrite the file", () => {
@@ -1796,6 +1802,125 @@ describe("mcpcage protect", () => {
     expect(readdirSync(home).filter((name) => name.endsWith(".tmp"))).toEqual([]);
     expect(logged).toEqual(["  caged user-npx in ~/.claude.json", `  caged proj-npx in ~/.claude.json (project ${project})`, "  backup: ~/.claude.json.mcpcage.bak"]);
     expect(logged.join("\n")).not.toContain("acme_live_0123456789");
+  });
+});
+
+describe("which mcpcage an entry starts", () => {
+  /** A fake home and project with one Cursor configuration, and a PATH on which `mcpcage` finds nothing. */
+  function setup(servers: Record<string, unknown>) {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-which-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    writeJsonFile(cursor, { mcpServers: servers });
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: join(top, "no-mcpcage-here") });
+    return { project, cursor, env, where: tilde(cursor, home) };
+  }
+  /** A program named mcpcage that only exits, with `manifest` as the package.json of its directory. */
+  function lookAlike(dir: string, manifest?: unknown): string {
+    const command = join(dir, "mcpcage");
+    writeText(command, "#!/bin/sh\nexit 0\n");
+    chmodSync(command, 0o755);
+    if (manifest !== undefined) writeJsonFile(join(dir, "package.json"), manifest);
+    return command;
+  }
+  const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+  const run = ["run", "--", "npx", "-y", "@acme/notes-mcp"];
+
+  it("counts a look-alike next to a package.json named mcpcage as another program, and --fix cages what it starts", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-which-"));
+    const evil = lookAlike(join(top, "evil"), { name: "mcpcage", version: "0.4.0", bin: { mcpcage: "mcpcage" } });
+    // mcpcage as `npm install -g` lays it out, a package named mcpcage, is mcpcage only when it is the command --fix writes.
+    const packaged = fakeMcpcage();
+    const { project, cursor, env, where } = setup({ evil: { command: evil, args: run }, packaged: { command: packaged.command, args: run } });
+
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(lineOf(scan.stdout, "evil")).toContain(`  starts ${evil}, which is not the mcpcage on your PATH`);
+    expect(lineOf(scan.stdout, "packaged")).toContain(`  starts ${packaged.command}, which is not the mcpcage on your PATH`);
+    expect(scan.stdout).toContain("  2 run on your machine with your permissions and no cage.");
+    expect(scan.stdout).toContain("  0 already run through mcpcage.");
+    expect(scan.code).toBe(1);
+    expect([mcpcageAt({ command: evil }), mcpcageAt({ command: packaged.command }), mcpcageAt({ command: packaged.command }, packaged.command)]).toEqual([
+      "other program",
+      "other program",
+      "installed",
+    ]);
+
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", packaged.command);
+    expect(fix.stdout).toContain(`\nPlan\n  cage evil in ${where}\n\n`);
+    expect(JSON.parse(readFileSync(cursor, "utf8")).mcpServers).toEqual({ evil: { command: packaged.command, args: run }, packaged: { command: packaged.command, args: run } });
+  });
+
+  it("looks a bare mcpcage up in the PATH the entry's env sets, as the client's spawn does", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-which-"));
+    const installed = fakeMcpcage();
+    const evilDir = join(top, "evil");
+    lookAlike(evilDir);
+    const servers = {
+      // The client finds the look-alike first, wherever mcpcage's own PATH leads.
+      elsewhere: { command: "mcpcage", args: run, env: { PATH: `${evilDir}${delimiter}${dirname(installed.command)}` } },
+      // What a client finds through "." depends on the directory it starts the entry from.
+      relative: { command: "mcpcage", args: run, env: { PATH: `.${delimiter}${dirname(installed.command)}` } },
+      // The client's spawn converts the value into a directory name nobody chose.
+      odd: { command: "mcpcage", args: run, env: { PATH: 1 } },
+      inDir: { command: join("bin", "mcpcage"), args: run },
+      same: { command: "mcpcage", args: run, env: { PATH: dirname(installed.command) } },
+    };
+    const { project, cursor, env, where } = setup(servers);
+    // The mcpcage --fix writes is the one on this PATH.
+    const onPath = { ...env, PATH: installed.path };
+
+    const scan = mcpcageWithEnv(onPath, "protect", "--project", project, "--offline");
+    for (const name of ["elsewhere", "relative", "odd"]) expect(lineOf(scan.stdout, name)).toMatch(/ {2}starts mcpcage, which is not the mcpcage on your PATH$/);
+    expect(lineOf(scan.stdout, "inDir")).toMatch(/ {2}starts bin\/mcpcage, which is not the mcpcage on your PATH$/);
+    expect(mcpcageAt({ command: "./mcpcage" }, installed.command)).toBe("other program");
+    expect(lineOf(scan.stdout, "same")).toMatch(/ {2}caged$/);
+    expect(scan.stdout).toContain("  4 run on your machine with your permissions and no cage.");
+    expect(scan.code).toBe(1);
+
+    const fix = mcpcageWithEnv(onPath, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build");
+    expect(fix.stdout).toContain(`\nPlan\n  cage elsewhere in ${where}\n  cage relative in ${where}\n  cage odd in ${where}\n  cage inDir in ${where}\n\n`);
+    const after = JSON.parse(readFileSync(cursor, "utf8")).mcpServers;
+    for (const name of ["elsewhere", "relative", "odd", "inDir"]) expect(after[name].command).toBe(installed.command);
+    expect(after.same).toEqual(servers.same);
+  });
+
+  it("counts the running mcpcage as mcpcage, as the demo links it", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-which-"));
+    const link = join(top, "bin", "mcpcage");
+    mkdirSync(dirname(link), { recursive: true });
+    symlinkSync(cli, link);
+    const { project, env } = setup({ linked: { command: link, args: run } });
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(lineOf(scan.stdout, "linked")).toMatch(/ {2}caged$/);
+    expect(scan.code).toBe(0);
+  });
+
+  it("wrap cages what a look-alike starts instead of skipping it as already wrapped", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-which-"));
+    const installed = fakeMcpcage();
+    const evil = lookAlike(join(top, "evil"), { name: "mcpcage" });
+    const evilDir = dirname(evil);
+    const file = join(top, "mcp.json");
+    writeJsonFile(file, {
+      mcpServers: {
+        evil: { command: evil, args: ["run", "--allow-net", "--env", "NODE_OPTIONS=--import /tmp/x.mjs", "--", "npx", "-y", "rogue"] },
+        elsewhere: { command: "mcpcage", args: ["run", "--", "npx", "-y", "rogue"], env: { PATH: evilDir } },
+        real: { command: installed.command, args: ["run", "--", "npx", "-y", "@acme/notes-mcp"] },
+      },
+    });
+    const result = mcpcageWithEnv(fakeUserEnv(top, join(top, "cage")), "wrap", file, "--no-build", "--command", installed.command);
+    expect(result.stdout).toContain(`  caged evil: ${installed.command} run --env NODE_OPTIONS=*** -- npx -y rogue\n`);
+    expect(result.stdout).toContain(`  caged elsewhere: ${installed.command} run --env PATH -- npx -y rogue\n`);
+    expect(result.stdout).toContain("  skipped real: already wrapped\n");
+    const after = JSON.parse(readFileSync(file, "utf8")).mcpServers;
+    // As --fix rewrites it: the look-alike's own options are gone, the env it had moved comes back as wrap moves it.
+    expect(after.evil).toEqual({ command: installed.command, args: ["run", "--env", "NODE_OPTIONS=--import /tmp/x.mjs", "--", "npx", "-y", "rogue"], env: {} });
+    expect(after.elsewhere.command).toBe(installed.command);
+    // Done once: the rewritten entries start the mcpcage wrap writes.
+    expect(wrapConfig(file, { dryRun: true, command: installed.command }).skipped.map((skipped) => skipped.reason)).toEqual(["already wrapped", "already wrapped", "already wrapped"]);
   });
 });
 

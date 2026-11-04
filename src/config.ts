@@ -3,6 +3,7 @@ import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
+import { mcpcageAt } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
 import { parseLaunch } from "./launch.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
@@ -54,11 +55,17 @@ export interface WrapOutcome {
   backup?: string;
 }
 
-/** Rewrites every npx-launched stdio server so the client starts it through `mcpcage run`. */
+/**
+ * Rewrites every npx-launched stdio server so the client starts it through `mcpcage run`. An entry
+ * whose command is only named mcpcage (see mcpcageAt) is no cage: what it would start is wrapped as
+ * an npx entry is, as `protect --fix` does. It was skipped as "already wrapped" for its name alone.
+ */
 export function wrapConfig(file: string, options: { dryRun: boolean; command?: string }): WrapOutcome {
   const command = options.command ?? "mcpcage";
   return transform(file, options.dryRun, (name, entry, skip) => {
-    const wrapped = wrapEntry(entry, { command });
+    const original = isWrapped(entry) && mcpcageAt(entry, command) === "other program" ? unwrapEntry(entry) : { entry };
+    if ("skip" in original) return skip(name, original.skip);
+    const wrapped = wrapEntry(original.entry, { command });
     return "skip" in wrapped ? skip(name, wrapped.skip) : wrapped.entry;
   });
 }
