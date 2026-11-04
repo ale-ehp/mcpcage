@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { constants, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { parseLaunch } from "./launch.js";
 import { cageHome } from "./paths.js";
 import { sensitivePath } from "./sensitive.js";
@@ -130,13 +130,14 @@ type Rewrite = (
 function transform(file: string, dryRun: boolean, rewrite: Rewrite): WrapOutcome {
   // Read first and explain a missing file from the error: a look before the read would leave a
   // moment in which the file can change under the name that is then rewritten.
-  let text: string;
+  let bytes: Buffer;
   try {
-    text = readFileSync(file, "utf8");
+    bytes = readFileSync(file);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`${file} does not exist`);
     throw error;
   }
+  const text = bytes.toString("utf8");
   let config: Record<string, unknown>;
   try {
     config = JSON.parse(text) as Record<string, unknown>;
@@ -160,11 +161,32 @@ function transform(file: string, dryRun: boolean, rewrite: Rewrite): WrapOutcome
     }
   }
 
-  if (!dryRun && outcome.changed.length > 0) {
-    outcome.backup = createBackup(file, (backup) => copyFileSync(file, backup, constants.COPYFILE_EXCL));
-    writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
-  }
+  // Written over the live file, the new text could be cut halfway (a full disk, a kill) and leave the
+  // client half a JSON file; and a backup copied from the file could hold other bytes than those read.
+  if (!dryRun && outcome.changed.length > 0) outcome.backup = replaceFile(file, bytes, `${JSON.stringify(config, null, 2)}\n`);
   return outcome;
+}
+
+/**
+ * A backup of the bytes that were read, under a name no other file has, then the new text through a
+ * temporary file in the same directory and a rename, so a client never reads half a file. The file
+ * keeps its permissions, and a symlinked configuration (dotfiles) keeps its link: the file it points
+ * to is the one replaced.
+ */
+export function replaceFile(file: string, original: Buffer, text: string): string {
+  const target = realpathSync(file);
+  const mode = statSync(target).mode & 0o777;
+  const backup = createBackup(file, (name) => writeFileSync(name, original, { flag: "wx", mode }));
+  chmodSync(backup, mode);
+  const temporary = join(dirname(target), `.${basename(target)}.mcpcage-${process.pid}-${randomBytes(4).toString("hex")}.tmp`);
+  try {
+    writeFileSync(temporary, text, { flag: "wx", mode });
+    chmodSync(temporary, mode);
+    renameSync(temporary, target);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+  return backup;
 }
 
 /**

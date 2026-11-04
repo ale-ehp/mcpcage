@@ -1,9 +1,8 @@
-import { randomBytes } from "node:crypto";
-import { chmodSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, posix, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 import { claudeCodeSections, type ClientId, type ConfigLocation } from "./clients.js";
-import { createBackup, hostPath, isWrapped, serverType, wrapEntry, type ServerEntry, type ServerType } from "./config.js";
+import { hostPath, isWrapped, replaceFile, serverType, wrapEntry, type ServerEntry, type ServerType } from "./config.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep, type ToolDefinition } from "./manifest.js";
@@ -433,28 +432,6 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const change of fixed.changed) options.log(`  ${options.dryRun ? "cage" : "caged"} ${printable(change.name)} in ${where(change.label)}`);
   if (fixed.backup) options.log(`  backup: ${printable(file.scope === "user" ? tilde(fixed.backup, home) : fixed.backup)}`);
   return fixed;
-}
-
-/**
- * A backup of the bytes that were read, under a name no other file has, then the new text through a
- * temporary file in the same directory and a rename, so a client never reads half a file. The file
- * keeps its permissions, and a symlinked configuration (dotfiles) keeps its link: the file it points
- * to is the one replaced.
- */
-function replaceFile(file: string, original: Buffer, text: string): string {
-  const target = realpathSync(file);
-  const mode = statSync(target).mode & 0o777;
-  const backup = createBackup(file, (name) => writeFileSync(name, original, { flag: "wx", mode }));
-  chmodSync(backup, mode);
-  const temporary = join(dirname(target), `.${basename(target)}.mcpcage-${process.pid}-${randomBytes(4).toString("hex")}.tmp`);
-  try {
-    writeFileSync(temporary, text, { flag: "wx", mode });
-    chmodSync(temporary, mode);
-    renameSync(temporary, target);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
-  return backup;
 }
 
 /** JSON in the file's own style: its indentation unit, line endings, final newline and byte order mark. */
