@@ -539,6 +539,9 @@ function status(server: ServerReport): string {
         if (server.mcpcage === "other program") return `${started}, which are not mcpcage's cli.js and your node`;
         if (server.mcpcage === "not found") return `${started}, one of which was not found`;
       }
+      if (server.mcpcage === "other program" && process.platform === "win32" && !/[/\\]/.test(command)) {
+        return `starts ${command} by name, which Windows looks for in the client's current directory first`;
+      }
       if (server.mcpcage === "other program") return `starts ${command}, which is not the mcpcage on your PATH`;
       if (server.mcpcage === "not found") return `starts ${command}, which ${/[/\\]/.test(command) ? "was not found" : "is not on your PATH"}`;
       if (!server.protectedByMcpcage) return "mcpcage --no-sandbox: pinning and audit only, no isolation";

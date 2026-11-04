@@ -671,6 +671,11 @@ describe("settings in a writable mount", () => {
 });
 
 describe("client configuration", () => {
+  // The command wrap writes for mcpcage: by default its bare name; on Windows, where a client looks
+  // for a bare name in its current directory first and wrap refuses it, a full path (that does not
+  // exist here, so it starts nothing).
+  const command = process.platform === "win32" ? "C:\\mcpcage\\mcpcage.cmd" : undefined;
+  const written = command ?? "mcpcage";
   function write(config: unknown): string {
     const file = join(mkdtempSync(join(tmpdir(), "mcpcage-config-")), "config.json");
     writeFileSync(file, JSON.stringify(config, null, 2));
@@ -685,18 +690,18 @@ describe("client configuration", () => {
         remote: { url: "https://example.com/mcp" },
       },
     });
-    const outcome = wrapConfig(file, { dryRun: false });
+    const outcome = wrapConfig(file, { dryRun: false, command });
     expect(outcome.changed.map((change) => change.name)).toEqual(["github"]);
     expect(outcome.skipped.map((skip) => skip.name)).toEqual(["time", "remote"]);
     const config = JSON.parse(readFileSync(file, "utf8"));
     expect(config.mcpServers.github).toEqual({
-      command: "mcpcage",
+      command: written,
       args: ["run", "--env", "GITHUB_TOKEN", "--", "npx", "-y", "@modelcontextprotocol/server-github"],
       env: { GITHUB_TOKEN: "x" },
     });
     expect(existsSync(outcome.backup!)).toBe(true);
 
-    expect(wrapConfig(file, { dryRun: false }).skipped).toContainEqual({ name: "github", reason: "already wrapped" });
+    expect(wrapConfig(file, { dryRun: false, command }).skipped).toContainEqual({ name: "github", reason: "already wrapped" });
     unwrapConfig(file, { dryRun: false });
     expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.github).toEqual({
       command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_TOKEN: "x" },
@@ -706,9 +711,9 @@ describe("client configuration", () => {
   it("puts back on unwrap the env values that wrap moved into the arguments", () => {
     const env = { NODE_OPTIONS: "--max-old-space-size=4096", MCPCAGE_HOME: "/tmp/elsewhere", API_KEY: "x" };
     const file = write({ mcpServers: { tuned: { command: "npx", args: ["-y", "pkg"], env } } });
-    wrapConfig(file, { dryRun: false });
+    wrapConfig(file, { dryRun: false, command });
     expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.tuned).toEqual({
-      command: "mcpcage", args: ["run", "--env", "NODE_OPTIONS=--max-old-space-size=4096", "--env", "API_KEY", "--", "npx", "-y", "pkg"], env: { API_KEY: "x" },
+      command: written, args: ["run", "--env", "NODE_OPTIONS=--max-old-space-size=4096", "--env", "API_KEY", "--", "npx", "-y", "pkg"], env: { API_KEY: "x" },
     });
     unwrapConfig(file, { dryRun: false });
     // MCPCAGE_HOME was mcpcage's to ignore, not the server's: it stays in the backup only.
@@ -726,7 +731,7 @@ describe("client configuration", () => {
       const backups: string[] = [];
       for (const rewrite of [wrapConfig, unwrapConfig, wrapConfig]) {
         versions.push(readFileSync(file, "utf8"));
-        backups.push(rewrite(file, { dryRun: false }).backup!);
+        backups.push(rewrite(file, { dryRun: false, command }).backup!);
       }
       expect(backups[0]).toBe(`${file}.mcpcage.bak`);
       expect(backups[1]).toBe(`${file}.mcpcage.2026-11-03T12-00-00-000Z.bak`);
@@ -742,7 +747,7 @@ describe("client configuration", () => {
   it("handles VS Code's `servers` key and never writes on a dry run", () => {
     const original = { servers: { fs: { type: "stdio", command: "npx", args: ["-y", "pkg"] } } };
     const file = write(original);
-    const outcome = wrapConfig(file, { dryRun: true });
+    const outcome = wrapConfig(file, { dryRun: true, command });
     expect(outcome.key).toBe("servers");
     expect(outcome.changed).toHaveLength(1);
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(original);

@@ -48,8 +48,9 @@ const UNKNOWN = Symbol("unknown");
  * spawn looks it up: in the PATH the entry's own `env` sets, else in this process's PATH. A
  * `command: "mcpcage"` with an `env.PATH` of the attacker's choice was vouched for as caged, because
  * it was looked up in mcpcage's PATH. A relative path, or a relative directory in the entry's PATH,
- * depends on the directory the client starts the entry from: it is never taken for mcpcage. Node
- * with a cli.js, as --fix writes on Windows, is mcpcage when both are (see nodeAt).
+ * depends on the directory the client starts the entry from: it is never taken for mcpcage, nor is
+ * a bare name on Windows, which is looked for there first. Node with a cli.js, as --fix writes on
+ * Windows, is mcpcage when both are (see nodeAt).
  */
 export function mcpcageAt(entry: { command: string; args?: unknown; env?: unknown }, own?: McpcageCommand): McpcageKind {
   const script = nodeScript(entry);
@@ -277,6 +278,12 @@ function runningMcpcage(): string | undefined {
 
 /** The file the client starts for an entry, as its spawn finds it. */
 function startedBy(entry: { command: string; env?: unknown }): string | typeof UNKNOWN | undefined {
+  // Windows looks for a bare name in the client's current directory before the PATH. Checked on
+  // Windows 10, with npm's mcpcage.cmd on the PATH: cross-spawn, which the MCP SDK uses, started a
+  // mcpcage.cmd put in the current directory instead, and a plain spawn a mcpcage.exe put there;
+  // without one, a plain spawn found nothing, since it starts only .com and .exe files. Which
+  // directory that is depends on the client.
+  if (process.platform === "win32" && !/[/\\]/.test(entry.command)) return UNKNOWN;
   const path = pathOf(entry.env);
   return path === undefined ? onPath(entry.command, process.env.PATH ?? "", false) : onPath(entry.command, path, true);
 }

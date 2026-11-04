@@ -55,9 +55,27 @@ describe("the mcpcage an entry starts", () => {
     vi.stubEnv("PATH", bin);
     vi.stubEnv("PATHEXT", ".COM;.EXE;.BAT;.CMD");
     try {
-      expect(mcpcageAt({ command: "mcpcage" }, command)).toBe("installed");
-      expect(mcpcageAt({ command: "mcpcage", env: { PATH: bin } }, command)).toBe("installed");
+      // In an entry, a bare name is looked up as the client looks it up: on Windows its current
+      // directory comes first, so there it is never taken for mcpcage (see the test below).
+      const bare = process.platform === "win32" ? "other program" : "installed";
+      expect(mcpcageAt({ command: "mcpcage" }, command)).toBe(bare);
+      expect(mcpcageAt({ command: "mcpcage", env: { PATH: bin } }, command)).toBe(bare);
       expect(mcpcageAt({ command }, "mcpcage")).toBe("installed");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("is never a bare mcpcage on Windows, which looks in the client's current directory first", () => {
+    // npm's mcpcage.cmd, on the PATH.
+    const bin = mkdtempSync(join(tmpdir(), "mcpcage-which-"));
+    const command = join(bin, "mcpcage.cmd");
+    writeFileSync(command, "@exit /b 0\r\n");
+    vi.stubEnv("PATH", bin);
+    try {
+      expect(onWindows(() => [mcpcageAt({ command: "mcpcage" }, command), mcpcageAt({ command: "MCPCAGE.CMD" }, command)])).toEqual(["other program", "other program"]);
+      // mcpcage's own lookup of the command --fix writes still finds it in the PATH.
+      expect(onWindows(() => mcpcageAt({ command }, "mcpcage"))).toBe("installed");
     } finally {
       vi.unstubAllEnvs();
     }

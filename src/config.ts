@@ -87,11 +87,13 @@ export function wrapConfig(file: string, options: { dryRun: boolean; command?: M
  */
 export function cageCheck(entry: ServerEntry, options: { command: McpcageCommand; configFile: string }): string | undefined {
   if (mcpcageAt(entry as ServerEntry & { command: string }, options.command) === "other program") {
-    // A bare name is looked up in the entry's PATH, a relative path from the client's directory.
+    // A bare name is looked up in the entry's PATH (on Windows in the client's directory first), a
+    // relative path from the client's directory.
     const command = typeof options.command === "string" ? options.command : options.command.node;
-    return /[/\\]/.test(command) && !isAbsolute(command)
-      ? `${terminalSafe(command)} is a relative path, so what the client starts depends on the directory it starts the entry from: give the full path of mcpcage with --command`
-      : `its env sets a PATH that makes the client start another program than mcpcage: check that PATH, or remove it from its "env" by hand`;
+    const where = "so what the client starts depends on the directory it starts the entry from: give the full path of mcpcage with --command";
+    if (/[/\\]/.test(command) && !isAbsolute(command)) return `${terminalSafe(command)} is a relative path, ${where}`;
+    if (process.platform === "win32" && !/[/\\]/.test(command)) return `${terminalSafe(command)} is a bare name, which Windows looks for in the client's current directory first, ${where}`;
+    return `its env sets a PATH that makes the client start another program than mcpcage: check that PATH, or remove it from its "env" by hand`;
   }
   const envFile = envFileOf(entry, options.configFile);
   const fromFile = envFile === undefined ? undefined : { path: envFile.path, ...(envFile.variables === undefined ? {} : { effects: envEffects(envFile.variables) }) };
