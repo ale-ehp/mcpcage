@@ -2350,6 +2350,64 @@ describe("a configuration that is not a regular file", () => {
   });
 });
 
+describe("configuration files protect cannot check", () => {
+  // A client may read a file that protect refuses: one of 17 MiB, most of it whitespace, held an
+  // uncaged server, and protect said "could not read this file", then a clean summary, and exited 0.
+  it("counts them in the summary and exits 1, with --fix too, though every server it could read is caged", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-unchecked-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const at = locationsFor(home, project);
+    const installed = fakeMcpcage();
+    const hidden = { command: "npx", args: ["-y", "@acme/hidden-mcp"] };
+    // Sparse: 17 MiB on the disk's books, the server at the start.
+    writeText(at("cursor", "user"), `{ "mcpServers": { "hidden": ${JSON.stringify(hidden)} }, "padding": "`);
+    truncateSync(at("cursor", "user"), 17 * 1024 * 1024);
+    writeText(at("devin", "user"), `{ "mcpServers": { "hidden": ${JSON.stringify(hidden)} `);
+    writeJsonFile(at("windsurf", "user"), { mcpServers: { notes: { command: installed.command, args: ["run", "--", "npx", "-y", "@acme/notes-mcp"] } } });
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
+
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(scan.stderr).toBe("");
+    expect(scan.stdout).toContain("  could not read this file: too large to read (17.0 MiB; mcpcage reads configuration files up to 16 MiB)\n");
+    expect(scan.stdout).toContain("  could not read this file: not valid JSON");
+    expect(scan.stdout).toMatch(/^ {2}notes .* {2}caged$/m);
+    expect(scan.stdout).toContain("\nSummary\n  1 server in 3 configuration files");
+    expect(scan.stdout).toContain(" absent).\n  2 configuration files could not be checked.\n  0 run on your machine with your permissions and no cage.\n");
+    expect(scan.code).toBe(1);
+
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    expect(fix.stdout).toContain("\nPlan\n  nothing that mcpcage can change by itself.\n");
+    expect(fix.code).toBe(1);
+
+    // Once each can be read, and what it holds is caged, protect exits 0.
+    for (const client of ["cursor", "devin"] as const) rmSync(at(client, "user"));
+    const clean = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(clean.stdout).not.toContain("could not be checked");
+    expect(clean.code).toBe(0);
+  });
+
+  it.skipIf(process.platform === "win32")("counts one that is not a regular file", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-unchecked-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const copilot = locationsFor(home, project)("copilot", "user");
+    mkdirSync(dirname(copilot), { recursive: true });
+    const made = spawnSync("mkfifo", [copilot], { encoding: "utf8" });
+    expect(made.status, made.stderr).toBe(0);
+    // A timeout, so that a blocked read fails the test instead of hanging it.
+    const result = spawnSync(process.execPath, [cli, "protect", "--project", project, "--offline"], { encoding: "utf8", env: fakeUserEnv(home, cage), timeout: 20_000 });
+    expect(result.error).toBeUndefined();
+    expect(result.stdout).toContain("  could not read this file: not a regular file\n");
+    expect(result.stdout).toContain("  1 configuration file could not be checked.\n  0 run on your machine");
+    expect(result.status).toBe(1);
+  });
+});
+
 describe("what a wrapped entry's PATH picks", () => {
   /** A fake home and project with one Cursor configuration holding `servers`, and protect's PATH: `installed` first, then this process's. */
   function setup(servers: Record<string, unknown>, installed: { path: string }, extra: Record<string, string> = {}) {

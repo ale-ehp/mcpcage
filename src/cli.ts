@@ -15,7 +15,7 @@ import { parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, checkServerId, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, refuseTooMany, type Pending } from "./pinstore.js";
-import { envFileNote, fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, writableMounts, writableWarning, type Inspector } from "./protect.js";
+import { envFileNote, fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, uncheckedFiles, writableMounts, writableWarning, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
@@ -289,7 +289,9 @@ async function protect(argv: string[]): Promise<number> {
   });
   console.log(renderReport(report, { home }));
   const uncaged = report.servers.filter(isUncaged).length;
-  if (!values.fix) return uncaged > 0 ? 1 : 0;
+  // A configuration that could not be checked may start anything: it counts as an uncaged server does.
+  const unchecked = uncheckedFiles(report);
+  if (!values.fix) return uncaged > 0 || unchecked > 0 ? 1 : 0;
 
   const claudeCodeRunning = claudeCodeIsRunning();
   console.log("\nPlan");
@@ -303,7 +305,7 @@ async function protect(argv: string[]): Promise<number> {
   const files = plan.files.filter((file) => file.changed.length > 0).length;
   if (servers === 0) {
     console.log("  nothing that mcpcage can change by itself.");
-    return uncaged > 0 ? 1 : 0;
+    return uncaged > 0 || unchecked > 0 ? 1 : 0;
   }
   if (!values.yes) {
     if (!process.stdin.isTTY) throw new Error("refusing to change configuration files without a terminal; review the plan and pass --yes");
@@ -322,7 +324,7 @@ async function protect(argv: string[]): Promise<number> {
   };
   const outcome = fixConfigs({ report, command, claudeCodeRunning, dryRun: false, home, log: logNew, writable: values.writable });
   const changed = outcome.files.flatMap((file) => file.changed);
-  const status = changed.length < uncaged ? 1 : 0;
+  const status = changed.length < uncaged || unchecked > 0 ? 1 : 0;
   // A failed build is reported and leaves the configuration caged: the image is built at the next start.
   // An entry that was caged already, and only had its env moved, keeps the image it has.
   return values["no-build"] ? status : Math.max(status, buildImages(changed.filter((change) => !change.envOnly)));

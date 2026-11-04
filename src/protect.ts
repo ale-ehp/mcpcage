@@ -583,11 +583,23 @@ function signs(findings: Finding[]): string {
   return "no signs of hidden instructions";
 }
 
+/**
+ * The configuration files that are there but could not be checked: too large, not a regular file,
+ * not valid JSON, or unreadable. What they start is not known, and a client may read one that
+ * mcpcage refuses (a file of 17 MiB, most of it whitespace): `protect` counts them in its summary,
+ * and exits as it does for an uncaged server. It said "could not read this file" on the file's own
+ * lines, then a clean summary, and exited 0.
+ */
+export function uncheckedFiles(report: ProtectReport): number {
+  return report.files.filter((file) => file.exists && file.error !== undefined).length;
+}
+
 function summary(report: ProtectReport): string[] {
   const servers = report.servers;
   const count = (test: (server: ServerReport) => boolean) => servers.filter(test).length;
   const many = (number: number, one: string, more: string) => `${number} ${number === 1 ? one : more}`;
   const present = report.files.filter((file) => file.exists).length;
+  const unchecked = uncheckedFiles(report);
   const uncaged = count(isUncaged);
   const elsewhere = count((server) => server.type !== "npx" && server.type !== "mcpcage");
   const inCage = (server: ServerReport) => server.type === "mcpcage" && server.mcpcage === "installed" && !isUncaged(server);
@@ -598,6 +610,7 @@ function summary(report: ProtectReport): string[] {
   const run = `  ${many(uncaged, "runs", "run")} on your machine with your permissions and no cage.`;
   const lines = [
     `  ${many(servers.length, "server", "servers")} in ${many(present, "configuration file", "configuration files")} (${many(report.files.length, "file", "files")} checked, ${report.files.length - present} absent).`,
+    ...(unchecked > 0 ? [`  ${many(unchecked, "configuration file", "configuration files")} could not be checked.`] : []),
     uncaged > 0 ? `${run.padEnd(68)}-> mcpcage protect --fix` : run,
     `  ${many(count((server) => server.secrets.length > 0), "keeps", "keep")} a secret in clear text in a configuration file.`,
     `  ${count((server) => server.broadAccess.length > 0)} can reach your whole home directory, the disk or a directory with credentials.`,

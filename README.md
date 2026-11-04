@@ -356,7 +356,10 @@ question you are refused), `--strict`, `--id`, `--memory`, `--cpus`, `--keep-ima
 Protect options: `--project <dir>` (default: the current directory), `--inspect`, `--offline`,
 `--fix`, `--yes`, `--no-build`, `--command <path>`, `--writable` (with `--fix`, and with `wrap`:
 mount the paths servers are given writable instead of read-only). Without `--fix` the exit code is
-1 when at least one npx server runs uncaged, so it can gate a script.
+1 when at least one server runs uncaged, or when a configuration file could not be checked (too
+large, not a regular file, not valid JSON, or unreadable), since what it starts is not known; with
+`--fix`, when fewer servers were caged than ran uncaged, or when such a file is there. So it can
+gate a script.
 
 ## Limitations
 
