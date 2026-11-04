@@ -612,7 +612,8 @@ describe("settings in a writable mount", () => {
       expect(() => settings([rw(dir)])).toThrow(`${file} does not say where a git repository is in the form git writes (gitdir: <path>)`);
       writeFileSync(file, "gitdir: ../meta\n");
       writeFileSync(join(dir, "meta", "commondir"), "\n");
-      expect(() => settings([rw(dir)])).toThrow(`${join(dir, "meta", "commondir")} does not say where a git repository is in the form git writes (<path>)`);
+      // Named where it really is, as mcpcage found it.
+      expect(() => settings([rw(dir)])).toThrow(`${join(realpathSync.native(dir), "meta", "commondir")} does not say where a git repository is in the form git writes (<path>)`);
       // Unreadable only where a mode can make it so, to a user other than root (see above).
       if (process.getuid?.() === 0 || process.platform === "win32") return;
       chmodSync(file, 0o000);
@@ -626,8 +627,9 @@ describe("settings in a writable mount", () => {
     it("refuses to start when the way to the repository goes through a symlink the server could point elsewhere", () => {
       const dir = layout({ "app/.git": "gitdir: ../meta-link\n", ...at("meta", repository), "lib/": "" });
       symlinkSync(join(dir, "meta"), join(dir, "meta-link"));
-      // Named where it really is, as mcpcage found it.
-      const real = realpathSync(dir);
+      // Named where it really is, as mcpcage found it: with the long names of a TEMP spelled in 8.3
+      // short names, as Windows spells it on GitHub's runners (C:\Users\RUNNER~1).
+      const real = realpathSync.native(dir);
       expect(() => settings([rw(dir)])).toThrow(
         `--mount ${dir}:rw: ${join(dir, "app", ".git")} names ../meta-link, reached through the symlink ${join(real, "meta-link")}, which the server could point elsewhere, ` +
           `and mcpcage keeps the repository a .git file leads to read-only in a writable mount. Replace the link with what it points to, or mount ${dir} read-only by dropping :rw.`,
@@ -639,7 +641,7 @@ describe("settings in a writable mount", () => {
       // Nor a commondir that is a link: git writes a file there.
       writeFileSync(join(dir, "app", ".git"), "gitdir: ../meta\n");
       symlinkSync(join(dir, "lib", "commondir"), join(dir, "meta", "commondir"));
-      expect(() => settings([rw(dir)])).toThrow(`${join(dir, "meta", "commondir")}, which names the repository ${join(dir, "app", ".git")} shares, is not a file`);
+      expect(() => settings([rw(dir)])).toThrow(`${join(real, "meta", "commondir")}, which names the repository ${join(dir, "app", ".git")} shares, is not a file`);
     });
 
     it("refuses to start when the repository is missing where the server could make one, or is a writable mount itself", () => {
