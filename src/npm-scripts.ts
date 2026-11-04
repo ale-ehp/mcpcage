@@ -111,9 +111,8 @@ function readCache(file: string): CachedAnswer | undefined {
  */
 function runNpm(args: string[]): ReturnType<NpmRunner> {
   const npm = npmProgram();
-  // Without that script npmProgram gives the bare name, which Windows looks for in the current
-  // directory first, where a project can keep an npm.exe of its own: npm counts as not installed.
-  if (process.platform === "win32" && npm.file !== process.execPath) return { status: null, stdout: "", stderr: "npm is not installed" };
+  // Found nowhere on Windows, npm is not started by its bare name (see foundNowhere in sandbox.ts).
+  if (npm === undefined) return { status: null, stdout: "", stderr: "npm is not installed" };
   const result = spawnSync(npm.file, [...npm.args, ...args], {
     encoding: "utf8",
     timeout: 20_000,

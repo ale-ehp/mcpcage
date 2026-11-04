@@ -1,18 +1,20 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installScripts } from "../src/npm-scripts.js";
-import { npmProgram } from "../src/sandbox.js";
+import { npmProgram, prepareSandbox } from "../src/sandbox.js";
+import { onWindows } from "./fake-programs.js";
 
-// What the lookup starts is looked at here, never run: spawnSync answers as npm would for a package
-// with a postinstall script.
+// What mcpcage starts is looked at here, never run: spawnSync answers as a running Docker would to
+// `docker version`, and as npm would for a package with a postinstall script.
 const spawned = vi.hoisted(() => [] as Array<{ file: string; args: string[]; options: { shell?: unknown; env?: NodeJS.ProcessEnv } }>);
 vi.mock("node:child_process", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:child_process")>();
   const spawnSync = ((file: string, args: string[], options: { shell?: unknown; env?: NodeJS.ProcessEnv }) => {
     spawned.push({ file, args, options });
-    return { pid: 0, output: [], status: 0, signal: null, stdout: '{"postinstall": "node install.js"}', stderr: "" };
+    const stdout = args[0] === "version" ? "28.5.1\n" : '{"postinstall": "node install.js"}';
+    return { pid: 0, output: [], status: 0, signal: null, stdout, stderr: "" };
   }) as unknown as typeof original.spawnSync;
   return { ...original, spawnSync };
 });
@@ -20,22 +22,11 @@ vi.mock("node:child_process", async (importOriginal) => {
 beforeEach(() => {
   spawned.length = 0;
 });
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 const lookup = (spec: string) => installScripts(spec, { offline: false, cacheDir: mkdtempSync(join(tmpdir(), "mcpcage-npm-")) });
-
-/** Runs `run` as mcpcage would on Windows, started by the node at `node`. */
-function onWindows<T>(node: string, run: () => T): T {
-  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
-  const execPath = Object.getOwnPropertyDescriptor(process, "execPath")!;
-  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
-  Object.defineProperty(process, "execPath", { ...execPath, value: node });
-  try {
-    return run();
-  } finally {
-    Object.defineProperty(process, "platform", platform);
-    Object.defineProperty(process, "execPath", execPath);
-  }
-}
 
 /** A node installed as Node's installer does it on Windows, npm's own script next to it; or without one. */
 function nodeInstall(withNpm: boolean): { node: string; script: string } {
@@ -50,7 +41,7 @@ describe("the npm the install scripts lookup starts", () => {
   it("on Windows is the node running mcpcage with npm's own script, never a shell", () => {
     const { node, script } = nodeInstall(true);
     const spec = "@modelcontextprotocol/server-filesystem";
-    expect(onWindows(node, () => lookup(spec))).toEqual({ status: "found", scripts: ["postinstall"], detail: "" });
+    expect(onWindows(() => lookup(spec), node)).toEqual({ status: "found", scripts: ["postinstall"], detail: "" });
     expect(spawned).toHaveLength(1);
     const [started] = spawned;
     expect({ file: started!.file, args: started!.args.slice(0, 5), shell: started!.options.shell ?? false }).toEqual({
@@ -61,22 +52,44 @@ describe("the npm the install scripts lookup starts", () => {
 
     // What cmd.exe would read as commands or variables reaches npm as it is, one argument.
     const odd = 'x@1 & calc "%PATH%" ^& !PATH!|\r\nwhoami';
-    expect(onWindows(node, () => lookup(odd))).toMatchObject({ status: "found" });
+    expect(onWindows(() => lookup(odd), node)).toMatchObject({ status: "found" });
     expect(spawned[1]!.args.slice(1, 3)).toEqual(["view", odd]);
   });
 
   it("on Windows without npm's script next to node, says npm is not installed and starts nothing", () => {
     const { node } = nodeInstall(false);
     // Started by name, npm would be looked for in the current directory first, where a project can keep an npm.exe.
-    expect(onWindows(node, () => lookup("pkg@1"))).toEqual({ status: "unknown", scripts: [], detail: "npm is not installed" });
+    expect(onWindows(() => lookup("pkg@1"), node)).toEqual({ status: "unknown", scripts: [], detail: "npm is not installed" });
     expect(spawned).toEqual([]);
   });
 
   it.skipIf(process.platform === "win32")("on macOS and Linux is the npm that packs a local package, with its PATH", () => {
     expect(lookup("pkg@1")).toMatchObject({ status: "found" });
-    const npm = npmProgram();
+    const npm = npmProgram()!;
     expect(spawned[0]!.file).toBe(npm.file);
     expect(spawned[0]!.args.slice(0, npm.args.length + 2)).toEqual([...npm.args, "view", "pkg@1"]);
     expect(spawned[0]!.options.env?.PATH).toBe(npm.env.PATH);
+  });
+});
+
+describe("the npm that packs a local package", () => {
+  it("on Windows without npm's script next to node, is not found, and nothing but docker starts", () => {
+    const { node } = nodeInstall(false);
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-pack-"));
+    const bin = join(top, "bin");
+    const pkg = join(top, "local-server");
+    mkdirSync(bin);
+    mkdirSync(pkg);
+    writeFileSync(join(bin, "docker.exe"), "");
+    writeFileSync(join(pkg, "package.json"), '{"name": "local-server", "version": "1.0.0"}');
+    vi.stubEnv("MCPCAGE_HOME", join(top, "cage"));
+    vi.stubEnv("PATH", bin);
+    const options = {
+      serverId: "local", spec: { kind: "npm" as const, packageName: "", localPath: pkg, args: [] }, mounts: [], env: [],
+      allowNet: false, memory: "512m", cpus: "1", keepImageUser: false, rebuild: false, log: () => {},
+    };
+    expect(() => onWindows(() => prepareSandbox(options), node)).toThrow(`npm pack ${pkg} failed: npm not found next to ${node}`);
+    // Started by name, npm would be looked for in the current directory first, where a project can keep an npm.exe.
+    expect(spawned.map((call) => [call.file, call.args[0]])).toEqual([[join(bin, "docker.exe"), "version"]]);
   });
 });

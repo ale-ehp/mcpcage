@@ -55,3 +55,17 @@ export function noDocker(dir: string): { PATH: string; DOCKER_HOST: string } {
   const nowhere = join(dir, "no-docker-here");
   return { PATH: nowhere, DOCKER_HOST: `unix://${join(nowhere, "docker.sock")}` };
 }
+
+/** Runs `run` as mcpcage would on Windows, started by the node at `node`. */
+export function onWindows<T>(run: () => T, node = process.execPath): T {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const execPath = Object.getOwnPropertyDescriptor(process, "execPath")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+  Object.defineProperty(process, "execPath", { ...execPath, value: node });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    Object.defineProperty(process, "execPath", execPath);
+  }
+}

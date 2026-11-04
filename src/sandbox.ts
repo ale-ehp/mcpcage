@@ -64,6 +64,7 @@ export interface Prepared {
 
 export function dockerAvailable(): { ok: boolean; version?: string; error?: string } {
   const program = dockerProgram();
+  if (program === undefined) return { ok: false, error: DOCKER_NOT_FOUND };
   const result = spawnSync(program.file, ["version", "--format", "{{.Server.Version}}"], { encoding: "utf8", env: program.env });
   if (result.error) return { ok: false, error: result.error.message };
   if (result.status !== 0) return { ok: false, error: result.stderr.trim() || "docker is not running" };
@@ -79,7 +80,7 @@ export function prepareSandbox(options: SandboxOptions): Prepared {
   }
   const record = options.spec.kind === "npm" ? prepareNpmImage(options) : prepareImage(options);
   writeJson(join(serverDir(options.serverId), "server.json"), record);
-  const program = dockerProgram();
+  const program = foundDocker();
   return { command: program.file, args: runArgs(options, record.imageId), env: program.env, record };
 }
 
@@ -564,6 +565,7 @@ function packLocal(path: string, context: string): string {
     return "./package.tgz";
   }
   const npm = npmProgram();
+  if (npm === undefined) throw new Error(`npm pack ${source} failed: npm not found next to ${process.execPath}`);
   const packed = spawnSync(npm.file, [...npm.args, "pack", source, "--pack-destination", context, "--json", "--ignore-scripts"], { encoding: "utf8", env: npm.env });
   if (packed.error) throw new Error(`npm pack ${source} failed: ${packed.error.message}`);
   if (packed.status !== 0) throw new Error(`npm pack ${source} failed: ${packed.stderr.trim()}`);
@@ -573,14 +575,14 @@ function packLocal(path: string, context: string): string {
 }
 
 function imageId(reference: string): string | undefined {
-  const program = dockerProgram();
+  const program = foundDocker();
   const result = spawnSync(program.file, ["image", "inspect", "--format", "{{.Id}}", reference], { encoding: "utf8", env: program.env });
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
 /** Runs docker; its output goes to stderr (stdout belongs to the MCP channel) when `stream` is set. */
 function docker(args: string[], stream = false): string {
-  const program = dockerProgram();
+  const program = foundDocker();
   const result = spawnSync(program.file, args, { encoding: "utf8", env: program.env, stdio: stream ? ["ignore", 2, 2] : ["ignore", "pipe", "pipe"] });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`docker ${args[0]} failed${stream ? "" : `: ${(result.stderr ?? "").trim()}`}`);
@@ -589,7 +591,7 @@ function docker(args: string[], stream = false): string {
 
 /** A program mcpcage runs on the host: the file to start, the arguments before its own, and the environment to start it with. */
 export interface HostProgram {
-  /** An absolute path; the bare name when it is found nowhere, so that starting it fails as before. */
+  /** An absolute path; on macOS and Linux the bare name when it is found nowhere (see foundNowhere). */
   file: string;
   args: string[];
   env: NodeJS.ProcessEnv;
@@ -636,24 +638,47 @@ function trustedPlaces(): string[] {
 }
 
 /** The docker mcpcage runs, and the environment it runs every docker command with (see trustedPlaces). */
-export function dockerProgram(): HostProgram {
+export function dockerProgram(): HostProgram | undefined {
   const name = process.platform === "win32" ? "docker.exe" : "docker";
   const file = findProgram(name, trustedPlaces()) ?? findProgram(name, searchPath());
-  return { file: file ?? name, args: [], env: trustedEnv(file === undefined ? [] : [dirname(file)]) };
+  return file === undefined ? foundNowhere(name) : { file, args: [], env: trustedEnv([dirname(file)]) };
+}
+
+/** What dockerAvailable says on Windows when dockerProgram finds no docker.exe. */
+const DOCKER_NOT_FOUND = "docker.exe not found in the PATH";
+
+/** dockerProgram, after dockerAvailable has found it: gone since, Docker is as missing as it would have been then. */
+function foundDocker(): HostProgram {
+  const program = dockerProgram();
+  if (program === undefined) throw new Error(DOCKER_NOT_FOUND);
+  return program;
 }
 
 /** The npm mcpcage runs to pack a local package or look one up: the one next to the node running mcpcage, else as docker is found (see trustedPlaces). */
-export function npmProgram(): HostProgram {
+export function npmProgram(): HostProgram | undefined {
   const here = dirname(process.execPath);
   if (process.platform === "win32") {
     // npm.cmd starts only through a shell, which would read a package path as commands: the script
     // it runs starts with this node alone, from where Node's installer puts it.
     const script = join(here, "node_modules", "npm", "bin", "npm-cli.js");
-    return existsSync(script) ? { file: process.execPath, args: [script], env: trustedEnv([here]) } : { file: "npm", args: [], env: trustedEnv([]) };
+    return existsSync(script) ? { file: process.execPath, args: [script], env: trustedEnv([here]) } : foundNowhere("npm");
   }
   const file = findProgram("npm", [here, ...trustedPlaces()]) ?? findProgram("npm", searchPath());
   // Its directory comes first in its PATH: `#!/usr/bin/env node` then finds the node installed with it.
-  return { file: file ?? "npm", args: [], env: trustedEnv(file === undefined ? [] : [dirname(file)]) };
+  return file === undefined ? foundNowhere("npm") : { file, args: [], env: trustedEnv([dirname(file)]) };
+}
+
+/*
+ * A program found nowhere would be started by its bare name, and looked for again where the system
+ * looks for one. On macOS and Linux that is the PATH it is given, of the trusted places only, all of
+ * them absolute: execvp looks in the current directory only for an empty or relative entry, so the
+ * start fails there (ENOENT), as it should. Windows looks in the current directory first, whatever
+ * the PATH says, and a client starts mcpcage in the project's: a docker.exe or an npm.exe that a
+ * cloned repository keeps at its root ran on the host. There the program counts as not installed,
+ * and nothing is started.
+ */
+function foundNowhere(name: string): HostProgram | undefined {
+  return process.platform === "win32" ? undefined : { file: name, args: [], env: trustedEnv([]) };
 }
 
 /** mcpcage's environment, with a PATH of `first` and the trusted places only. */

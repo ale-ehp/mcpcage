@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { dockerProgram, npmProgram, runArgs } from "../src/sandbox.js";
-import { fakePrograms, isProgram, STANDARD_PLACES, standardDocker } from "./fake-programs.js";
+import { dockerAvailable, dockerProgram, npmProgram, runArgs } from "../src/sandbox.js";
+import { fakePrograms, isProgram, onWindows, STANDARD_PLACES, standardDocker } from "./fake-programs.js";
 import { freshHome, mcpcageWithEnv } from "./helpers.js";
 
 // A client starts mcpcage with the PATH a server entry's `env` sets. The docker, the credential
@@ -20,10 +20,12 @@ function dockerHost(): string {
 }
 
 const path = process.env.PATH;
+const cwd = process.cwd();
 afterEach(() => {
   if (path === undefined) delete process.env.PATH;
   else process.env.PATH = path;
   delete process.env.MCPCAGE_TEST_KEPT;
+  process.chdir(cwd);
 });
 
 describe("docker and npm on the host, whatever an entry's PATH puts first", () => {
@@ -31,7 +33,7 @@ describe("docker and npm on the host, whatever an entry's PATH puts first", () =
     const fake = fakePrograms();
     process.env.PATH = fake.path;
     process.env.MCPCAGE_TEST_KEPT = "kept";
-    const docker = dockerProgram();
+    const docker = dockerProgram()!;
     expect(docker.file).toBe(standardDocker);
     expect(docker.args).toEqual([]);
     expect(docker.env.PATH?.split(delimiter)).toEqual([...new Set([dirname(standardDocker!), ...STANDARD_PLACES])]);
@@ -66,7 +68,7 @@ describe("docker and npm on the host, whatever an entry's PATH puts first", () =
   it.skipIf(process.platform === "win32" || trustedNpm === undefined)("runs the npm next to the node running mcpcage or in a standard place, which then finds no node from the PATH", () => {
     const fake = fakePrograms();
     process.env.PATH = fake.path;
-    const npm = npmProgram();
+    const npm = npmProgram()!;
     expect(npm.file).toBe(trustedNpm);
     expect(npm.args).toEqual([]);
     expect(npm.env.PATH?.split(delimiter)).toEqual([...new Set([dirname(trustedNpm!), ...STANDARD_PLACES])]);
@@ -74,6 +76,61 @@ describe("docker and npm on the host, whatever an entry's PATH puts first", () =
     const version = spawnSync(npm.file, [...npm.args, "--version"], { encoding: "utf8", env: npm.env });
     expect(version.status, version.stderr).toBe(0);
     expect(fake.ran()).toBe("");
+  });
+
+  // A program found nowhere is started by its bare name, which execvp looks for in the current
+  // directory only through an empty or relative entry of the PATH it is given.
+  it.skipIf(process.platform === "win32")("runs docker and npm with a PATH of absolute directories only, whatever mcpcage's PATH holds", () => {
+    process.env.PATH = ["", ".", "bin"].join(delimiter);
+    for (const program of [dockerProgram()!, npmProgram()!]) {
+      const dirs = program.env.PATH?.split(delimiter) ?? [];
+      expect(dirs.length).toBeGreaterThan(0);
+      expect(dirs.filter((dir) => !isAbsolute(dir)), program.file).toEqual([]);
+    }
+  });
+});
+
+describe("on Windows, a docker or an npm found nowhere", () => {
+  // Windows looks for a bare program name in the current directory first, whatever the PATH says, and
+  // a client starts mcpcage in the project's: a cloned repository can hold a docker.exe or an npm.exe.
+  /** That project, the current directory, with decoys that note when they run and answer like the real ones. */
+  function projectWithDecoys(): { dir: string; ran: () => string } {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-decoys-"));
+    const dir = join(top, "project");
+    const marker = join(top, "ran");
+    mkdirSync(dir);
+    for (const name of ["docker.exe", "npm.exe", "npm"]) {
+      writeFileSync(join(dir, name), `#!/bin/sh\necho "${name} $*" >> '${marker}'\necho 28.5.1\n`);
+      chmodSync(join(dir, name), 0o755);
+    }
+    process.chdir(dir);
+    return { dir, ran: () => (existsSync(marker) ? readFileSync(marker, "utf8") : "") };
+  }
+
+  it("starts no docker.exe from the current directory: Docker counts as not found", () => {
+    const project = projectWithDecoys();
+    // Empty and relative entries all name the current directory; the absolute one holds no docker.
+    process.env.PATH = ["", ".", join("..", "project"), mkdtempSync(join(tmpdir(), "mcpcage-no-docker-"))].join(delimiter);
+    expect(onWindows(() => dockerAvailable())).toEqual({ ok: false, error: "docker.exe not found in the PATH" });
+    expect(project.ran()).toBe("");
+    // Only the file is compared: the whole program would print mcpcage's environment on a failure.
+    expect(onWindows(() => dockerProgram())?.file).toBeUndefined();
+  });
+
+  it("finds docker.exe only in an absolute directory of the PATH, never through an empty or relative entry", () => {
+    projectWithDecoys();
+    const bin = mkdtempSync(join(tmpdir(), "mcpcage-docker-bin-"));
+    writeFileSync(join(bin, "docker.exe"), "");
+    process.env.PATH = ["", ".", join("..", "project"), bin].join(delimiter);
+    const docker = onWindows(() => dockerProgram());
+    expect(docker?.file).toBe(join(bin, "docker.exe"));
+    expect(docker?.env.PATH).toBe(bin);
+  });
+
+  it("gives no npm when npm's script is not next to node, where Node's installer puts it", () => {
+    projectWithDecoys();
+    const node = join(mkdtempSync(join(tmpdir(), "mcpcage-nodejs-")), "node.exe");
+    expect(onWindows(() => npmProgram(), node)?.file).toBeUndefined();
   });
 });
 
