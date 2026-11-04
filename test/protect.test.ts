@@ -17,7 +17,7 @@ import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs } from "../src/protect.js";
 import { parseMount, runArgs } from "../src/sandbox.js";
-import { cli, fakeServer, fakeUserEnv, hostileServer, mcpcageWithEnv, root } from "./helpers.js";
+import { cli, fakeServer, fakeUserEnv, hostileServer, mcpcageWithEnv, root, stubHome } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
 /** An entry as a configuration file may hold it, whatever the types say. */
@@ -386,7 +386,7 @@ describe("wrapping one entry", () => {
   it("gives a ~/ argument as the absolute path it mounts, because HOME is /tmp inside the cage", () => {
     const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
     mkdirSync(join(home, "notes"));
-    vi.stubEnv("HOME", home);
+    stubHome(home);
     try {
       const wrapped = wrapEntry({ command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "~/notes", "~/missing"] }, { command: "mcpcage" });
       expect(wrapped).toEqual({
@@ -404,7 +404,7 @@ describe("wrapping one entry", () => {
     const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
     mkdirSync(join(home, ".cursor"));
     writeFileSync(join(home, ".cursor", "mcp.json"), "{}\n");
-    vi.stubEnv("HOME", home);
+    stubHome(home);
     try {
       // A writable ~/.cursor would let the server read the other servers' tokens and add an uncaged one.
       const reason = "which mcpcage will not mount: the MCP servers, settings and extensions of Cursor in ~/.cursor";
@@ -511,6 +511,8 @@ describe("wrapping one entry", () => {
 
   it("makes a relative MCPCAGE_HOME absolute, so a server given that store is refused", () => {
     const store = mkdtempSync(join(tmpdir(), "mcpcage-store-"));
+    // A home of its own: on Windows the temporary directory is in the real one, and the store was shown from ~.
+    stubHome(mkdtempSync(join(tmpdir(), "mcpcage-home-")));
     vi.stubEnv("MCPCAGE_HOME", relative(process.cwd(), store));
     try {
       expect(isAbsolute(cageHome())).toBe(true);
@@ -1126,7 +1128,7 @@ describe("inspection sandbox", () => {
     const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
     const data = mkdtempSync(join(tmpdir(), "mcpcage-data-"));
     mkdirSync(join(home, "notes"));
-    vi.stubEnv("HOME", home);
+    stubHome(home);
     try {
       const argv = ["npx", "-y", "@modelcontextprotocol/server-filesystem", data, "~/notes", "/not/here", data];
       const options = inspectionSandbox({ argv, env: { API_TOKEN: "t0k3n-value-123" } });
@@ -1158,7 +1160,7 @@ describe("inspection sandbox", () => {
     // Both exist: parseMount read the argument as ~/.ssh with the option rw, and mounted the keys writable.
     mkdirSync(join(home, ".ssh"));
     mkdirSync(join(home, ".ssh:rw"));
-    vi.stubEnv("HOME", home);
+    stubHome(home);
     try {
       const options = inspectionSandbox({ argv: ["npx", "-y", "@modelcontextprotocol/server-filesystem", join(home, ".ssh:rw")], env: {} });
       expect(options.mounts).toEqual([{ source: join(home, ".ssh:rw"), target: join(home, ".ssh:rw"), readOnly: true }]);
@@ -1183,7 +1185,7 @@ describe("inspection sandbox", () => {
         plain: { command: "npx", args: ["-y", "plain-mcp", data] },
       },
     });
-    vi.stubEnv("HOME", home);
+    stubHome(home);
     try {
       const options = inspectionSandbox({ argv: ["npx", "-y", "keys-mcp", "~/.ssh", data], env: {} });
       expect(options.mounts).toEqual([{ source: data, target: data, readOnly: true }]);
@@ -1217,7 +1219,7 @@ describe("client configurations where the environment moves them", () => {
     const copilot = join(top, "copilot");
     const file = join(copilot, "mcp-config.json");
     writeJsonFile(file, { mcpServers: { github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_TOKEN: TOKEN } } } });
-    vi.stubEnv("HOME", home);
+    stubHome(home);
     vi.stubEnv("COPILOT_HOME", copilot);
     try {
       // discovery reads it as Copilot's configuration: a server given it writable adds one of its own there.

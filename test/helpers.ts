@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { vi } from "vitest";
 
 export const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const cli = join(root, "dist", "cli.js");
@@ -62,12 +63,26 @@ export function mcpcage(home: string, ...args: string[]) {
 
 /**
  * The environment of a user whose home directory is `home`, with mcpcage's data in `cage`. Variables
- * that would point the CLI at this machine's real client configurations are left out.
+ * that would point the CLI at this machine's real client configurations are left out. On Windows the
+ * home directory is USERPROFILE, which os.homedir() reads instead of HOME, and the clients keep their
+ * files under APPDATA: without them the CLI scanned the real profile of whoever ran the tests.
  */
 export function fakeUserEnv(home: string, cage: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const name of ["COPILOT_HOME", "APPDATA", "USERPROFILE", "XDG_CONFIG_HOME"]) delete env[name];
-  return { ...env, HOME: home, MCPCAGE_HOME: cage, ...extra };
+  for (const name of ["COPILOT_HOME", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "XDG_CONFIG_HOME"]) delete env[name];
+  return { ...env, HOME: home, ...windowsHome(home), MCPCAGE_HOME: cage, ...extra };
+}
+
+/** The variables Windows sets for a user whose home directory is `home`; none elsewhere. */
+export function windowsHome(home: string): Record<string, string> {
+  if (process.platform !== "win32") return {};
+  return { USERPROFILE: home, APPDATA: join(home, "AppData", "Roaming"), LOCALAPPDATA: join(home, "AppData", "Local") };
+}
+
+/** Makes `home` the home directory of this process, as fakeUserEnv does for the CLI; vi.unstubAllEnvs() undoes it. */
+export function stubHome(home: string): void {
+  vi.stubEnv("HOME", home);
+  for (const [name, value] of Object.entries(windowsHome(home))) vi.stubEnv(name, value);
 }
 
 /** Runs the CLI with exactly this environment (see fakeUserEnv). */
