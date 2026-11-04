@@ -3,6 +3,103 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-04
+
+Windows. Run on a Windows 10 PC for the first time, the unit suite gave 62 failed, 254 passed, and
+`mcpcage run` stopped before a server given a folder could start. mcpcage now runs there with
+Docker Desktop's Linux containers, tested with Node 24, and a CI job runs the typecheck and the unit
+tests on Windows. Every Windows change below was found on that PC.
+
+### Added
+
+- Windows: a folder is mounted in the cage at `/c/...` (`C:\Users\me\notes` at
+  `/c/Users/me/notes`, spelled as Windows keeps it on disk), and the server is given that path for
+  each argument that names a mounted folder or a path inside one. `run` prints where each folder is
+  in the cage. Tool calls are not translated: the model has to use the paths the server lists.
+- Windows: an entry that starts `cmd /c npx ...` counts as npx, and `wrap` and `--fix` cage it,
+  keeping `cmd /c` after `--` so that `unwrap` gives it back as it was; mcpcage never starts `cmd`
+  for it. One whose line holds more than npx and its arguments is reported as not a plain npx
+  command line and left as it is.
+- Windows: Claude Desktop installed from its MSIX package keeps its configuration under
+  `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude`. `protect` reads it, and
+  that directory is never mounted (see Security).
+- A banner with mcpcage's name, version and tagline at the start of `mcpcage`, `help`, `doctor` and
+  `protect`, only when stdout is a terminal; only the version line in one narrower than 62 columns.
+  Never for any other command, and never when the output is piped or redirected.
+
+### Changed
+
+- Windows: `protect --fix` and `wrap` write the node that runs mcpcage (`node.exe`) with mcpcage's
+  `cli.js`, by their full paths, instead of npm's `mcpcage.cmd`: Node refuses a plain spawn of a
+  `.cmd` since the fix of CVE-2024-27980 (EINVAL), so a client that starts servers that way could
+  not start what 0.5.0 wrote. `protect` says of an entry caged with `mcpcage.cmd` (or `.bat`) that
+  some clients cannot start it, counts it on a line of its own, and `--fix` gives it `node.exe` with
+  `cli.js`, its options kept.
+- Windows: a bare `mcpcage` in an entry never counts as mcpcage, since Windows looks for a bare name
+  in the client's current directory first: `protect` counts it as running uncaged, `--fix` rewrites
+  it, and a bare `--command` is refused.
+- Windows: a writable mount that holds any of git's or the editors' settings, a directory as well
+  as a file, refuses to start, and so does a read-only mount given inside a writable one (see
+  Security).
+- The install scripts lookup (`npm view`) runs the npm that packs a local package, on every system:
+  next to the node that runs mcpcage, then the standard places, with a PATH of those places, instead
+  of the first npm on the PATH.
+
+### Fixed
+
+Windows
+
+- `run --no-sandbox` could not start npx ("spawn npx ENOENT"). It starts npm's `npx-cli.js` with the
+  node that runs mcpcage, never through a shell, and refuses any other batch file as the host
+  command, saying what to give instead.
+- The install scripts lookup started `npm.cmd` through `cmd.exe` with the package spec on its command
+  line, and Node 24 printed a DEP0190 warning in the report; a spec with `"` or `%` was refused.
+- `NPX.CMD`, `npx.CMD` or `C:\NODEJS\NPX.CMD` was "not npx": the server ran uncaged and was not
+  counted. npx, uvx, docker and mcpcage are compared without case.
+- A local package given as `.\x`, `..\x`, `C:\x` or `\x` was looked up on the registry by that name.
+- `protect --fix` rewrote `~/.claude.json` while Claude Code was running: a running `claude.exe` is
+  now found with `tasklist.exe`, as Claude Code is with `ps` on macOS and Linux.
+- A network share or a device path (`\\server\share`, `\\?\...`) given to a server was mounted by
+  `wrap` and `--fix`, and the entry never started, while `protect` called it caged. Such a server is
+  left as it is with the reason, a caged entry that mounts one is said not to start, and
+  `protect --inspect` inspects the server without it.
+- `protect --inspect` mounted a folder named in another case than on disk at another place than
+  `run` does, so the inspected server listed other paths than the caged one.
+- A directory of your PATH spelled with 8.3 short names (`C:\PROGRA~1`) in one place and long names
+  in the other counted as another directory, and the same mcpcage spelled in another case
+  (`mcpcage.CMD`) as another file: paths are compared as the system spells them on disk.
+- A `mcpcage.bat` was "another command", not counted as uncaged whatever it ran. It is read as a
+  `mcpcage.cmd` is.
+
+Everywhere
+
+- `npx mcpcage protect --fix` wrote the mcpcage of npx's own cache into configurations (on Windows
+  its `cli.js`), which `npm cache npx rm` deletes and a later npx replaces: once it was gone, every
+  caged server stopped starting. `--fix` and `wrap` refuse to write a command from npx's cache, an
+  explicit `--command` included, and say to install mcpcage (`npm install -g mcpcage`) or to pass
+  `--command`. `protect` without `--fix` still works from npx.
+
+### Security
+
+- Windows: a program in the current directory ran in place of docker or npm. `doctor` ran a
+  project's `docker.exe`, `prepare` its `npm.exe`, since Windows looks for a bare name there first,
+  whatever the PATH. docker and npm are never started by a bare name there.
+- Windows: `protect --fix` run in a directory that held a `mcpcage.cmd` wrote that file into the
+  user's configurations, since `where` looked in the current directory first; the clients then
+  started it on the host. `--fix` no longer runs `where`, on any system: mcpcage is looked up in the
+  absolute directories of the PATH only.
+- Windows: Docker Desktop lets a server in a writable folder reach a read-only folder inside it under
+  another case of its name. Through the cage, a server wrote `.GIT/config` around a read-only `.git`
+  and changed the repository's `.git\config` on the host, from which git runs commands. mcpcage now
+  puts no read-only mount inside a writable one there (see Changed).
+- Windows: the repository a `.git` file names by an absolute path, as git writes it on Windows, or
+  by 8.3 short names was not found, and stayed writable inside a writable mount: a server could
+  change its configuration and hooks.
+- Windows: Claude Desktop's MSIX configuration directory was an ordinary path for `run` and `wrap`:
+  mounted, it gave a server the other servers' tokens, and with `:rw` a place to add an uncaged
+  server of its own. It is refused as a mount like `%APPDATA%\Claude`, and an entry's env that sets
+  `LOCALAPPDATA` counts as moving the client configurations, as `APPDATA` does.
+
 ## [0.5.0] - 2026-11-04
 
 Hardening, second round. Independent reviews tried to break 0.4.0 from both sides: a server
