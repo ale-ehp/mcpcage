@@ -289,6 +289,7 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
   const paths = serverArgs.map((arg) => hostPath(arg));
   const machine = thisMachine();
   for (const path of paths) {
+    if (path !== undefined && offDrive(path)) return { skip: `needs ${path}, which ${NOT_ON_A_DRIVE}` };
     const reason = path === undefined ? undefined : sensitivePath(path, machine);
     if (reason !== undefined) return { skip: `needs ${path}, which mcpcage will not mount: ${reason}` };
   }
@@ -389,6 +390,19 @@ export function withoutEnvValues(args: string[]): string[] {
   for (const { index, prefix, name } of envValues(args)) shown[index] = `${prefix}${name}=***`;
   return shown;
 }
+
+/**
+ * Whether a path is, on Windows, not on a drive: a share (`\\server\share`) or a device path
+ * (`\\?\...`, `\\.\...`). `run` cannot mount one there, so an entry given one cannot start once
+ * caged: wrap wrote `--mount \\localhost\C$\Users\me\share` for a server given that share,
+ * which `run` refuses at every start. Elsewhere `//x` is an ordinary path.
+ */
+export function offDrive(path: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32" && /^[\\/]{2}/.test(path);
+}
+
+/** Why a path that is not on a drive (see offDrive) is not mounted. */
+export const NOT_ON_A_DRIVE = "is not a path on a drive, and only those have a place in the cage on Windows";
 
 /** The absolute path an argument names on this machine, when it exists here: `/x` as written, `~/x` expanded. */
 export function hostPath(arg: unknown): string | undefined {

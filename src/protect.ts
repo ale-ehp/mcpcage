@@ -3,7 +3,7 @@ import { join, posix, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
 import {
-  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, mcpcageArgs, moveHostEnv, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry,
+  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, mcpcageArgs, moveHostEnv, NOT_ON_A_DRIVE, offDrive, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry,
   type EnvEffects, type ServerEntry, type ServerType,
 } from "./config.js";
 import { envFileOf, mcpcageAt, nodeScript, type ForeignPath, type McpcageCommand, type McpcageKind } from "./installed.js";
@@ -52,6 +52,8 @@ export interface ServerReport {
   script?: string;
   /** For a caged entry: each run option that opens its cage, in plain words. */
   opened: string[];
+  /** For a caged entry on Windows, a path it mounts that is not on a drive (see offDrive), so it cannot start. */
+  offDrive?: string;
   /** Names of the env variables, headers and arguments whose value looks like a secret. */
   secrets: string[];
   /** Arguments and --mount paths, as written, that open the whole disk, the whole home directory or a directory with credentials. */
@@ -189,7 +191,11 @@ async function describeServer(
     const script = type === "mcpcage" ? nodeScript(entry) : undefined;
     if (script !== undefined) server.script = script;
     server.protectedByMcpcage = server.mcpcage === "installed" && !withoutSandbox(entry);
-    if (server.protectedByMcpcage) server.opened = openedBy(entry);
+    if (server.protectedByMcpcage) {
+      server.opened = openedBy(entry);
+      const unmountable = offDriveMount(entry);
+      if (unmountable !== undefined) server.offDrive = unmountable;
+    }
     server.secrets = [...new Set([...secretNames(entry), ...shown.secrets])];
     // The script node.exe is given is mcpcage's own, in the PATH's npm directory: not a path the server is given.
     server.broadAccess = type === "remote" ? [] : broadPaths(fromRun(entry), options.home);
@@ -386,6 +392,21 @@ function openedBy(entry: ServerEntry): string[] {
   return lines;
 }
 
+/**
+ * The first path a caged entry mounts that is not on a drive, on Windows (see offDrive): `run`
+ * cannot give it a place in the cage, so the entry never starts. Undefined when there is none, and
+ * when `run` would refuse its options anyway.
+ */
+function offDriveMount(entry: ServerEntry): string | undefined {
+  const args = fromRun(entry);
+  const separator = args.indexOf("--");
+  try {
+    return runValues(args.slice(1, separator === -1 ? args.length : separator)).mount.map((mount) => mount.replace(/:(?:rw|ro)$/, "")).find((path) => offDrive(path));
+  } catch {
+    return undefined;
+  }
+}
+
 function runValues(own: string[]) {
   return parseArgs({ args: own, options: RUN_OPTIONS, strict: true }).values;
 }
@@ -545,6 +566,7 @@ function status(server: ServerReport): string {
       if (server.mcpcage === "other program") return `starts ${command}, which is not the mcpcage on your PATH`;
       if (server.mcpcage === "not found") return `starts ${command}, which ${/[/\\]/.test(command) ? "was not found" : "is not on your PATH"}`;
       if (!server.protectedByMcpcage) return "mcpcage --no-sandbox: pinning and audit only, no isolation";
+      if (server.offDrive !== undefined) return `cannot start: --mount ${terminalSafe(server.offDrive)} ${NOT_ON_A_DRIVE}`;
       // The env acts first, on the host, before any cage exists.
       const fromFile = server.envFile?.effects;
       if (server.hostEnv.length > 0 || (fromFile?.hostEnv.length ?? 0) > 0) return "caged, but its env runs on your machine";
@@ -622,10 +644,11 @@ function summary(report: ProtectReport): string[] {
   const unchecked = uncheckedFiles(report);
   const uncaged = count(isUncaged);
   const elsewhere = count((server) => server.type !== "npx" && server.type !== "mcpcage");
-  const inCage = (server: ServerReport) => server.type === "mcpcage" && server.mcpcage === "installed" && !isUncaged(server);
+  const inCage = (server: ServerReport) => server.type === "mcpcage" && server.mcpcage === "installed" && server.offDrive === undefined && !isUncaged(server);
   const caged = count((server) => inCage(server) && server.opened.length === 0);
   const opened = count((server) => inCage(server) && server.opened.length > 0);
   const missing = count((server) => server.type === "mcpcage" && server.error === undefined && server.mcpcage === "not found");
+  const stuck = count((server) => server.offDrive !== undefined);
   const scripts = count((server) => server.installScripts?.status === "found");
   const run = `  ${many(uncaged, "runs", "run")} on your machine with your permissions and no cage.`;
   const lines = [
@@ -648,6 +671,7 @@ function summary(report: ProtectReport): string[] {
   );
   if (opened > 0) lines.push(`  ${many(opened, "runs", "run")} through mcpcage with the cage opened by ${opened === 1 ? "its" : "their"} options.`);
   if (missing > 0) lines.push(`  ${many(missing, "starts", "start")} an mcpcage that could not be found.`);
+  if (stuck > 0) lines.push(`  ${stuck} cannot start: ${stuck === 1 ? "it mounts a path" : "they mount paths"} that ${stuck === 1 ? "is" : "are"} not on a drive.`);
   return lines;
 }
 
@@ -699,10 +723,12 @@ export function fixConfigs(options: FixOptions): FixOutcome {
     const targets = servers.filter(
       (server) =>
         server.type === "npx" ||
-        (server.type === "mcpcage" && (server.mcpcage === "other program" || (server.protectedByMcpcage && server.error === undefined && (actsOnHost(server) || envFileActs(server))))),
+        (server.type === "mcpcage" &&
+          (server.mcpcage === "other program" || (server.protectedByMcpcage && server.offDrive === undefined && server.error === undefined && (actsOnHost(server) || envFileActs(server))))),
     );
     // Already wrapped, so there is nothing to rewrite: only the person who chose --no-sandbox can drop it.
-    const onHost = servers.filter((server) => server.type === "mcpcage" && server.mcpcage === "installed" && !server.protectedByMcpcage && server.error === undefined);
+    // Caged entries that only the user can change: one that runs with --no-sandbox, and one that cannot start.
+    const onHost = servers.filter((server) => server.type === "mcpcage" && server.mcpcage === "installed" && server.error === undefined && (!server.protectedByMcpcage || server.offDrive !== undefined));
     if (targets.length === 0 && onHost.length === 0) continue;
     try {
       files.push(fixFile(file, targets, onHost, options, home));
@@ -749,7 +775,11 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
     removed.set(wrapped.entry, before.filter((name) => !Object.hasOwn(wrapped.entry.env ?? {}, name)));
   }
   for (const server of onHost) {
-    fixed.skipped.push({ name: server.name, label: server.label, reason: "it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand" });
+    const reason =
+      server.offDrive === undefined
+        ? "it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand"
+        : `it cannot start: --mount ${server.offDrive} ${NOT_ON_A_DRIVE}; remove that --mount by hand`;
+    fixed.skipped.push({ name: server.name, label: server.label, reason });
   }
   for (const skipped of fixed.skipped) options.log(`  not changed: ${terminalSafe(skipped.name)} in ${where(skipped.label)}: ${terminalSafe(skipped.reason)}`);
   if (fixed.changed.length === 0) return fixed;

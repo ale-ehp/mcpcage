@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
 import { discoverConfigs, type ClientId } from "../src/clients.js";
-import { isWrapped, moveHostEnv, serverType, unwrapEntry, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
+import { isWrapped, moveHostEnv, offDrive, serverType, unwrapEntry, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
 import { listTools } from "../src/inspect.js";
 import { mcpcageAt } from "../src/installed.js";
 import { hasComments, parseJsonc } from "../src/jsonc.js";
@@ -558,6 +558,32 @@ describe("wrapping one entry", () => {
     });
     // The run options are read after the script, where they are: one opened mount is one warning.
     expect(onWindows(() => writableMounts(later))).toEqual(["C:\\notes"]);
+  });
+
+  // On Windows itself, with a real share: see "a share given to a server on Windows".
+  it.skipIf(process.platform === "win32")("leaves on Windows a server given a path that is not on a drive as it is, and does not count a caged one that mounts such a path as caged", async () => {
+    // `//x` names what `/x` names on macOS and Linux, and is a share on Windows (\\server\share):
+    // what Windows cannot mount is tested here with a directory that exists.
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-share-"));
+    const share = `/${dir}`;
+    const reason = "is not a path on a drive, and only those have a place in the cage on Windows";
+    const entry = { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", share] };
+    expect(onWindows(() => wrapEntry(entry, { command: "mcpcage" }))).toEqual({ skip: `needs ${share}, which ${reason}` });
+    expect([offDrive("\\\\localhost\\C$\\notes", "win32"), offDrive("\\\\?\\C:\\notes", "win32"), offDrive("C:\\notes", "win32"), offDrive(share, "linux")]).toEqual([true, true, false, false]);
+
+    // A caged entry that mounts one cannot start: said, not counted as caged, and left for the user by --fix.
+    const command = idleProgram(join(dir, "bin"), "mcpcage");
+    const file = join(dir, "mcp.json");
+    writeJsonFile(file, { mcpServers: { files: { command, args: ["run", "--mount", `${share}:rw`, "--", ...entry.args] } } });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    // One server, described before scanConfigs first waits: all of it as on Windows.
+    const report = await onWindows(() => scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, ownCommand: command }));
+    const text = renderReport(report, { home: dir });
+    expect(text).toMatch(new RegExp(` {2}cannot start: --mount ${literal(share)} ${reason}\n`));
+    expect(text).toContain("  0 already run through mcpcage.\n  1 cannot start: it mounts a path that is not on a drive.");
+    const plan: string[] = [];
+    fixConfigs({ report, command, claudeCodeRunning: false, dryRun: true, home: dir, log: (line) => plan.push(line) });
+    expect(plan).toEqual([`  not changed: files in ${tilde(file, dir)}: it cannot start: --mount ${share} ${reason}; remove that --mount by hand`]);
   });
 
   it("moves the env that would act on the host into the cage as NAME=value, drops HOME and MCPCAGE_HOME, and keeps the rest as before", () => {
@@ -2428,6 +2454,43 @@ describe("what --fix and wrap write on Windows", () => {
     expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.plain).toEqual(written);
     expect(mcpcageWithEnv(env, "unwrap", file).code).toBe(0);
     expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.plain).toEqual(servers.plain);
+  });
+});
+
+describe("a share given to a server on Windows", () => {
+  const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+
+  it.runIf(process.platform === "win32")("is left uncaged by wrap and --fix, which say why, and a caged entry that mounts one is said not to start", (context) => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-share-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const notes = join(top, "notes");
+    for (const dir of [home, project, notes]) mkdirSync(dir, { recursive: true });
+    // The same directory through the administrative share of its drive, as \\localhost\C$\...
+    const share = `\\\\localhost\\${notes[0]}$${notes.slice(2)}`;
+    if (!existsSync(share)) context.skip();
+    const reason = "is not a path on a drive, and only those have a place in the cage on Windows";
+    const installed = fakeMcpcage();
+    const cursor = locationsFor(home, project)("cursor", "user");
+    const servers = {
+      shared: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", share] },
+      mounted: { command: installed.command, args: ["run", "--mount", share, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", share] },
+    };
+    writeJsonFile(cursor, { mcpServers: servers });
+    const original = readFileSync(cursor);
+    const env = fakeUserEnv(home, join(top, "cage"), { CLAUDECODE: "1", PATH: installed.path });
+
+    const wrap = mcpcageWithEnv(env, "wrap", cursor, "--dry-run", "--command", installed.command);
+    expect(wrap.stdout).toContain(`  skipped shared: needs ${share}, which ${reason}\n`);
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
+    expect(lineOf(scan.stdout, "shared")).toMatch(/ {2}NOT CAGED$/);
+    expect(lineOf(scan.stdout, "mounted")).toMatch(new RegExp(` {2}cannot start: --mount ${literal(share)} ${reason}$`));
+    expect(scan.stdout).toContain("  0 already run through mcpcage.\n  1 cannot start: it mounts a path that is not on a drive.\n");
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    const where = tilde(cursor, home);
+    expect(fix.stdout).toContain(`  not changed: shared in ${where}: needs ${share}, which ${reason}\n`);
+    expect(fix.stdout).toContain(`  not changed: mounted in ${where}: it cannot start: --mount ${share} ${reason}; remove that --mount by hand\n`);
+    expect(readFileSync(cursor)).toEqual(original);
   });
 });
 
