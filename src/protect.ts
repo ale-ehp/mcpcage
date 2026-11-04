@@ -818,8 +818,9 @@ function shownCommand(entry: ServerEntry, type: ServerType): { line: string; sec
 
 /**
  * `--api-key sk-...`, `--token=...`, `API_KEY=...`, `Authorization: Bearer ...` and credentials in
- * addresses, masked. In a wrapped entry, every `--env NAME=value` of mcpcage's own is masked: it is a
- * value of the env, moved there by `wrap`, and it counts as a secret when it looks like one.
+ * addresses, masked (see maskArg), in the server's arguments of a wrapped entry too. In a wrapped
+ * entry, every `--env NAME=value` of mcpcage's own is masked: it is a value of the env, moved there
+ * by `wrap`, and it counts as a secret when it looks like one.
  */
 function maskArgs(args: string[], wrapped = false): { shown: string[]; secrets: string[]; hidden: string[] } {
   const shown = [...args];
@@ -843,21 +844,34 @@ function maskArgs(args: string[], wrapped = false): { shown: string[]; secrets: 
       index++;
       continue;
     }
-    const pair = /^(--?[\w.-]+|[A-Za-z_][\w.-]*)(=|:[ \t]*)(.+)$/.exec(arg);
-    if (pair && SECRET_NAME.test(pair[1]!) && looksLikeSecret(pair[3])) {
-      shown[index] = `${pair[1]}${pair[2]}${MASK}`;
-      secrets.push(pair[1]!);
-      hidden.push(pair[3]!);
-      continue;
-    }
-    const url = maskUrl(arg);
-    if (url.hidden.length > 0) {
-      shown[index] = url.shown;
-      secrets.push("url");
-      hidden.push(...url.hidden);
+    const masked = maskArg(arg);
+    if (masked) {
+      shown[index] = masked.shown;
+      secrets.push(...masked.secrets);
+      hidden.push(...masked.hidden);
     }
   }
   return { shown, secrets, hidden };
+}
+
+/**
+ * One argument with its credentials masked, or undefined when it holds none: an address wherever it
+ * is, whole or as the value of an option or variable of any name, and the value of `--token=...`,
+ * `API_KEY=...` or `Authorization: Bearer ...` by its name. `--url=https://user:pass@...` was printed
+ * whole: only an argument that starts with a scheme was read as an address. The value of an option
+ * is read once more as an argument of its own, for `--header=Authorization: Bearer ...`.
+ */
+function maskArg(arg: string, nested = false): { shown: string; secrets: string[]; hidden: string[] } | undefined {
+  const url = maskUrl(arg);
+  if (url.hidden.length > 0) return { shown: url.shown, secrets: ["url"], hidden: url.hidden };
+  const pair = /^(--?[\w.-]+|[A-Za-z_][\w.-]*)(=|:[ \t]*)(.+)$/.exec(arg);
+  if (!pair) return undefined;
+  const name = pair[1]!;
+  const separator = pair[2]!;
+  const value = pair[3]!;
+  if (SECRET_NAME.test(name) && looksLikeSecret(value)) return { shown: `${name}${separator}${MASK}`, secrets: [name], hidden: [value] };
+  const inner = nested ? undefined : maskArg(value, true);
+  return inner && { ...inner, shown: `${name}${separator}${inner.shown}` };
 }
 
 /**

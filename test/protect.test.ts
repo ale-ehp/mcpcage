@@ -599,6 +599,41 @@ describe("an entry's env that makes OpenSSL or glibc load code", () => {
   });
 });
 
+describe("addresses in options", () => {
+  it("masks the credentials of an address given as the value of any option or variable, in wrapped entries too", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-secrets-"));
+    const file = join(dir, "mcp.json");
+    const own = join(dir, "bin", "mcpcage");
+    writeText(own, "#!/bin/sh\n");
+    chmodSync(own, 0o755);
+    writeJsonFile(file, {
+      mcpServers: {
+        option: { command: "npx", args: ["-y", "a-mcp", "--url=https://user:sk-live-0123456789@example.test/mcp?token=sk-live-abcdefghij"] },
+        variable: { command: "npx", args: ["-y", "b-mcp", "ENDPOINT=https://ghp_0123456789abcdefghij@github.com/x.git"] },
+        header: { command: "npx", args: ["-y", "mcp-remote", "https://example.test/sse", "--header=Authorization: Bearer sk-live-0123456789"] },
+        wrapped: { command: own, args: ["run", "--", "npx", "-y", "c-mcp", "--endpoint=https://user:sk-live-9876543210@example.test/"] },
+        plain: { command: "npx", args: ["-y", "d-mcp", "--url=https://example.test/mcp?page=2", "--mount=/srv/data"] },
+      },
+    });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, ownCommand: own });
+    expect(report.servers.map((server) => [server.name, server.secrets])).toEqual([
+      ["option", ["url"]],
+      ["variable", ["url"]],
+      ["header", ["Authorization"]],
+      ["wrapped", ["url"]],
+      ["plain", []],
+    ]);
+    const text = renderReport(report, { home: dir });
+    for (const value of ["0123456789", "9876543210", "abcdefghij"]) expect(text).not.toContain(value);
+    expect(text).toContain("  option        npx -y a-mcp --url=https://user:***@example.test/mcp?token=*** ");
+    expect(text).toContain("  variable      npx -y b-mcp ENDPOINT=https://***@github.com/x.git ");
+    expect(text).toContain(' "--header=Authorization: ***" ');
+    expect(text).toContain(" run -- npx -y c-mcp --endpoint=https://user:***@example.test/ ");
+    expect(text).toContain("  plain         npx -y d-mcp --url=https://example.test/mcp?page=2 --mount=/srv/data ");
+  });
+});
+
 describe("what a server can reach", () => {
   it("names the whole home directory, the whole disk and the directories with credentials, however they are written", () => {
     const home = "/Users/me";
