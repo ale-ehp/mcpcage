@@ -277,6 +277,34 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
     }
   }, 120_000);
 
+  it("cannot change the repository a .git file leads to, under another name in the same read-write mount", async () => {
+    // As `git init --separate-git-dir` leaves it: app/.git only says where the repository is, and git
+    // on the host would run a command written into meta/config.
+    const project = mkdtempSync(join(root, "test", "fixtures", "abuse-project-"));
+    const app = join(project, "app");
+    const meta = join(project, "meta");
+    const config = join(meta, "config");
+    const hooks = join(meta, "hooks");
+    const notes = join(app, "notes.md");
+    mkdirSync(app);
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(join(app, ".git"), "gitdir: ../meta\n");
+    writeFileSync(config, "[core]\n\trepositoryformatversion = 0\n");
+    writeFileSync(notes, "# Notes\n");
+    for (const dir of [project, app, meta, hooks]) chmodSync(dir, 0o777);
+    for (const file of [config, notes]) chmodSync(file, 0o666);
+    try {
+      const report = await call<WriteReport>("write_outside", { args: { paths: [hooks, app], files: [config, notes] }, runArgs: ["--mount", `${project}:rw`] });
+      expect(report.writes).toMatchObject({ [hooks]: "EROFS", [app]: true });
+      expect(report.appends).toEqual({ [config]: "EROFS", [notes]: true });
+      expect((await call<MoveReport>("move_aside", { args: { paths: [meta] }, runArgs: ["--mount", `${project}:rw`] })).renames).toEqual({ [meta]: "EBUSY" });
+      expect(readFileSync(config, "utf8")).toBe("[core]\n\trepositoryformatversion = 0\n");
+      expect(readdirSync(hooks)).toEqual([]);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("cannot resolve a name or reach an address without --allow-net", async () => {
     const report = await call<NetworkReport>("network");
     expect(report.interfaces).toEqual(["lo"]);

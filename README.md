@@ -155,7 +155,9 @@ is often what lets the client find `node`.
 Inside a writable mount, the git and editor settings that exist when the server starts (`.git`,
 `.vscode`, `.idea`, `.cursor`, `.claude`, `.devin`, `.windsurf`, `.mcp.json`, at any depth) are
 mounted read-only on top, because git and editors run the commands they name as soon as you open
-the project. The server can still change every other file there, code you later run included, and
+the project. So is the repository a `.git` file points to (a worktree, a submodule), and the
+directories that lead to each of them are held in place, so the server cannot move a setting away
+and put its own where it was. The server can still change every other file there, code you later run included, and
 create such settings where none existed (a new nested repository, a project MCP configuration):
 give a server that only needs to read a read-only mount, without `:rw`.
 

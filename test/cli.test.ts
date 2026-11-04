@@ -238,6 +238,26 @@ describe("cli", () => {
     expect(mcpcageWithEnv(env, "run", "--mount", project, ...server).stderr).toContain("Docker is required");
   });
 
+  it("follows a .git file to its repository at every run, and refuses to start when it cannot keep that read-only", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
+    const project = join(top, "project");
+    const file = join(project, "app", ".git");
+    mkdirSync(join(project, "app"), { recursive: true });
+    writeFileSync(file, "gitdir: ../meta\n");
+    // No docker on the PATH: a run that got past the settings would stop there.
+    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), { PATH: join(top, "no-docker-here") });
+    const server = ["--", "npx", "-y", "something"];
+    const refused = mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toBe(
+      `mcpcage: --mount ${project}:rw: ${file} names ../meta, which does not exist: the server could make it a repository of its own there, ` +
+        `and mcpcage keeps the repository a .git file leads to read-only in a writable mount. Point ${file} at its repository, or remove it, or mount ${project} read-only by dropping :rw.\n`,
+    );
+    // Once the repository is there, it is kept read-only and the run goes on.
+    mkdirSync(join(project, "meta"));
+    expect(mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server).stderr).toContain("Docker is required");
+  });
+
   it("refuses a mount of the account's own ~/.ssh when HOME names another directory", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
     const decoy = join(top, "decoy-home");

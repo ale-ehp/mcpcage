@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -433,6 +433,132 @@ describe("settings in a writable mount", () => {
           `Mount a narrower directory, or mount ${dir} read-only by dropping :rw.`,
       );
       expect(withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 4 })).toHaveLength(5);
+    });
+  });
+
+  describe("the repository a .git file leads to", () => {
+    /** A directory with the given files, their text, and empty directories (names ending in /). */
+    function layout(entries: Record<string, string>): string {
+      const dir = mkdtempSync(join(tmpdir(), "mcpcage-gitdir-"));
+      for (const [path, text] of Object.entries(entries)) {
+        mkdirSync(join(dir, path.endsWith("/") ? path : join(path, "..")), { recursive: true });
+        if (!path.endsWith("/")) writeFileSync(join(dir, path), text.replaceAll("<dir>", dir));
+      }
+      return dir;
+    }
+    const repository = { "config": "[core]\n", "hooks/": "" };
+    const at = (prefix: string, entries: Record<string, string>) => Object.fromEntries(Object.entries(entries).map(([path, text]) => [`${prefix}/${path}`, text]));
+
+    it("keeps it read-only when the writable mount holds it, under any name, with its directories in place", () => {
+      // git init --separate-git-dir, relative and absolute; git worktree add, whose repository names the one it shares.
+      const dir = layout({
+        "app/.git": "gitdir: ../meta\r\n",
+        ...at("meta", repository),
+        "tools/.git": "gitdir: <dir>/store/tools.git\n",
+        ...at("store/tools.git", repository),
+        "feature/.git": "gitdir: ../repos/main.git/worktrees/feature\n",
+        ...at("repos/main.git", repository),
+        "repos/main.git/worktrees/feature/commondir": "../..\n",
+      });
+      const mounts = withSettingsReadOnly([rw(dir)]);
+      expect(byTarget(mounts)).toEqual(
+        byTarget([
+          rw(dir),
+          ...["app", "tools", "feature", "store", "repos"].map((path) => rw(join(dir, path))),
+          ...["app/.git", "tools/.git", "feature/.git", "meta", "store/tools.git", "repos/main.git/worktrees/feature", "repos/main.git"].map((path) => ro(join(dir, path))),
+        ]),
+      );
+    });
+
+    it("follows the shared repository a worktree names even when its own lies outside the mount", () => {
+      const dir = layout({ "project/feature/.git": "gitdir: <dir>/elsewhere/feature\n", "elsewhere/feature/commondir": "../../project/main.git\n", ...at("project/main.git", repository) });
+      const project = join(dir, "project");
+      expect(byTarget(withSettingsReadOnly([rw(project)]))).toEqual(byTarget([rw(project), rw(join(project, "feature")), ro(join(project, "feature/.git")), ro(join(project, "main.git"))]));
+    });
+
+    it("finds it by where it really is, through symlinks the server cannot change", () => {
+      // The link is outside the writable mount: the server cannot point it elsewhere.
+      const dir = layout({ "project/app/.git": "gitdir: <dir>/alias/meta\n", ...at("project/meta", repository) });
+      symlinkSync(join(dir, "project"), join(dir, "alias"));
+      const project = join(dir, "project");
+      expect(byTarget(withSettingsReadOnly([rw(project)]))).toEqual(byTarget([rw(project), rw(join(project, "app")), ro(join(project, "app/.git")), ro(join(project, "meta"))]));
+    });
+
+    it("needs nothing for a repository no writable mount reaches, or one the user mounted for itself", () => {
+      const dir = layout({
+        "project/app/.git": "gitdir: <dir>/outside/app.git\n",
+        ...at("outside/app.git", repository),
+        "project/gone/.git": "gitdir: <dir>/outside/gone\n",
+        "project/sub/.git": "gitdir: ../main/.git/modules/sub\n",
+        ...at("project/main/.git/modules/sub", repository),
+        "project/docs/.git": "gitdir: ../docs.git\n",
+        ...at("project/docs.git", repository),
+      });
+      const project = join(dir, "project");
+      const mounts = withSettingsReadOnly([rw(project), rw(join(project, "main", ".git")), ro(join(project, "docs.git"))]);
+      // Outside, missing outside, inside a writable .git the user chose, inside a read-only mount: only the .git files and their directories.
+      expect(byTarget(mounts)).toEqual(
+        byTarget([
+          rw(project),
+          rw(join(project, "main", ".git")),
+          ro(join(project, "docs.git")),
+          ...["app", "gone", "sub", "docs"].map((path) => rw(join(project, path))),
+          ...["app/.git", "gone/.git", "sub/.git", "docs/.git"].map((path) => ro(join(project, path))),
+        ]),
+      );
+    });
+
+    it("refuses to start when a .git file cannot be read or does not say where its repository is", () => {
+      const dir = layout({ "app/.git": "gitdir:../meta\n", ...at("meta", repository) });
+      const file = join(dir, "app", ".git");
+      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(
+        `--mount ${dir}:rw: ${file} does not say where a git repository is in the form git writes (gitdir: <path>). Fix or remove it, or mount ${dir} read-only by dropping :rw.`,
+      );
+      writeFileSync(file, "gitdir: ../meta\nmore\n");
+      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`${file} does not say where a git repository is in the form git writes (gitdir: <path>)`);
+      writeFileSync(file, "gitdir: ../meta\n");
+      writeFileSync(join(dir, "meta", "commondir"), "\n");
+      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`${join(dir, "meta", "commondir")} does not say where a git repository is in the form git writes (<path>)`);
+      if (process.getuid?.() === 0) return;
+      chmodSync(file, 0o000);
+      try {
+        expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`--mount ${dir}:rw: cannot read ${file}, which says where a git repository is (EACCES). Fix or remove it, or mount ${dir} read-only by dropping :rw.`);
+      } finally {
+        chmodSync(file, 0o600);
+      }
+    });
+
+    it("refuses to start when the way to the repository goes through a symlink the server could point elsewhere", () => {
+      const dir = layout({ "app/.git": "gitdir: ../meta-link\n", ...at("meta", repository), "lib/": "" });
+      symlinkSync(join(dir, "meta"), join(dir, "meta-link"));
+      // Named where it really is, as mcpcage found it.
+      const real = realpathSync(dir);
+      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(
+        `--mount ${dir}:rw: ${join(dir, "app", ".git")} names ../meta-link, reached through the symlink ${join(real, "meta-link")}, which the server could point elsewhere, ` +
+          `and mcpcage keeps the repository a .git file leads to read-only in a writable mount. Replace the link with what it points to, or mount ${dir} read-only by dropping :rw.`,
+      );
+      // Not only the repository itself: any link on the way that the mount holds.
+      writeFileSync(join(dir, "app", ".git"), "gitdir: ../lib-link/../meta\n");
+      symlinkSync(join(dir, "lib"), join(dir, "lib-link"));
+      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`reached through the symlink ${join(real, "lib-link")}, which the server could point elsewhere`);
+      // Nor a commondir that is a link: git writes a file there.
+      writeFileSync(join(dir, "app", ".git"), "gitdir: ../meta\n");
+      symlinkSync(join(dir, "lib", "commondir"), join(dir, "meta", "commondir"));
+      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`${join(dir, "meta", "commondir")}, which names the repository ${join(dir, "app", ".git")} shares, is not a file`);
+    });
+
+    it("refuses to start when the repository is missing where the server could make one, or is a writable mount itself", () => {
+      const dir = layout({ "app/.git": "gitdir: ../meta\n" });
+      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(
+        `--mount ${dir}:rw: ${join(dir, "app", ".git")} names ../meta, which does not exist: the server could make it a repository of its own there, ` +
+          `and mcpcage keeps the repository a .git file leads to read-only in a writable mount. Point ${join(dir, "app", ".git")} at its repository, or remove it, or mount ${dir} read-only by dropping :rw.`,
+      );
+      mkdirSync(join(dir, "meta"));
+      const meta = join(dir, "meta");
+      expect(() => withSettingsReadOnly([rw(dir), rw(meta)])).toThrow(
+        `--mount ${meta}:rw: ${meta} is the git repository that ${join(dir, "app", ".git")} names, and mcpcage keeps the repository a .git file leads to read-only in a writable mount. Mount it read-only by dropping :rw.`,
+      );
+      expect(withSettingsReadOnly([rw(dir), ro(meta)])).toHaveLength(4);
     });
   });
 });

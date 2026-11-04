@@ -66,7 +66,8 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   use that path like any other. Inside a writable mount, the git and editor settings that exist at
   start (`.git`, `.vscode`, `.idea`, `.cursor`, `.claude`, `.devin`, `.windsurf`, `.mcp.json`, at
   any depth) stay read-only, because git and editors run the commands they name as soon as the
-  project is open. The server can still change every other file there, code you later run
+  project is open; so does the repository a `.git` file points to, and the directories that lead
+  to each of them are held in place, so that none can be moved away and replaced. The server can still change every other file there, code you later run
   included, and create such settings where none existed (a new nested repository, a project MCP
   configuration): a server that only needs to read should get a read-only mount.
 - **Two cages writing in one directory.** The git and editor settings of a writable mount are

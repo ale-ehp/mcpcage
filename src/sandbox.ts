@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256 } from "./canonical.js";
 import type { LaunchSpec } from "./launch.js";
@@ -161,6 +161,13 @@ export const SETTINGS_LIMITS = { entries: 100_000, mounts: 1_000 };
  * and writable: ordinary writes inside it go on as before, but a mount point cannot be renamed or
  * removed (EBUSY). Those mounts count toward the limit. The list comes in order of depth, each
  * directory before what is mounted inside it, so no mount hides one made before it.
+ *
+ * A `.git` file (a worktree, a submodule, `git init --separate-git-dir`) only says where the
+ * repository is, under any name, and git on the host runs what that repository's configuration
+ * names. So the repository it points at, and the one a worktree shares (its `commondir`), are kept
+ * read-only too when a writable mount holds them, their directories in place as above. A pointer
+ * mcpcage cannot read, or one that leads through a symlink the server could change, or to a place
+ * the server could fill, refuses the start.
  */
 export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS): Mount[] {
   const isSetting = (name: string) => HOST_SETTINGS.has(name.toLowerCase());
@@ -187,6 +194,8 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS):
   };
   /** For each setting kept read-only: the writable mount it is in, and the directories between them. */
   const kept: Array<{ mount: Mount; root: string; between: string }> = [];
+  /** Each .git file found, with the writable mount it was found in. */
+  const gitFiles = new Map<string, Mount>();
 
   for (const mount of mounts) {
     if (mount.readOnly || isSetting(basename(mount.source)) || !statSync(mount.source).isDirectory()) continue;
@@ -217,10 +226,81 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS):
         // writable mount: in `<dir>/x,source=/home/me/.ssh,target=/k/.git` it would write fields of its own.
         if (path.includes(",")) throw refuse(mount, `${path} cannot be kept read-only, because paths containing commas are not supported`, "Rename it");
         const target = resolve(mount.target, relative(mount.source, path));
+        if (entry.name.toLowerCase() === ".git" && entry.isFile()) gitFiles.set(path, mount);
         if (placed.has(target)) continue;
         add(mount, { source: path, target, readOnly: true });
         kept.push({ mount, root: mount.source, between: relative(mount.source, dir) });
       }
+    }
+  }
+
+  if (gitFiles.size > 0) {
+    // Where each writable mount really is, to tell whether a repository found by its path lies inside.
+    const writables = mounts.filter((mount) => !mount.readOnly).map((mount) => ({ mount, real: realpathSync(mount.source) }));
+    const inContainer = (real: string) =>
+      writables.filter(({ real: root }) => within(real, root)).map(({ mount, real: root }) => ({ mount, inside: relative(root, real), target: resolve(mount.target, relative(root, real)) }));
+    /** Whether the server could change what is at `real`: a writable mount reaches it, and nothing read-only is on top. */
+    const changeable = (real: string) => inContainer(real).some(({ target }) => holder(target)?.readOnly === false);
+    /** Keeps the repository `named` read-only wherever a writable mount reaches it, and says where it really is. */
+    const keepRepository = (from: Mount, file: string, named: string, base: string): string | undefined => {
+      const why = "mcpcage keeps the repository a .git file leads to read-only in a writable mount";
+      let found: { real: string; exists: boolean };
+      try {
+        found = locate(base, named, (link) => {
+          if (changeable(link)) {
+            throw refuse(from, `${file} names ${named}, reached through the symlink ${link}, which the server could point elsewhere, and ${why}`, "Replace the link with what it points to");
+          }
+        });
+      } catch (error) {
+        if (!(error as NodeJS.ErrnoException).code) throw error;
+        throw refuse(from, `cannot follow ${file} to the repository it names (${(error as NodeJS.ErrnoException).code})`, "Fix or remove it");
+      }
+      if (!found.exists) {
+        if (changeable(found.real)) {
+          throw refuse(from, `${file} names ${named}, which does not exist: the server could make it a repository of its own there, and ${why}`, `Point ${file} at its repository, or remove it`);
+        }
+        return undefined;
+      }
+      for (const { mount, inside, target } of inContainer(found.real)) {
+        const above = holder(target);
+        // Already read-only, or writable by the user's own choice of a mount for a setting itself.
+        if (above?.readOnly || (above && mounts.includes(above) && isSetting(basename(above.source)))) continue;
+        if (placed.has(target)) {
+          throw new Error(`--mount ${above!.source}:rw: ${above!.source} is the git repository that ${file} names, and ${why}. Mount it read-only by dropping :rw.`);
+        }
+        // Spelled from the mount, as the other mounts are: docker finds the same directory.
+        const source = join(mount.source, inside);
+        if (source.includes(",") || target.includes(",")) {
+          throw refuse(from, `${source}, the repository ${file} leads to, cannot be kept read-only, because paths containing commas are not supported`, "Rename it");
+        }
+        add(mount, { source, target, readOnly: true });
+        kept.push({ mount, root: mount.source, between: dirname(inside).replace(/^\.$/, "") });
+      }
+      return found.real;
+    };
+    for (const [file, from] of gitFiles) {
+      let base: string;
+      try {
+        base = realpathSync(dirname(file));
+      } catch (error) {
+        throw refuse(from, `cannot follow ${file} to the repository it names (${(error as NodeJS.ErrnoException).code})`, "Fix or remove it");
+      }
+      const named = pointer(file, "gitdir: ", (problem) => refuse(from, problem, "Fix or remove it"));
+      const repository = keepRepository(from, file, named, base);
+      if (repository === undefined) continue;
+      // A worktree's repository names the one it shares, relative to itself, in a file of its own.
+      const commondir = join(repository, "commondir");
+      let stat;
+      try {
+        stat = lstatSync(commondir);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "ENOTDIR") continue;
+        throw refuse(from, `cannot read ${commondir}, which names the repository ${file} shares (${code})`, "Fix or remove it");
+      }
+      // git writes a file there; through a link, what it names could be changed wherever the link leads.
+      if (!stat.isFile()) throw refuse(from, `${commondir}, which names the repository ${file} shares, is not a file`, "Replace it with the file git writes");
+      keepRepository(from, commondir, pointer(commondir, "", (problem) => refuse(from, problem, "Fix or remove it")), repository);
     }
   }
 
@@ -239,6 +319,74 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS):
   // Docker sorts its mounts the same way, and this list does not rely on it. The sort is stable.
   const depth = (mount: Mount) => resolve(mount.target).split(sep).filter(Boolean).length;
   return [...mounts, ...added].sort((left, right) => depth(left) - depth(right));
+}
+
+/** Whether `path` is `dir` or lies inside it; both absolute and normalized. */
+function within(path: string, dir: string): boolean {
+  return path === dir || path.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`);
+}
+
+/** Longer than any path a .git file or a commondir file holds. */
+const MAX_POINTER_BYTES = 64 * 1024;
+
+/**
+ * The path a `.git` file (`gitdir: <path>`) or a `commondir` file (the path alone) names, read the
+ * way git reads it: the prefix exactly, then everything up to the line endings at the end.
+ */
+function pointer(file: string, prefix: string, refuse: (problem: string) => Error): string {
+  let text: string;
+  try {
+    if (statSync(file).size > MAX_POINTER_BYTES) throw refuse(`${file} is too large to say where a git repository is`);
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if (!(error as NodeJS.ErrnoException).code) throw error;
+    throw refuse(`cannot read ${file}, which says where a git repository is (${(error as NodeJS.ErrnoException).code})`);
+  }
+  const named = text.startsWith(prefix) ? text.slice(prefix.length).replace(/[\r\n]+$/, "") : "";
+  if (named === "" || /[\r\n\0]/.test(named)) {
+    throw refuse(`${file} does not say where a git repository is in the form git writes (${prefix === "" ? "<path>" : `${prefix}<path>`})`);
+  }
+  return named;
+}
+
+/**
+ * Where `path` leads from the directory `base` (a real path), as the system resolves it: each
+ * symlink followed, and `..` taken from where a link led, not from how the path is spelled.
+ * `link` hears of every symlink on the way. The real path; or, when it does not exist, the deepest
+ * place on the way that does. Errors other than a missing entry are thrown, ELOOP after 40 links.
+ */
+function locate(base: string, path: string, link: (at: string) => void): { real: string; exists: boolean } {
+  const names = (spelled: string) => spelled.split(sep === "\\" ? /[\\/]/ : "/");
+  let current = isAbsolute(path) ? parse(path).root : base;
+  const pending = names(path);
+  let links = 0;
+  while (pending.length > 0) {
+    const name = pending.shift()!;
+    if (name === "" || name === ".") continue;
+    if (name === "..") {
+      current = dirname(current);
+      continue;
+    }
+    const next = join(current, name);
+    let stat;
+    try {
+      stat = lstatSync(next);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return { real: current, exists: false };
+      throw error;
+    }
+    if (!stat.isSymbolicLink()) {
+      current = next;
+      continue;
+    }
+    link(next);
+    if (++links > 40) throw Object.assign(new Error(`too many symlinks on the way to ${path}`), { code: "ELOOP" });
+    const to = readlinkSync(next);
+    if (isAbsolute(to)) current = parse(to).root;
+    pending.unshift(...names(to));
+  }
+  return { real: current, exists: true };
 }
 
 /**
