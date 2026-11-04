@@ -63,6 +63,13 @@ interface NetworkReport {
   https: string;
 }
 
+interface MoveReport {
+  /** For each path: true when it could be renamed to <path>.moved, or the error code. */
+  renames: Record<string, true | string>;
+  /** For each file: true when it could be written, with the directories it needs, or the error code. */
+  creates: Record<string, true | string>;
+}
+
 type AuditEntry = { event: string } & Record<string, unknown>;
 
 /** Starts the abuse server in its cage, lists its tools like every MCP client does first, and calls one. */
@@ -240,6 +247,36 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
     }
   }, 120_000);
 
+  it("cannot move git's settings away with the directories that hold them and put its own in their place", async () => {
+    // A read-only mount moves with its directory: renaming org would take org/app/.git along and leave
+    // the server free to write a new org/app/.git/config, which git on the host would then run.
+    const project = mkdtempSync(join(root, "test", "fixtures", "abuse-project-"));
+    const org = join(project, "org");
+    const app = join(org, "app");
+    const git = join(app, ".git");
+    const config = join(git, "config");
+    const notes = join(app, "notes.md");
+    mkdirSync(join(git, "hooks"), { recursive: true });
+    writeFileSync(config, "[core]\n\trepositoryformatversion = 0\n");
+    for (const dir of [project, org, app, git, join(git, "hooks")]) chmodSync(dir, 0o777);
+    chmodSync(config, 0o666);
+    try {
+      const report = await call<MoveReport>("move_aside", { args: { paths: [org, app, git], files: [config, notes] }, runArgs: ["--mount", `${project}:rw`] });
+      // Each directory on the way to .git is a mount point of its own, and the kernel refuses to rename one.
+      expect(report.renames).toEqual({ [org]: "EBUSY", [app]: "EBUSY", [git]: "EBUSY" });
+      // The configuration stays read-only where it is, and the directory that holds it stays writable.
+      expect(report.creates).toEqual({ [config]: "EROFS", [notes]: true });
+      // On the host: nothing moved, no new repository, the user's configuration as it was.
+      expect(readdirSync(project)).toEqual(["org"]);
+      expect(readdirSync(org)).toEqual(["app"]);
+      expect(readdirSync(git).sort()).toEqual(["config", "hooks"]);
+      expect(readFileSync(config, "utf8")).toBe("[core]\n\trepositoryformatversion = 0\n");
+      expect(readFileSync(notes, "utf8")).toBe("# written by mcpcage-abuse\n");
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("cannot resolve a name or reach an address without --allow-net", async () => {
     const report = await call<NetworkReport>("network");
     expect(report.interfaces).toEqual(["lo"]);
@@ -318,6 +355,6 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
   it("keeps an intact audit log of every attack", () => {
     expect(mcpcage(home, "audit", "verify", "abuse").code).toBe(0);
     const shown = mcpcage(home, "audit", "show", "abuse", "--lines", "500").stdout;
-    for (const tool of ["environment", "write_outside", "network", "fork_bomb", "eat_memory"]) expect(shown).toContain(`"tool":"${tool}"`);
+    for (const tool of ["environment", "write_outside", "move_aside", "network", "fork_bomb", "eat_memory"]) expect(shown).toContain(`"tool":"${tool}"`);
   });
 });

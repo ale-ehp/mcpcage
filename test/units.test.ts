@@ -315,14 +315,16 @@ describe("settings in a writable mount", () => {
     const dir = project();
     const mounts = withSettingsReadOnly([rw(dir)]);
     expect(mounts[0]).toEqual(rw(dir));
-    expect(byTarget(mounts.slice(1))).toEqual(byTarget([".git", ".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"].map((path) => ro(join(dir, path)))));
+    expect(byTarget(mounts.slice(1))).toEqual(
+      byTarget([...[".git", ".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"].map((path) => ro(join(dir, path))), ...["app", "sub", "worktree"].map((path) => rw(join(dir, path)))]),
+    );
 
     const args = runArgs({ ...base, mounts }, "img").filter((arg) => arg.startsWith("type=bind"));
     expect(args).toContain(`type=bind,source=${dir},target=${dir}`);
     for (const path of [".git", ".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"]) {
       expect(args).toContain(`type=bind,source=${join(dir, path)},target=${join(dir, path)},readonly`);
     }
-    expect(args).toHaveLength(7);
+    expect(args).toHaveLength(10);
     // However the directory is spelled, each setting is mounted at its own place.
     expect(byTarget(withSettingsReadOnly([rw(`${dir}/src/..`)]).slice(1))).toEqual(byTarget(mounts.slice(1)));
   });
@@ -333,7 +335,9 @@ describe("settings in a writable mount", () => {
     // An explicit choice: `--mount <dir>/.git:rw` leaves that repository writable, and only that.
     const mounts = withSettingsReadOnly([rw(dir), rw(join(dir, ".git"))]);
     expect(mounts.filter((mount) => mount.target === join(dir, ".git"))).toEqual([rw(join(dir, ".git"))]);
-    expect(byTarget(mounts.slice(2))).toEqual(byTarget([".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"].map((path) => ro(join(dir, path)))));
+    expect(byTarget(mounts.slice(2))).toEqual(
+      byTarget([...[".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"].map((path) => ro(join(dir, path))), ...["app", "sub", "worktree"].map((path) => rw(join(dir, path)))]),
+    );
     // A directory mounted writable twice, as itself and inside its parent, gets each setting once.
     const twice = withSettingsReadOnly([rw(dir), rw(join(dir, "sub"))]);
     expect(twice.filter((mount) => mount.target === join(dir, "sub", ".git"))).toEqual([ro(join(dir, "sub", ".git"))]);
@@ -357,8 +361,9 @@ describe("settings in a writable mount", () => {
       `--mount ${dir}:rw: more than 10 entries to look through for git's and the editors' settings, which mcpcage keeps read-only in a writable mount. ` +
         `Mount a narrower directory, or mount ${dir} read-only by dropping :rw.`,
     );
-    expect(() => withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 5 })).toThrow(`--mount ${dir}:rw: more than 5 of git's and the editors' settings to keep read-only`);
-    expect(withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 6 })).toHaveLength(7);
+    // Six settings, and the three directories that hold the nested ones.
+    expect(() => withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 8 })).toThrow(`--mount ${dir}:rw: more than 8 mounts to keep git's and the editors' settings`);
+    expect(withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 9 })).toHaveLength(10);
   });
 
   it.skipIf(process.getuid?.() === 0)("refuses to start when a directory cannot be looked through", () => {
@@ -378,6 +383,57 @@ describe("settings in a writable mount", () => {
     const dir = project();
     mkdirSync(join(dir, "a,source=", "b", ".git"), { recursive: true });
     expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`${join(dir, "a,source=", "b", ".git")} cannot be kept read-only, because paths containing commas are not supported`);
+  });
+
+  describe("the directories that hold them", () => {
+    /** A directory with the given files and empty directories (names ending in /). */
+    function tree(paths: string[]): string {
+      const dir = mkdtempSync(join(tmpdir(), "mcpcage-tree-"));
+      for (const path of paths) {
+        mkdirSync(join(dir, path.endsWith("/") ? path : join(path, "..")), { recursive: true });
+        if (!path.endsWith("/")) writeFileSync(join(dir, path), "\n");
+      }
+      return dir;
+    }
+    const at = (mounts: Mount[], target: string) => mounts.findIndex((mount) => mount.target === target);
+
+    it("mounts each directory on the way to a setting onto itself, writable, so that the server cannot move the setting away with it", () => {
+      const dir = tree(["a/b/c/.git/config", "a/b/.vscode/settings.json", "a/notes.md"]);
+      const mounts = withSettingsReadOnly([rw(dir)]);
+      expect(byTarget(mounts)).toEqual(byTarget([rw(dir), rw(join(dir, "a")), rw(join(dir, "a/b")), rw(join(dir, "a/b/c")), ro(join(dir, "a/b/.vscode")), ro(join(dir, "a/b/c/.git"))]));
+      // Each directory before what is mounted inside it, whatever order docker would put them in.
+      expect(at(mounts, join(dir, "a"))).toBeLessThan(at(mounts, join(dir, "a/b")));
+      expect(at(mounts, join(dir, "a/b"))).toBeLessThan(at(mounts, join(dir, "a/b/.vscode")));
+      expect(at(mounts, join(dir, "a/b"))).toBeLessThan(at(mounts, join(dir, "a/b/c")));
+      expect(at(mounts, join(dir, "a/b/c"))).toBeLessThan(at(mounts, join(dir, "a/b/c/.git")));
+      const args = runArgs({ ...base, mounts }, "img");
+      expect(args).toContain(`type=bind,source=${join(dir, "a/b")},target=${join(dir, "a/b")}`);
+      expect(args).toContain(`type=bind,source=${join(dir, "a/b/c/.git")},target=${join(dir, "a/b/c/.git")},readonly`);
+    });
+
+    it("puts a mount the user gave inside such a directory after it", () => {
+      const dir = tree(["app/.vscode/settings.json", "app/docs/"]);
+      const mounts = withSettingsReadOnly([rw(dir), ro(join(dir, "app", "docs"))]);
+      expect(byTarget(mounts)).toEqual(byTarget([rw(dir), rw(join(dir, "app")), ro(join(dir, "app", "docs")), ro(join(dir, "app", ".vscode"))]));
+      // Mounted after it, the directory would hide the read-only mount and leave the docs writable.
+      expect(at(mounts, join(dir, "app"))).toBeLessThan(at(mounts, join(dir, "app", "docs")));
+    });
+
+    it("adds no writable mount where the user gave one already, nor inside a read-only one", () => {
+      const dir = tree(["a/b/.git/config", "c/d/.vscode/settings.json"]);
+      const mounts = withSettingsReadOnly([rw(dir), rw(join(dir, "a")), ro(join(dir, "c"))]);
+      // a is a mount point already. In the read-only c, a rename fails anyway (EROFS), and a writable c/d would open it.
+      expect(byTarget(mounts)).toEqual(byTarget([rw(dir), rw(join(dir, "a")), ro(join(dir, "c")), rw(join(dir, "a/b")), ro(join(dir, "a/b/.git")), ro(join(dir, "c/d/.vscode"))]));
+    });
+
+    it("counts those mounts toward the limit", () => {
+      const dir = tree(["a/b/c/.git/config"]);
+      expect(() => withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 3 })).toThrow(
+        `--mount ${dir}:rw: more than 3 mounts to keep git's and the editors' settings (.git, .vscode, .idea, .cursor, .claude, .devin, .windsurf, .mcp.json) read-only and the directories that hold them in place. ` +
+          `Mount a narrower directory, or mount ${dir} read-only by dropping :rw.`,
+      );
+      expect(withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 4 })).toHaveLength(5);
+    });
   });
 });
 

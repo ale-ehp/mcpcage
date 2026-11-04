@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256 } from "./canonical.js";
 import type { LaunchSpec } from "./launch.js";
@@ -154,17 +154,42 @@ export const SETTINGS_LIMITS = { entries: 100_000, mounts: 1_000 };
  * node_modules or into the settings themselves. A writable mount the user gave for a setting itself
  * is an explicit choice: it gets nothing on top of it or inside it. Anything that would leave a
  * setting writable, or take too long to find them all, refuses the start instead.
+ *
+ * A read-only mount moves with its directory: a server that renamed `app` to `app.old` would take
+ * `app/.git` along, read-only, and make a new `app/.git` of its own, which git on the host then runs.
+ * So each directory on the way from the writable mount down to a setting is mounted too, onto itself
+ * and writable: ordinary writes inside it go on as before, but a mount point cannot be renamed or
+ * removed (EBUSY). Those mounts count toward the limit. The list comes in order of depth, each
+ * directory before what is mounted inside it, so no mount hides one made before it.
  */
 export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS): Mount[] {
   const isSetting = (name: string) => HOST_SETTINGS.has(name.toLowerCase());
-  // Compared resolved: docker refuses two mounts at one place, however it is spelled.
-  const given = new Set(mounts.map((mount) => resolve(mount.target)));
+  const refuse = (mount: Mount, problem: string, remedy = "Mount a narrower directory") =>
+    new Error(`--mount ${mount.source}:rw: ${problem}. ${remedy}, or mount ${mount.source} read-only by dropping :rw.`);
+  // Every mount by where it is in the container, compared resolved: docker refuses two mounts at one
+  // place, however it is spelled.
+  const placed = new Map<string, Mount>();
+  for (const mount of mounts) if (!placed.has(resolve(mount.target))) placed.set(resolve(mount.target), mount);
+  /** The mount that decides what the server may do at `target`: the deepest one there or above it. */
+  const holder = (target: string): Mount | undefined => {
+    for (let dir = target; ; dir = dirname(dir)) {
+      const mount = placed.get(dir);
+      if (mount || dirname(dir) === dir) return mount;
+    }
+  };
   const added: Mount[] = [];
-  const seen = new Set<string>();
+  const add = (from: Mount, mount: Mount) => {
+    placed.set(mount.target, mount);
+    added.push(mount);
+    if (added.length > limits.mounts) {
+      throw refuse(from, `more than ${limits.mounts.toLocaleString("en-US")} mounts to keep git's and the editors' settings (${[...HOST_SETTINGS].join(", ")}) read-only and the directories that hold them in place`);
+    }
+  };
+  /** For each setting kept read-only: the writable mount it is in, and the directories between them. */
+  const kept: Array<{ mount: Mount; root: string; between: string }> = [];
+
   for (const mount of mounts) {
     if (mount.readOnly || isSetting(basename(mount.source)) || !statSync(mount.source).isDirectory()) continue;
-    const refuse = (problem: string, remedy = "Mount a narrower directory") =>
-      new Error(`--mount ${mount.source}:rw: ${problem}. ${remedy}, or mount ${mount.source} read-only by dropping :rw.`);
     let visited = 0;
     const queue = [mount.source];
     for (let next = 0; next < queue.length; next++) {
@@ -174,11 +199,11 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS):
         entries = readdirSync(dir, { withFileTypes: true });
       } catch (error) {
         // A directory mcpcage cannot read may still hold a setting the server can reach by its name.
-        throw refuse(`cannot look inside ${dir} for git's and the editors' settings (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})`);
+        throw refuse(mount, `cannot look inside ${dir} for git's and the editors' settings (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})`);
       }
       for (const entry of entries) {
         if (++visited > limits.entries) {
-          throw refuse(`more than ${limits.entries.toLocaleString("en-US")} entries to look through for git's and the editors' settings, which mcpcage keeps read-only in a writable mount`);
+          throw refuse(mount, `more than ${limits.entries.toLocaleString("en-US")} entries to look through for git's and the editors' settings, which mcpcage keeps read-only in a writable mount`);
         }
         const path = join(dir, entry.name);
         if (!isSetting(entry.name)) {
@@ -186,22 +211,34 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS):
           continue;
         }
         if (entry.isSymbolicLink()) {
-          throw refuse(`${path} is a symlink, and mcpcage keeps git's and the editors' settings read-only in a writable mount: a read-only mount would follow the link to wherever it points`, "Replace the link with what it points to");
+          throw refuse(mount, `${path} is a symlink, and mcpcage keeps git's and the editors' settings read-only in a writable mount: a read-only mount would follow the link to wherever it points`, "Replace the link with what it points to");
         }
         // docker's --mount takes comma-separated fields, and the server names the directories of its
         // writable mount: in `<dir>/x,source=/home/me/.ssh,target=/k/.git` it would write fields of its own.
-        if (path.includes(",")) throw refuse(`${path} cannot be kept read-only, because paths containing commas are not supported`, "Rename it");
+        if (path.includes(",")) throw refuse(mount, `${path} cannot be kept read-only, because paths containing commas are not supported`, "Rename it");
         const target = resolve(mount.target, relative(mount.source, path));
-        if (given.has(target) || seen.has(target)) continue;
-        seen.add(target);
-        added.push({ source: path, target, readOnly: true });
-        if (added.length > limits.mounts) {
-          throw refuse(`more than ${limits.mounts.toLocaleString("en-US")} of git's and the editors' settings to keep read-only (${[...HOST_SETTINGS].join(", ")})`);
-        }
+        if (placed.has(target)) continue;
+        add(mount, { source: path, target, readOnly: true });
+        kept.push({ mount, root: mount.source, between: relative(mount.source, dir) });
       }
     }
   }
-  return [...mounts, ...added];
+
+  // The directories on the way to each setting, from the top: each becomes a mount point of its own.
+  for (const { mount, root, between } of kept) {
+    let path = "";
+    for (const name of between === "" ? [] : between.split(sep)) {
+      path = join(path, name);
+      const target = resolve(mount.target, path);
+      // Already a mount point; or inside a read-only mount, where a rename fails anyway and a writable
+      // mount would open what the user gave read-only.
+      if (placed.has(target) || holder(target)?.readOnly) continue;
+      add(mount, { source: join(root, path), target, readOnly: false });
+    }
+  }
+  // Docker sorts its mounts the same way, and this list does not rely on it. The sort is stable.
+  const depth = (mount: Mount) => resolve(mount.target).split(sep).filter(Boolean).length;
+  return [...mounts, ...added].sort((left, right) => depth(left) - depth(right));
 }
 
 /**

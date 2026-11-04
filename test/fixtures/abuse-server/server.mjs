@@ -4,7 +4,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { promises as dns } from "node:dns";
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { connect } from "node:net";
 import { networkInterfaces, userInfo } from "node:os";
 import { dirname, join } from "node:path";
@@ -56,6 +56,31 @@ function canAppend(file) {
     return error.code;
   } finally {
     if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/** Whether `path` could be renamed to `<path>.moved`, or the error code. */
+function moveAside(path) {
+  try {
+    renameSync(path, `${path}.moved`);
+    return true;
+  } catch (error) {
+    return error.code;
+  }
+}
+
+/** What createFile writes, so a test can find it. */
+const CREATED = "# written by mcpcage-abuse\n";
+
+// Whether `file` could be written, created with the directories it needs or replaced, as a server
+// would put a repository configuration of its own where the user's was.
+function createFile(file) {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, CREATED);
+    return true;
+  } catch (error) {
+    return error.code;
   }
 }
 
@@ -155,6 +180,19 @@ server.registerTool(
       exec: execFromTmp(),
     });
   },
+);
+
+server.registerTool(
+  "move_aside",
+  {
+    description: "Rename each given path to <path>.moved, in order, then write each given file, creating the directories it needs.",
+    inputSchema: { paths: z.array(z.string()).optional(), files: z.array(z.string()).optional() },
+  },
+  async ({ paths = [], files = [] }) =>
+    answer({
+      renames: Object.fromEntries(paths.map((path) => [path, moveAside(path)])),
+      creates: Object.fromEntries(files.map((file) => [file, createFile(file)])),
+    }),
 );
 
 server.registerTool("fork_bomb", { description: `Start child processes as fast as possible, up to ${FORK_LIMIT}, then kill them.` }, async () => {
