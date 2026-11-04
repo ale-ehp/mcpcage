@@ -9,6 +9,7 @@ import type { LaunchSpec } from "./launch.js";
 import { cageHome, serverDir } from "./paths.js";
 import { readJson, writeJson } from "./pinstore.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
+import { terminalSafe } from "./terminal.js";
 
 /**
  * Base images, pinned by digest so a build today and a build next month start from the same bytes.
@@ -81,6 +82,8 @@ export function prepareSandbox(options: SandboxOptions): Prepared {
   }
   const record = options.spec.kind === "npm" ? prepareNpmImage(options) : prepareImage(options);
   writeJson(join(serverDir(options.serverId), "server.json"), record);
+  // The paths come from the user's arguments or the entry's.
+  for (const line of placesInCage(options.mounts)) options.log(terminalSafe(`mcpcage: ${line}`));
   const program = foundDocker();
   return { command: program.file, args: runArgs(options, record.imageId), env: program.env, record };
 }
@@ -214,6 +217,24 @@ export function cagePath(path: string, platform: NodeJS.Platform = process.platf
     throw new Error(`${path} is not a path on a drive, and only those have a place in the cage on Windows: mount a folder such as C:\\Users\\me\\notes, not a network share or a device path (\\\\server\\share, \\\\?\\..., \\\\.\\...)`);
   }
   return `/${drive[1]!.toLowerCase()}${normal.slice(2).split("\\").filter(Boolean).map((name) => `/${name}`).join("")}`;
+}
+
+/**
+ * Where each folder given to the server is in the cage, on Windows, where that is another path than
+ * this machine's (cagePath): the server lists its folders by that path, and the model has to name them
+ * so in its tool calls, which mcpcage does not translate. One line per folder; the read-only mounts
+ * withSettingsReadOnly adds inside one are not folders the user gave. None on macOS and Linux.
+ */
+export function placesInCage(mounts: Mount[], platform: NodeJS.Platform = process.platform): string[] {
+  if (platform !== "win32") return [];
+  const places = mounts.map((mount) => cagePath(mount.target, platform));
+  const said = new Set<string>();
+  return mounts.flatMap((mount, index) => {
+    const place = places[index]!;
+    if (said.has(place) || places.some((other) => place.startsWith(other.endsWith("/") ? other : `${other}/`))) return [];
+    said.add(place);
+    return [`${mount.source} is ${place} in the cage, the path the server lists and tool calls must use`];
+  });
 }
 
 /*

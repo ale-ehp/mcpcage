@@ -12,7 +12,7 @@ import { isLocalPath, parseLaunch, serverIdFor, splitPackageSpec } from "../src/
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep, type Pin, type ToolDefinition } from "../src/manifest.js";
 import { approvePending, loadPin, pendingCount, savePending, savePin } from "../src/pinstore.js";
-import { cagePath, dockerfile, parseMount, runArgs, SETTINGS_LIMITS, within, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
+import { cagePath, dockerfile, parseMount, placesInCage, runArgs, SETTINGS_LIMITS, within, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
 import { describeViolationsWithFindings } from "../src/suspicious.js";
 import { fakeUserEnv, literal, mcpcageWithEnv } from "./helpers.js";
 
@@ -356,6 +356,22 @@ describe("sandbox command", () => {
     // Without a mount, nothing is a mounted path.
     const alone = runArgs({ ...base, spec: { ...base.spec, args: ["C:\\Users\\me\\proj"] } }, "img", "win32");
     expect(alone.at(-1)).toBe("C:\\Users\\me\\proj");
+  });
+
+  it("says on Windows where each folder given is in the cage, and nothing on macOS and Linux", () => {
+    const mounts: Mount[] = [
+      { source: "C:\\Users\\me\\proj", target: "C:\\Users\\me\\proj", readOnly: false },
+      { source: "C:\\Users\\me\\proj\\.git", target: "C:\\Users\\me\\proj\\.git", readOnly: true },
+      { source: "C:\\Users\\me\\project", target: "C:\\Users\\me\\project", readOnly: true },
+      { source: "D:\\My Notes", target: "D:\\My Notes", readOnly: true },
+    ];
+    expect(placesInCage(mounts, "win32")).toEqual([
+      "C:\\Users\\me\\proj is /c/Users/me/proj in the cage, the path the server lists and tool calls must use",
+      "C:\\Users\\me\\project is /c/Users/me/project in the cage, the path the server lists and tool calls must use",
+      "D:\\My Notes is /d/My Notes in the cage, the path the server lists and tool calls must use",
+    ]);
+    expect(placesInCage([{ source: "/Users/me/proj", target: "/Users/me/proj", readOnly: false }], "darwin")).toEqual([]);
+    expect(placesInCage([{ source: "/home/me/proj", target: "/home/me/proj", readOnly: false }], "linux")).toEqual([]);
   });
 
   describe.runIf(process.platform === "win32")("on Windows", () => {
