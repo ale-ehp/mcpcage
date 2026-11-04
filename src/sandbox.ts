@@ -201,6 +201,20 @@ export function hostMount(path: string, readOnly: boolean): Mount {
 }
 
 /**
+ * Whether a path is, on Windows, off any drive: a share (`\\server\share`) or a device path
+ * (`\\?\...`, `\\.\...`). It has no place in the cage (cagePath), so nothing mounts it: `run`
+ * refuses it, `wrap` and `--fix` leave a server given one uncaged (wrap wrote
+ * `--mount \\localhost\C$\Users\me\share` for a server given that share, which `run` refused at
+ * every start), and an inspection goes without it. Elsewhere `//x` is an ordinary path.
+ */
+export function offDrive(path: string, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32" && /^[\\/]{2}/.test(path);
+}
+
+/** Why a path off any drive (see offDrive) is not mounted. */
+export const NOT_ON_A_DRIVE = "is not a path on a drive, and only those have a place in the cage on Windows";
+
+/**
  * Where the server finds the path `path` of this machine (absolute) in the cage. On macOS and Linux
  * at the same path. On Windows the cage is a Linux container: Docker refused
  * `target=C:\Users\me\notes`, and a server given `C:\Users\me\notes` there looks for a file of
@@ -212,9 +226,9 @@ export function hostMount(path: string, readOnly: boolean): Mount {
 export function cagePath(path: string, platform: NodeJS.Platform = process.platform): string {
   if (platform !== "win32") return path;
   const normal = win32.normalize(path);
-  const drive = /^([A-Za-z]):\\/.exec(normal);
+  const drive = offDrive(normal, platform) ? null : /^([A-Za-z]):\\/.exec(normal);
   if (drive === null) {
-    throw new Error(`${path} is not a path on a drive, and only those have a place in the cage on Windows: mount a folder such as C:\\Users\\me\\notes, not a network share or a device path (\\\\server\\share, \\\\?\\..., \\\\.\\...)`);
+    throw new Error(`${path} ${NOT_ON_A_DRIVE}: mount a folder such as C:\\Users\\me\\notes, not a network share or a device path (\\\\server\\share, \\\\?\\..., \\\\.\\...)`);
   }
   return `/${drive[1]!.toLowerCase()}${normal.slice(2).split("\\").filter(Boolean).map((name) => `/${name}`).join("")}`;
 }

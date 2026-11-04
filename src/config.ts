@@ -6,6 +6,7 @@ import type { ParseArgsOptionsConfig } from "node:util";
 import { envFileOf, foreignPath, mcpcageAt, movedPlaces, nodeScript, type ForeignPath, type McpcageCommand } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
 import { cmdNpx, isNpx, npxArgv, parseLaunch } from "./launch.js";
+import { NOT_ON_A_DRIVE, offDrive } from "./sandbox.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
 
@@ -391,18 +392,6 @@ export function withoutEnvValues(args: string[]): string[] {
   return shown;
 }
 
-/**
- * Whether a path is, on Windows, not on a drive: a share (`\\server\share`) or a device path
- * (`\\?\...`, `\\.\...`). `run` cannot mount one there, so an entry given one cannot start once
- * caged: wrap wrote `--mount \\localhost\C$\Users\me\share` for a server given that share,
- * which `run` refuses at every start. Elsewhere `//x` is an ordinary path.
- */
-export function offDrive(path: string, platform: NodeJS.Platform = process.platform): boolean {
-  return platform === "win32" && /^[\\/]{2}/.test(path);
-}
-
-/** Why a path that is not on a drive (see offDrive) is not mounted. */
-export const NOT_ON_A_DRIVE = "is not a path on a drive, and only those have a place in the cage on Windows";
 
 /** The absolute path an argument names on this machine, when it exists here: `/x` as written, `~/x` expanded. */
 export function hostPath(arg: unknown): string | undefined {

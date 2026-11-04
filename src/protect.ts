@@ -3,7 +3,7 @@ import { join, posix, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
 import {
-  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, mcpcageArgs, moveHostEnv, NOT_ON_A_DRIVE, offDrive, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry,
+  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, mcpcageArgs, moveHostEnv, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry,
   type EnvEffects, type ServerEntry, type ServerType,
 } from "./config.js";
 import { envFileOf, mcpcageAt, nodeScript, type ForeignPath, type McpcageCommand, type McpcageKind } from "./installed.js";
@@ -13,7 +13,7 @@ import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./man
 import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
-import { hostMount, type SandboxOptions } from "./sandbox.js";
+import { hostMount, NOT_ON_A_DRIVE, offDrive, type SandboxOptions } from "./sandbox.js";
 import { accountHome, clientPlaces, sensitivePath, thisMachine } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
 import { terminalSafe } from "./terminal.js";
@@ -315,15 +315,18 @@ export function inspectionSandbox(launch: { argv: string[]; env: Record<string, 
 /**
  * The server as an inspection starts it, its existing path arguments made absolute, and which of
  * them are mounted: every one but those that sensitive.ts refuses, which `wrap` and `--fix` refuse
- * too, and which an inspection leaves out rather than open to a server nobody has looked at yet.
- * The server is still given the argument.
+ * too, and which an inspection leaves out rather than open to a server nobody has looked at yet, and
+ * on Windows those off any drive (offDrive), which have no place in the cage. The server is still
+ * given the argument.
  */
 function inspectionPlan(spec: NpmLaunch): { spec: NpmLaunch; mounted: string[]; skipped: SkippedPath[] } {
   const paths = spec.args.map((arg) => hostPath(arg));
   const mounted: string[] = [];
   const skipped: SkippedPath[] = [];
   for (const path of new Set(paths.filter((path): path is string => path !== undefined))) {
-    const reason = sensitivePath(path, thisMachine());
+    // Off any drive on Windows, a path has no place in the cage: hostMount would refuse it, and the
+    // inspection would fail instead of going on without it.
+    const reason = offDrive(path) ? `it ${NOT_ON_A_DRIVE}` : sensitivePath(path, thisMachine());
     if (reason === undefined) mounted.push(path);
     else skipped.push({ path, reason });
   }

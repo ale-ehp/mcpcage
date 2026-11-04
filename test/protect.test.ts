@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
 import { discoverConfigs, type ClientId } from "../src/clients.js";
-import { isWrapped, moveHostEnv, offDrive, serverType, unwrapEntry, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
+import { isWrapped, moveHostEnv, serverType, unwrapEntry, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
 import { listTools } from "../src/inspect.js";
 import { mcpcageAt } from "../src/installed.js";
 import { hasComments, parseJsonc } from "../src/jsonc.js";
@@ -16,7 +16,7 @@ import { tooDeep } from "../src/manifest.js";
 import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs, writableMounts } from "../src/protect.js";
-import { parseMount, runArgs } from "../src/sandbox.js";
+import { offDrive, parseMount, runArgs } from "../src/sandbox.js";
 import { idleProgram, onWindows } from "./fake-programs.js";
 import { asStored, cli, fakeServer, fakeUserEnv, hostileServer, literal, mcpcageWithEnv, native, root, stubHome, written, writtenEntry } from "./helpers.js";
 
@@ -1330,6 +1330,29 @@ describe("inspection sandbox", () => {
     expect(seen(inspected)).toEqual(seen(run));
     const place = process.platform === "win32" ? `/${onDisk(data)[0]!.toLowerCase()}${onDisk(data).slice(2).split("\\").join("/")}` : data;
     expect(seen(inspected)).toEqual([`type=bind,source=${onDisk(data)},target=${place},readonly`, place, `${place}${process.platform === "win32" ? "/" : sep}notes.md`]);
+  });
+
+  it("inspects a server given a share on Windows without it, and says so, instead of failing the inspection", async () => {
+    // `//x` names what `/x` names on macOS and Linux, and is a share on Windows (\\server\share):
+    // what Windows cannot mount is tested here with a directory that exists. On Windows itself it is
+    // the device path \\?\C:\..., which is off any drive too and needs no share to exist.
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-share-"));
+    const share = process.platform === "win32" ? `\\\\?\\${dir}` : `/${dir}`;
+    const argv = ["npx", "-y", "@modelcontextprotocol/server-filesystem", share];
+    const options = onWindows(() => inspectionSandbox({ argv, env: {} }));
+    expect(options.mounts).toEqual([]);
+    // The server is still given the path; only the mount is left out.
+    expect(options.spec.args).toEqual([share]);
+
+    const file = join(dir, "mcp.json");
+    writeJsonFile(file, { mcpServers: { files: { command: "npx", args: argv.slice(1) } } });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const inspect = async () => [{ name: "read", description: "Read a file." }];
+    // One server, described before scanConfigs first waits: all of it as on Windows.
+    const report = await onWindows(() => scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, inspect }));
+    expect(report.servers[0]!.inspection).toEqual({ tools: 1, findings: [], skipped: [{ path: share, reason: "it is not a path on a drive, and only those have a place in the cage on Windows" }] });
+    // On macOS and Linux it is an ordinary path, mounted.
+    if (process.platform !== "win32") expect(inspectionSandbox({ argv, env: {} }).mounts).toEqual([{ source: share, target: share, readOnly: true }]);
   });
 
   // Windows allows no colon in a file name: no directory there is named .ssh:rw.
