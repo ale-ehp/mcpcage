@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, posix, relative } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, posix, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
@@ -1280,6 +1280,9 @@ describe("errors that repeat a value", () => {
 });
 
 describe("inspection sandbox", () => {
+  /** A path as `run` mounts it: on Windows as the system spells it on disk (long names, each in its case). */
+  const onDisk = (path: string) => (process.platform === "win32" ? realpathSync.native(path) : path);
+
   it("mounts the server's existing paths read-only, as absolute paths, with the network closed", () => {
     const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
     const data = mkdtempSync(join(tmpdir(), "mcpcage-data-"));
@@ -1289,8 +1292,8 @@ describe("inspection sandbox", () => {
       const argv = ["npx", "-y", "@modelcontextprotocol/server-filesystem", data, "~/notes", "/not/here", data];
       const options = inspectionSandbox({ argv, env: { API_TOKEN: "t0k3n-value-123" } });
       expect(options.mounts).toEqual([
-        { source: data, target: data, readOnly: true },
-        { source: join(home, "notes"), target: join(home, "notes"), readOnly: true },
+        { source: onDisk(data), target: onDisk(data), readOnly: true },
+        { source: onDisk(join(home, "notes")), target: onDisk(join(home, "notes")), readOnly: true },
       ]);
       expect(options.spec.args).toEqual([data, join(home, "notes"), "/not/here", data]);
       expect(options.allowNet).toBe(false);
@@ -1309,6 +1312,24 @@ describe("inspection sandbox", () => {
       vi.unstubAllEnvs();
     }
     expect(() => inspectionSandbox({ argv: ["uvx", "mcp-server-time"], env: {} })).toThrow("only npx servers can be inspected");
+  });
+
+  it("starts the server with the mounts and the arguments `run` gives it once caged", () => {
+    const data = mkdtempSync(join(tmpdir(), "mcpcage-data-"));
+    // On Windows written in another case than on disk: the cage compares paths with case.
+    const written = process.platform === "win32" ? data.toUpperCase() : data;
+    const argv = ["npx", "-y", "@modelcontextprotocol/server-filesystem", written, join(written, "notes.md")];
+    const options = inspectionSandbox({ argv, env: {} });
+    const inspected = runArgs(options, "image");
+    // `run` with the entry that --fix writes, as it mounts each --mount.
+    const caged = wrapEntry({ command: "npx", args: argv.slice(1) }, { command: "mcpcage" });
+    const after = "entry" in caged ? caged.entry.args! : [];
+    const mounts = after.flatMap((arg, index) => (after[index - 1] === "--mount" ? [parseMount(arg)] : []));
+    const run = runArgs({ ...options, spec: { ...options.spec, args: parseLaunch(after.slice(after.indexOf("--") + 1)).args }, mounts }, "image");
+    const seen = (args: string[]) => [...args.filter((arg) => arg.startsWith("type=bind")), ...args.slice(args.indexOf("image") + 1)];
+    expect(seen(inspected)).toEqual(seen(run));
+    const place = process.platform === "win32" ? `/${onDisk(data)[0]!.toLowerCase()}${onDisk(data).slice(2).split("\\").join("/")}` : data;
+    expect(seen(inspected)).toEqual([`type=bind,source=${onDisk(data)},target=${place},readonly`, place, `${place}${process.platform === "win32" ? "/" : sep}notes.md`]);
   });
 
   // Windows allows no colon in a file name: no directory there is named .ssh:rw.
@@ -1345,7 +1366,7 @@ describe("inspection sandbox", () => {
     stubHome(home);
     try {
       const options = inspectionSandbox({ argv: ["npx", "-y", "keys-mcp", "~/.ssh", data], env: {} });
-      expect(options.mounts).toEqual([{ source: data, target: data, readOnly: true }]);
+      expect(options.mounts).toEqual([{ source: onDisk(data), target: onDisk(data), readOnly: true }]);
       // The server is still given the path; only the mount is left out.
       expect(options.spec.args).toEqual([join(home, ".ssh"), data]);
 

@@ -13,7 +13,7 @@ import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./man
 import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
-import type { SandboxOptions } from "./sandbox.js";
+import { hostMount, type SandboxOptions } from "./sandbox.js";
 import { accountHome, clientPlaces, sensitivePath, thisMachine } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
 import { terminalSafe } from "./terminal.js";
@@ -287,17 +287,16 @@ function findingsIn(tools: ToolDefinition[]): Finding[] {
  * arguments mounted READ-ONLY at the same place and given as absolute paths, because some servers
  * (server-filesystem) check their directories at start. Nothing in the cage is writable. A path is
  * mounted as it is written: parseMount would read a final `:rw` as an option, and a server given a
- * directory named `.ssh:rw` was inspected with the real ~/.ssh mounted writable.
+ * directory named `.ssh:rw` was inspected with the real ~/.ssh mounted writable. Otherwise it is
+ * mounted as `run` mounts it (hostMount), so the server sees what it will see once caged: on Windows
+ * the folder as the system spells it on disk, at /c/... (cagePath).
  */
 export function inspectionSandbox(launch: { argv: string[]; env: Record<string, string> }): Omit<SandboxOptions, "log"> {
   const spec = parseLaunch(launch.argv);
   if (spec.kind !== "npm") throw new Error("only npx servers can be inspected");
   const plan = inspectionPlan(spec);
-  const mounts = plan.mounted.map((path) => {
-    // docker's --mount takes comma-separated fields: `mcpcage run` refuses such a path too (parseMount).
-    if (path.includes(",")) throw new Error(`paths containing commas are not supported (${path})`);
-    return { source: path, target: path, readOnly: true };
-  });
+  // docker's --mount takes comma-separated fields: hostMount refuses such a path, as `mcpcage run` does.
+  const mounts = plan.mounted.map((path) => hostMount(path, true));
   return {
     // The id `mcpcage run` gives the entry once caged, so the image built now is the one it reuses.
     serverId: serverIdFor(plan.spec),
