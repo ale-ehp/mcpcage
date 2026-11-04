@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
-import { envFileOf, foreignPath, mcpcageAt, movedPlaces, nodeScript, type ForeignPath, type McpcageCommand } from "./installed.js";
+import { batchFile, envFileOf, foreignPath, mcpcageAt, movedPlaces, nodeScript, type ForeignPath, type McpcageCommand } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
 import { cmdNpx, isNpx, npxArgv, parseLaunch } from "./launch.js";
 import { NOT_ON_A_DRIVE, offDrive } from "./sandbox.js";
@@ -314,10 +314,27 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
   const mode = (path: string) => (options.writable ? `${path}:rw` : /:(?:rw|ro)$/.test(path) ? `${path}:ro` : path);
   const mountFlags = [...new Set(paths.filter((path): path is string => path !== undefined))].flatMap((path) => ["--mount", mode(path)]);
   const server = serverArgs.map((arg, index) => paths[index] ?? arg);
-  const launcher = typeof options.command === "string" ? { command: options.command, args: [] } : { command: options.command.node, args: [options.command.script] };
+  const launcher = launcherOf(options.command);
   const wrapped: ServerEntry = { ...entry, command: launcher.command, args: [...launcher.args, "run", ...envFlags, ...mountFlags, "--", entry.command, ...npxPart, ...server] };
   if (isJsonObject(entry.env)) wrapped.env = Object.fromEntries(env) as Record<string, string>;
   return { entry: wrapped };
+}
+
+/** The command and first arguments that start mcpcage as `command` says: on Windows node.exe and its cli.js (see nodeScript). */
+function launcherOf(command: McpcageCommand): { command: string; args: string[] } {
+  return typeof command === "string" ? { command, args: [] } : { command: command.node, args: [command.script] };
+}
+
+/**
+ * A wrapped entry that starts mcpcage through a batch file on Windows (see batchFile), as mcpcage
+ * 0.5.0's --fix wrote it, started by `command` instead, unless that is a batch file too: the same
+ * arguments from `run` on, so every option given to the cage stays, and unwrap still finds the
+ * server after `--`. Undefined for any other entry.
+ */
+export function relaunch(entry: ServerEntry, command: McpcageCommand): ServerEntry | undefined {
+  if (!isWrapped(entry) || batchFile(entry.command) === undefined || batchFile(command) !== undefined) return undefined;
+  const launcher = launcherOf(command);
+  return { ...entry, command: launcher.command, args: [...launcher.args, ...mcpcageArgs(entry)] as string[] };
 }
 
 /** Why an entry whose variable would move into `--env NAME=value` stays as it is: its value would have to be converted. */
@@ -454,11 +471,12 @@ export function unwrapEntry(entry: ServerEntry): { entry: ServerEntry } | { skip
 
 export function isWrapped(entry: ServerEntry, platform: NodeJS.Platform = process.platform): entry is ServerEntry & { command: string; args: string[] } {
   // `where mcpcage` gives mcpcage.cmd on Windows, which starts it as MCPCAGE.CMD too, and --fix
-  // writes node.exe with mcpcage's cli.js there (see nodeScript). The arguments must be a list: an
-  // object whose "0" is "run" looked wrapped too, and unwrap stopped at it with "args.indexOf is not
-  // a function".
+  // writes node.exe with mcpcage's cli.js there (see nodeScript). A mcpcage.bat starts as a .cmd
+  // does: it was "another command", left uncounted, whatever it ran. The arguments must be a list:
+  // an object whose "0" is "run" looked wrapped too, and unwrap stopped at it with "args.indexOf is
+  // not a function".
   if (typeof entry.command !== "string" || !Array.isArray(entry.args)) return false;
-  return (/^mcpcage(\.cmd|\.exe)?$/.test(programName(entry.command, platform)) && entry.args[0] === "run") || nodeScript(entry, platform) !== undefined;
+  return (/^mcpcage(\.cmd|\.bat|\.exe)?$/.test(programName(entry.command, platform)) && entry.args[0] === "run") || nodeScript(entry, platform) !== undefined;
 }
 
 /** A wrapped entry's arguments from `run` on: those after the script node.exe is given, when mcpcage starts so (see nodeScript). */

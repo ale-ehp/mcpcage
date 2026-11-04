@@ -9,7 +9,7 @@ import { sha256 } from "../src/canonical.js";
 import { discoverConfigs, type ClientId } from "../src/clients.js";
 import { isWrapped, moveHostEnv, serverType, unwrapEntry, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
 import { listTools } from "../src/inspect.js";
-import { mcpcageAt } from "../src/installed.js";
+import { mcpcageAt, type McpcageCommand } from "../src/installed.js";
 import { hasComments, parseJsonc } from "../src/jsonc.js";
 import { cmdNpx, parseLaunch, serverIdFor } from "../src/launch.js";
 import { tooDeep } from "../src/manifest.js";
@@ -72,7 +72,9 @@ function fakeMcpcage(): { command: string; path: string } {
  * How an entry names the installed mcpcage that the PATH finds first: by its bare name, as most
  * configurations do, except on Windows, where a client looks for a bare name in its current
  * directory first, so it never counts as mcpcage there (see startedBy in installed.ts): there the
- * entry gives the full path of the installed one.
+ * entry gives the full path of the installed one, the mcpcage.cmd npm writes. protect counts such an
+ * entry as plainly caged when that is the command --fix writes (`--command`); otherwise --fix writes
+ * node.exe with mcpcage's cli.js there, and the report says that some clients cannot start a .cmd.
  */
 function byName(installed: string): string {
   return process.platform === "win32" ? installed : "mcpcage";
@@ -763,7 +765,7 @@ describe("an entry's env that makes OpenSSL or glibc load code", () => {
     const indent = " ".repeat(16);
     const values = [env.OPENSSL_CONF, env.OPENSSL_MODULES, env.GCONV_PATH, env.OPENSSL_ia32cap];
 
-    const scan = mcpcageWithEnv(userEnv, "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(userEnv, "protect", "--project", project, "--offline", "--command", m);
     for (const value of values) expect(`${scan.stdout}${scan.stderr}`).not.toContain(value);
     expect(scan.stdout).toMatch(new RegExp(`^ {2}tuned {9}${literal(m)} run --env OPENSSL_CONF --env API_KEY -- npx -y @acme/tuned-mcp +caged, but its env runs on your machine$`, "m"));
     expect(scan.stdout).toContain(
@@ -795,7 +797,7 @@ describe("an entry's env that makes OpenSSL or glibc load code", () => {
       },
     });
 
-    const again = mcpcageWithEnv(userEnv, "protect", "--project", project, "--offline");
+    const again = mcpcageWithEnv(userEnv, "protect", "--project", project, "--offline", "--command", m);
     expect(again.stdout).toMatch(new RegExp(`^ {2}tuned {9}${literal(m)} run --env OPENSSL_CONF=\\*\\*\\* --env API_KEY -- npx -y @acme/tuned-mcp +caged$`, "m"));
     expect(again.stdout).not.toContain(`${indent}env `);
     expect(again.stdout).toContain("  2 already run through mcpcage.");
@@ -1581,7 +1583,7 @@ describe("mcpcage protect", () => {
     expect(readFileSync(files.claudeJson, "utf8").length).toBeGreaterThan(90_000);
     const before = snapshot(machine.top, machine.cage);
 
-    const result = mcpcageWithEnv(machine.env, "protect", "--project", project, "--offline");
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", project, "--offline", "--command", machine.installed);
     expect(result.code, result.stderr).toBe(1);
     const out = result.stdout;
     expect(snapshot(machine.top, machine.cage)).toEqual(before);
@@ -1700,7 +1702,7 @@ describe("mcpcage protect", () => {
     expect(result.stdout.match(/Claude Code is running/g)).toHaveLength(1);
     expect(result.code).toBe(1); // five npx servers are still outside the cage
 
-    const again = mcpcageWithEnv(machine.env, "protect", "--project", project, "--offline");
+    const again = mcpcageWithEnv(machine.env, "protect", "--project", project, "--offline", "--command", installed);
     const statuses = Object.fromEntries(
       again.stdout.split("\n").flatMap((text) => {
         const match = /^ {2}(\S+) +.*?(NOT CAGED|caged)$/.exec(text);
@@ -1841,7 +1843,7 @@ describe("mcpcage protect", () => {
     const original = readFileSync(cursor);
     const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
 
-    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", m);
     expect(scan.stdout).toMatch(new RegExp(`^ {2}hosted {8}${literal(m)} run --no-sandbox -- npx -y @acme/hosted-mcp +mcpcage --no-sandbox: pinning and audit only, no isolation$`, "m"));
     expect(scan.stdout).toMatch(new RegExp(`^ {2}caged {9}${literal(m)} run -- npx -y @acme/caged-mcp --no-sandbox +caged$`, "m"));
     // npx installs and runs it on the host, so its install scripts would run there too.
@@ -1885,7 +1887,7 @@ describe("mcpcage protect", () => {
     const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
     const indent = " ".repeat(16);
 
-    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", m);
     for (const value of [preload, store, daemon, "/tmp/never-printed-home"]) expect(`${scan.stdout}${scan.stderr}`).not.toContain(value);
     expect(scan.stdout).toMatch(new RegExp(`^ {2}tuned {9}${literal(m)} run --env NODE_OPTIONS --env MCPCAGE_HOME --env API_KEY -- npx -y @acme/tuned-mcp +caged, but its env runs on your machine$`, "m"));
     expect(scan.stdout).toContain(
@@ -1923,7 +1925,7 @@ describe("mcpcage protect", () => {
     });
     expect(readFileSync(`${cursor}.mcpcage.bak`)).toEqual(original);
 
-    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", m);
     expect(again.stdout).toMatch(new RegExp(`^ {2}tuned {9}${literal(m)} run --env NODE_OPTIONS=\\*\\*\\* --env API_KEY -- npx -y @acme/tuned-mcp +caged$`, "m"));
     expect(again.stdout).not.toContain(`${indent}env `);
     expect(again.stdout).toContain("  0 run on your machine with your permissions and no cage.");
@@ -1948,7 +1950,7 @@ describe("mcpcage protect", () => {
       },
     });
 
-    const scan = mcpcageWithEnv(fakeUserEnv(home, cage, { PATH: installed.path }), "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(fakeUserEnv(home, cage, { PATH: installed.path }), "protect", "--project", project, "--offline", "--command", m);
     expect(scan.stdout).toMatch(new RegExp(`^ {2}prod {10}${literal(m)} run --env NODE_ENV -- npx -y @acme/prod-mcp +caged$`, "m"));
     expect(scan.stdout).toMatch(/^ {2}plain {9}npx -y @acme\/plain-mcp +NOT CAGED$/m);
     expect(scan.stdout).not.toMatch(/^ {16}env /m);
@@ -1977,7 +1979,7 @@ describe("mcpcage protect", () => {
     const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
     const indent = " ".repeat(16);
 
-    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", m);
     expect(scan.stderr).toBe("");
     expect(scan.stdout).toMatch(new RegExp(`^ {2}leaky {9}${literal(m)} run --allow-net --env AWS_SECRET_ACCESS_KEY --env GITHUB_TOKEN -- npx -y pkg-a {2}caged, with the cage opened$`, "m"));
     expect(scan.stdout).toContain(`caged, with the cage opened\n${indent}network: on (--allow-net), so it can send AWS_SECRET_ACCESS_KEY and GITHUB_TOKEN over the network\n  loose `);
@@ -2020,7 +2022,7 @@ describe("mcpcage protect", () => {
     const after = JSON.parse(readFileSync(cursor, "utf8")).mcpServers;
     for (const name of ["leaky", "loose", "keys", "plain"] as const) expect(after[name]).toEqual(entries[name]);
     expect(after.both.args).toEqual(["run", "--env", "NODE_OPTIONS=--import /tmp/never-printed.mjs", "--allow-net", "--env", "API_TOKEN", "--", "npx", "-y", "pkg-c"]);
-    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", m);
     expect(again.stdout).toMatch(new RegExp(`^ {2}both {10}${literal(m)} run .* {2}caged, with the cage opened$`, "m"));
     expect(again.stdout).toContain("  1 already runs through mcpcage.\n  4 run through mcpcage with the cage opened by their options.\n");
     expect(again.code).toBe(0);
@@ -2051,7 +2053,7 @@ describe("mcpcage protect", () => {
     const indent = " ".repeat(16);
     const what = "the server can change files there that git, editors and build tools run";
 
-    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", m);
     expect(scan.stderr).toBe("");
     expect(scan.stdout).toMatch(new RegExp(`^ {2}notes {9}${literal(m)} run --mount ${literal(notes)}:rw -- .* {2}caged, with the cage opened\n${indent}writable: ${literal(notes)}: ${what}\n {2}docs `, "m"));
     // Written with `=`, read as `run` reads it; the read-only mount next to it is not named.
@@ -2070,7 +2072,7 @@ describe("mcpcage protect", () => {
     const after = JSON.parse(readFileSync(cursor, "utf8")).mcpServers;
     for (const name of ["notes", "docs", "reader"] as const) expect(after[name]).toEqual(entries[name]);
     expect(after.fresh).toEqual({ command: m, args: ["run", "--mount", `${data}:rw`, "--", ...filesystem, data] });
-    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", m);
     expect(again.stdout).toContain(`${indent}writable: ${data}: ${what}\n`);
     expect(again.stdout).toContain("  1 already runs through mcpcage.\n  3 run through mcpcage with the cage opened by their options.\n");
     expect(again.code).toBe(0);
@@ -2093,7 +2095,7 @@ describe("mcpcage protect", () => {
     expect(fix.stdout).toContain(`\nPlan\n  cage fresh in ${tilde(cursor, home)}\n\n`);
     expect(fix.stdout).not.toContain("WARNING");
     expect(JSON.parse(readFileSync(cursor, "utf8")).mcpServers.fresh).toEqual({ command: m, args: ["run", "--mount", data, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", data] });
-    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", m);
     expect(again.stdout).toMatch(new RegExp(`^ {2}fresh {9}${literal(m)} run --mount .* {2}caged$`, "m"));
     expect(again.stdout).not.toContain("writable: ");
   });
@@ -2197,9 +2199,10 @@ describe("mcpcage protect", () => {
     expect(second.code).toBe(0);
     expect(readFileSync(cursor)).toEqual(caged);
     expect(readdirSync(dirname(cursor)).filter((name) => name.endsWith(".bak"))).toHaveLength(1);
-    // Found in PATH, as the command --fix writes when --command is not given: the same.
+    // Found in PATH, as the command --fix writes when --command is not given: the same. On Windows
+    // --fix writes node.exe with mcpcage's cli.js there, and says that some clients cannot start the .cmd.
     const onPath = mcpcageWithEnv({ ...env, PATH: `${shimDir}${delimiter}${process.env.PATH ?? ""}` }, "protect", "--project", project, "--offline");
-    expect(lineOf(onPath.stdout, "notes")).toMatch(/ {2}caged$/);
+    expect(lineOf(onPath.stdout, "notes")).toMatch(windows ? / {2}some clients cannot start a \.cmd: --fix rewrites it as node with mcpcage's cli\.js$/ : / {2}caged$/);
     expect(onPath.code).toBe(0);
 
     // When it is not the command --fix writes, the same script is a look-alike, and --fix cages what it starts.
@@ -2611,6 +2614,105 @@ describe("what --fix and wrap write on Windows", () => {
   });
 });
 
+describe("an entry that mcpcage 0.5.0 caged through mcpcage.cmd on Windows", () => {
+  const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+  const status = "some clients cannot start a .cmd: --fix rewrites it as node with mcpcage's cli.js";
+
+  it("is said to be one that some clients cannot start, and --fix starts the same mcpcage as node with its cli.js, every option kept", async () => {
+    for (const extension of [".cmd", ".bat"]) {
+      const top = mkdtempSync(join(tmpdir(), "mcpcage-cmd-entry-"));
+      const notes = join(top, "notes");
+      mkdirSync(notes);
+      // npm's mcpcage.cmd, which the PATH finds: what 0.5.0's --fix wrote on Windows; a .bat the same.
+      const shim = join(top, "npm", `mcpcage${extension}`);
+      writeText(shim, `@node "${cli}" %*\r\n`);
+      const own = { node: process.execPath, script: realpathSync.native(cli) };
+      const args = ["run", "--allow-net", "--mount", `${notes}:rw`, "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", notes];
+      const file = join(top, "mcp.json");
+      writeJsonFile(file, { mcpServers: { files: { command: shim, args } } });
+      const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+      const scan = (ownCommand: McpcageCommand = own) => scanConfigs({ locations: [location], home: top, offline: true, cacheDir: join(top, "cache"), npmRunner: noNpm, ownCommand });
+      vi.stubEnv("PATH", `${dirname(shim)}${delimiter}${process.env.PATH ?? ""}`);
+      try {
+        const report = await onWindows(() => scan());
+        const text = renderReport(report, { home: top });
+        expect(lineOf(text, "files")).toMatch(new RegExp(` {2}${literal(status.replace(".cmd", extension))}$`));
+        expect(text).toContain(`writable: ${notes}: the server can change files there`);
+        // It runs caged where it starts: counted on a line of its own, neither caged nor uncaged.
+        expect(text).toContain("  0 run on your machine with your permissions and no cage.\n");
+        expect(text).toContain("  0 already run through mcpcage.\n  1 starts mcpcage through a .cmd or .bat file, which some clients cannot start: protect --fix rewrites it.");
+        // Given as the command --fix writes, a batch file is what the user chose: caged, as before.
+        expect(lineOf(renderReport(await onWindows(() => scan(shim)), { home: top }), "files")).toMatch(/ {2}caged, with the cage opened$/);
+
+        const plan: string[] = [];
+        onWindows(() => fixConfigs({ report, command: own, claudeCodeRunning: false, dryRun: false, home: top, log: (line) => plan.push(line) }));
+        expect(plan).toEqual([`  caged files in ${tilde(file, top)}`, `  backup: ${tilde(`${file}.mcpcage.bak`, top)}`]);
+        // The same mcpcage with the same options, started by the node running mcpcage.
+        const after = JSON.parse(readFileSync(file, "utf8")).mcpServers.files;
+        expect(after).toEqual({ command: process.execPath, args: [own.script, ...args] });
+        expect(lineOf(renderReport(await onWindows(() => scan()), { home: top }), "files")).toMatch(/ {2}caged, with the cage opened$/);
+        // unwrap still gives the server back as it was before it was caged.
+        expect(onWindows(() => unwrapEntry(after))).toEqual({ entry: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", notes] } });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      // Only on Windows: elsewhere a file named mcpcage.cmd is a program like any other.
+      writeJsonFile(file, { mcpServers: { files: { command: shim, args } } });
+      expect(lineOf(renderReport(await scan(shim), { home: top }), "files")).toMatch(/ {2}caged, with the cage opened$/);
+    }
+  });
+
+  it.runIf(process.platform === "win32")("is rewritten by --fix in a fake home on Windows, one with --no-sandbox left to the user, and unwrap restores each", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cmd-home-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    for (const dir of [home, project]) mkdirSync(dir, { recursive: true });
+    // npm's directory under the fake home's APPDATA, with the mcpcage.cmd npm writes there.
+    const npmDir = join(home, "AppData", "Roaming", "npm");
+    const cmdShim = join(npmDir, "mcpcage.cmd");
+    writeText(cmdShim, `@node "${cli}" %*\r\n`);
+    const memory = ["--", "npx", "-y", "@modelcontextprotocol/server-memory"];
+    const servers = {
+      viaCmd: { command: cmdShim, args: ["run", ...memory] },
+      // Spelled as PATHEXT spells the extension: the same file.
+      upper: { command: cmdShim.replace(/\.cmd$/, ".CMD"), args: ["run", "--memory", "1g", ...memory] },
+      host: { command: cmdShim, args: ["run", "--no-sandbox", ...memory] },
+      tuned: { command: cmdShim, args: ["run", ...memory], env: { NODE_OPTIONS: "--max-old-space-size=4096" } },
+    };
+    const cursor = locationsFor(home, project)("cursor", "user");
+    writeJsonFile(cursor, { mcpServers: servers });
+    const env = fakeUserEnv(home, join(top, "cage"), { CLAUDECODE: "1", PATH: `${npmDir}${delimiter}${process.env.PATH ?? ""}` });
+    const script = realpathSync.native(cli);
+
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(lineOf(scan.stdout, "viaCmd")).toMatch(new RegExp(` {2}${literal(status)}$`));
+    expect(lineOf(scan.stdout, "upper")).toMatch(new RegExp(` {2}${literal(status)}$`));
+    expect(lineOf(scan.stdout, "host")).toMatch(/ {2}mcpcage --no-sandbox: pinning and audit only, no isolation$/);
+    expect(lineOf(scan.stdout, "tuned")).toMatch(/ {2}caged, but its env runs on your machine$/);
+    expect(scan.stdout).toContain("  2 start mcpcage through a .cmd or .bat file, which some clients cannot start: protect --fix rewrites them.");
+
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build");
+    expect(fix.stdout).toContain(`  not changed: host in ${tilde(cursor, home)}: it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand\n`);
+    const after = JSON.parse(readFileSync(cursor, "utf8")).mcpServers;
+    expect(after).toEqual({
+      viaCmd: { command: process.execPath, args: [script, "run", ...memory] },
+      upper: { command: process.execPath, args: [script, "run", "--memory", "1g", ...memory] },
+      host: servers.host,
+      tuned: { command: process.execPath, args: [script, "run", "--env", "NODE_OPTIONS=--max-old-space-size=4096", ...memory], env: {} },
+    });
+    const again = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    for (const name of ["viaCmd", "upper", "tuned"]) expect(lineOf(again.stdout, name)).toMatch(/ {2}caged$/);
+    expect(again.stdout).toContain("  3 already run through mcpcage.");
+
+    // unwrap gives each server back as it was before it was caged, the moved variable in its env again.
+    expect(mcpcageWithEnv(env, "unwrap", cursor).code).toBe(0);
+    const restored = JSON.parse(readFileSync(cursor, "utf8")).mcpServers;
+    expect(restored.viaCmd).toEqual({ command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"] });
+    expect(restored.upper).toEqual({ command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"] });
+    expect(restored.tuned).toEqual({ command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"], env: { NODE_OPTIONS: "--max-old-space-size=4096" } });
+  });
+});
+
 describe("a share given to a server on Windows", () => {
   const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
 
@@ -2864,7 +2966,7 @@ describe("configuration files protect cannot check", () => {
     writeJsonFile(at("windsurf", "user"), { mcpServers: { notes: { command: installed.command, args: ["run", "--", "npx", "-y", "@acme/notes-mcp"] } } });
     const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
 
-    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
     expect(scan.stderr).toBe("");
     expect(scan.stdout).toContain("  could not read this file: too large to read (17.0 MiB; mcpcage reads configuration files up to 16 MiB)\n");
     expect(scan.stdout).toContain("  could not read this file: not valid JSON");
@@ -2879,7 +2981,7 @@ describe("configuration files protect cannot check", () => {
 
     // Once each can be read, and what it holds is caged, protect exits 0.
     for (const client of ["cursor", "devin"] as const) rmSync(at(client, "user"));
-    const clean = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const clean = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
     expect(clean.stdout).not.toContain("could not be checked");
     expect(clean.code).toBe(0);
   });
@@ -2949,7 +3051,7 @@ describe("what a wrapped entry's PATH picks", () => {
     const { project, cursor, env, where } = setup(servers, installed);
     const folded = process.platform === "darwin" || process.platform === "win32";
 
-    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
     const caged = ["subset", "linked", "plain", ...(folded ? ["upper"] : [])];
     const picked = ["picked", "relative", "empty", "many", "odd", ...(folded ? [] : ["upper"])];
     for (const name of caged) expect(lineOf(scan.stdout, name)).toMatch(/ {2}caged$/);
@@ -2966,7 +3068,7 @@ describe("what a wrapped entry's PATH picks", () => {
 
     // Which PATH was meant, --fix cannot know: it says what to do by hand and changes nothing.
     const original = readFileSync(cursor);
-    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build");
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
     const byHand = `its env sets a PATH that picks other programs than yours: check that PATH, or remove it from its "env" by hand`;
     expect(fix.stdout).toContain(`\nPlan\n${picked.map((name) => `  not changed: ${name} in ${where}: ${byHand}\n`).join("")}  nothing that mcpcage can change by itself.\n`);
     expect(fix.code).toBe(1);
@@ -3004,7 +3106,7 @@ describe("an entry's env that moves the client configurations run refuses to mou
     const line = (name: string) => `${" ".repeat(16)}env ${name}: differs from yours, so mcpcage run would look for the clients' configurations elsewhere, and its mount check would miss the real place`;
     const moves = ["moved", "odd", ...(process.platform === "linux" ? ["xdg"] : []), ...(process.platform === "win32" ? ["local"] : [])];
 
-    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
     expect(`${scan.stdout}${scan.stderr}`).not.toContain("never-printed");
     for (const name of moves) expect(lineOf(scan.stdout, name)).toMatch(/ {2}caged, but its env moves what run refuses to mount$/);
     expect(scan.stdout).toContain(`${lineOf(scan.stdout, "moved")}\n${line("COPILOT_HOME")}\n  odd `);
@@ -3016,7 +3118,7 @@ describe("an entry's env that moves the client configurations run refuses to mou
     expect(scan.code).toBe(1);
 
     const original = readFileSync(cursor);
-    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build");
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
     const where = tilde(cursor, home);
     expect(fix.stdout).toContain(`\nPlan\n  not changed: moved in ${where}: its env sets COPILOT_HOME to another value than yours: check it, or remove it from its "env" by hand\n`);
     expect(`${fix.stdout}${fix.stderr}`).not.toContain("never-printed");
@@ -3051,7 +3153,7 @@ describe("an entry's envFile", () => {
     const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
     const indent = " ".repeat(16);
 
-    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
     expect(`${scan.stdout}${scan.stderr}`).not.toContain("never-printed");
     expect(scan.stdout).toContain(
       `${lineOf(scan.stdout, "tuned")}\n${indent}envFile NODE_OPTIONS: can make Node run code on your machine before the cage starts\n  missing `,

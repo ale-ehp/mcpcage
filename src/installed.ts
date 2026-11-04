@@ -53,6 +53,18 @@ export function npxCached(command: McpcageCommand): string | undefined {
 /** A path inside npx's directory of npm's cache: _npx, then the directory of one install, then its node_modules. */
 const NPX_CACHE = /(?:^|[\\/])_npx[\\/][^\\/]+[\\/]node_modules(?:[\\/]|$)/i;
 
+/**
+ * The extension of a command that is a batch file on Windows (".cmd" or ".bat", in lowercase), or
+ * undefined: elsewhere such a name is a program like any other. Node starts a batch file only through
+ * cmd.exe, and refuses a plain child_process.spawn of one with EINVAL since the fix of CVE-2024-27980:
+ * a client that starts servers so cannot start the mcpcage.cmd npm installs, which mcpcage 0.5.0's
+ * --fix wrote on Windows; the MCP SDK's cross-spawn adds cmd.exe itself and can.
+ */
+export function batchFile(command: unknown, platform: NodeJS.Platform = process.platform): string | undefined {
+  if (platform !== "win32" || typeof command !== "string") return undefined;
+  return /\.(?:cmd|bat)$/i.exec(command)?.[0].toLowerCase();
+}
+
 /** A command whose file depends on something not known here: the directory the client starts it from. */
 const UNKNOWN = Symbol("unknown");
 

@@ -360,8 +360,8 @@ async function protect(argv: string[]): Promise<number> {
   const changed = outcome.files.flatMap((file) => file.changed);
   const status = changed.length < uncaged || unchecked > 0 ? 1 : 0;
   // A failed build is reported and leaves the configuration caged: the image is built at the next start.
-  // An entry that was caged already, and only had its env moved, keeps the image it has.
-  return values["no-build"] ? status : Math.max(status, buildImages(changed.filter((change) => !change.envOnly)));
+  // An entry that was caged already, and only had its env or its launcher changed, keeps the image it has.
+  return values["no-build"] ? status : Math.max(status, buildImages(changed.filter((change) => !change.alreadyCaged)));
 }
 
 /** `--inspect`: the server starts in its cage (no network, its paths read-only) only to list its tools. */

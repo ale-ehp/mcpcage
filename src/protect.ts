@@ -3,10 +3,10 @@ import { join, posix, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
 import {
-  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, mcpcageArgs, moveHostEnv, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry,
+  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, mcpcageArgs, moveHostEnv, relaunch, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry,
   type EnvEffects, type ServerEntry, type ServerType,
 } from "./config.js";
-import { envFileOf, mcpcageAt, nodeScript, type ForeignPath, type McpcageCommand, type McpcageKind } from "./installed.js";
+import { batchFile, envFileOf, mcpcageAt, nodeScript, type ForeignPath, type McpcageCommand, type McpcageKind } from "./installed.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { cmdNpx, npxArgv, parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
@@ -50,6 +50,12 @@ export interface ServerReport {
   mcpcage?: McpcageKind;
   /** For a wrapped entry that starts node with a cli.js, as --fix writes on Windows (see nodeScript): that script. */
   script?: string;
+  /**
+   * For an entry that starts the installed mcpcage through a batch file on Windows, as mcpcage
+   * 0.5.0's --fix wrote it (see batchFile): ".cmd" or ".bat". Some clients cannot start one, and
+   * --fix rewrites it (see relaunch). Not set when the command --fix writes is a batch file itself.
+   */
+  batch?: string;
   /** For a caged entry: each run option that opens its cage, in plain words. */
   opened: string[];
   /** For a caged entry on Windows, a path it mounts that is not on a drive (see offDrive), so it cannot start. */
@@ -191,6 +197,8 @@ async function describeServer(
     const script = type === "mcpcage" ? nodeScript(entry) : undefined;
     if (script !== undefined) server.script = script;
     server.protectedByMcpcage = server.mcpcage === "installed" && !withoutSandbox(entry);
+    const batch = server.mcpcage === "installed" && batchFile(options.ownCommand) === undefined ? batchFile(entry.command) : undefined;
+    if (batch !== undefined) server.batch = batch;
     if (server.protectedByMcpcage) {
       server.opened = openedBy(entry);
       const unmountable = offDriveMount(entry);
@@ -575,6 +583,7 @@ function status(server: ServerReport): string {
       if (server.envFile !== undefined && fromFile === undefined) return "caged, but what its envFile sets is unknown";
       if (server.foreignPath !== undefined || fromFile?.foreignPath !== undefined) return "caged, but its PATH picks other programs";
       if (server.movedPlaces.length > 0 || (fromFile?.movedPlaces.length ?? 0) > 0) return "caged, but its env moves what run refuses to mount";
+      if (server.batch !== undefined) return `some clients cannot start a ${server.batch}: --fix rewrites it as node with mcpcage's cli.js`;
       return server.opened.length > 0 ? "caged, with the cage opened" : "caged";
     }
     case "remote":
@@ -647,8 +656,10 @@ function summary(report: ProtectReport): string[] {
   const uncaged = count(isUncaged);
   const elsewhere = count((server) => server.type !== "npx" && server.type !== "mcpcage");
   const inCage = (server: ServerReport) => server.type === "mcpcage" && server.mcpcage === "installed" && server.offDrive === undefined && !isUncaged(server);
-  const caged = count((server) => inCage(server) && server.opened.length === 0);
-  const opened = count((server) => inCage(server) && server.opened.length > 0);
+  const caged = count((server) => inCage(server) && server.batch === undefined && server.opened.length === 0);
+  const opened = count((server) => inCage(server) && server.batch === undefined && server.opened.length > 0);
+  // Caged where they start, and not started at all by a client that cannot start a batch file.
+  const batch = count((server) => inCage(server) && server.batch !== undefined);
   const missing = count((server) => server.type === "mcpcage" && server.error === undefined && server.mcpcage === "not found");
   const stuck = count((server) => server.offDrive !== undefined);
   const scripts = count((server) => server.installScripts?.status === "found");
@@ -672,6 +683,9 @@ function summary(report: ProtectReport): string[] {
     `  ${caged} already ${caged === 1 ? "runs" : "run"} through mcpcage.`,
   );
   if (opened > 0) lines.push(`  ${many(opened, "runs", "run")} through mcpcage with the cage opened by ${opened === 1 ? "its" : "their"} options.`);
+  if (batch > 0) {
+    lines.push(`  ${many(batch, "starts", "start")} mcpcage through a .cmd or .bat file, which some clients cannot start: protect --fix rewrites ${batch === 1 ? "it" : "them"}.`);
+  }
   if (missing > 0) lines.push(`  ${many(missing, "starts", "start")} an mcpcage that could not be found.`);
   if (stuck > 0) lines.push(`  ${stuck} cannot start: ${stuck === 1 ? "it mounts a path" : "they mount paths"} that ${stuck === 1 ? "is" : "are"} not on a drive.`);
   return lines;
@@ -682,8 +696,11 @@ function summary(report: ProtectReport): string[] {
 
 export interface FixedFile {
   file: string;
-  /** `envOnly`: an entry already caged whose env moved off the host; its image stays the same. */
-  changed: Array<{ name: string; label?: string; after: ServerEntry; envOnly?: boolean }>;
+  /**
+   * `alreadyCaged`: an entry caged already, whose env moved off the host, or whose batch file became
+   * node with mcpcage's cli.js on Windows (see relaunch); its image stays the same.
+   */
+  changed: Array<{ name: string; label?: string; after: ServerEntry; alreadyCaged?: boolean }>;
   skipped: Array<{ name: string; label?: string; reason: string }>;
   /** Why the whole file was left as it is. */
   refused?: string;
@@ -721,12 +738,14 @@ export function fixConfigs(options: FixOptions): FixOutcome {
     if (!file.exists || file.error !== undefined) continue;
     const servers = options.report.servers.filter((server) => server.file === file.file);
     // A program that is only named mcpcage gets the rewrite an npx entry gets; a caged entry whose
-    // env or envFile acts on the host gets what can be moved moved, and the check of the result.
+    // env or envFile acts on the host gets what can be moved moved, and the check of the result; one
+    // started through a batch file on Windows gets the command --fix writes (see relaunch).
     const targets = servers.filter(
       (server) =>
         server.type === "npx" ||
         (server.type === "mcpcage" &&
-          (server.mcpcage === "other program" || (server.protectedByMcpcage && server.offDrive === undefined && server.error === undefined && (actsOnHost(server) || envFileActs(server))))),
+          (server.mcpcage === "other program" ||
+            (server.protectedByMcpcage && server.offDrive === undefined && server.error === undefined && (actsOnHost(server) || envFileActs(server) || server.batch !== undefined)))),
     );
     // Already wrapped, so there is nothing to rewrite: only the person who chose --no-sandbox can drop it.
     // Caged entries that only the user can change: one that runs with --no-sandbox, and one that cannot start.
@@ -772,7 +791,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
       continue;
     }
     (servers as Record<string, unknown>)[server.name] = wrapped.entry;
-    fixed.changed.push({ name: server.name, label: server.label, after: wrapped.entry, ...(wrapped.envOnly ? { envOnly: true } : {}) });
+    fixed.changed.push({ name: server.name, label: server.label, after: wrapped.entry, ...(wrapped.alreadyCaged ? { alreadyCaged: true } : {}) });
     const before = isJsonObject((entry as ServerEntry).env) ? Object.keys((entry as ServerEntry).env!) : [];
     removed.set(wrapped.entry, before.filter((name) => !Object.hasOwn(wrapped.entry.env ?? {}, name)));
   }
@@ -788,7 +807,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
 
   // Said with the plan, before the question, for each mount --writable made writable. An entry that was
   // caged already keeps the mounts it had, which the report names.
-  const warnings = (change: FixedFile["changed"][number]) => (options.writable && !change.envOnly ? writableMounts(change.after).map((path) => writableWarning(change.name, path)) : []);
+  const warnings = (change: FixedFile["changed"][number]) => (options.writable && !change.alreadyCaged ? writableMounts(change.after).map((path) => writableWarning(change.name, path)) : []);
   // When the file cannot be rewritten, the exact command each server should run instead.
   const byHand = fixed.changed.flatMap((change) => {
     const line = `    ${terminalSafe(change.name)}${change.label === undefined ? "" : ` (project ${terminalSafe(change.label)})`}: ${terminalSafe(shownCommand(change.after, "mcpcage").line)}`;
@@ -833,14 +852,15 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
 }
 
 /**
- * An npx entry wrapped, a caged entry with its env moved off the host, or the npx command a program
- * only named mcpcage would start, wrapped as wrap would have wrapped it; or why it stays as it is.
+ * An npx entry wrapped, a caged entry with its env moved off the host or started without its batch
+ * file (see relaunch), or the npx command a program only named mcpcage would start, wrapped as wrap
+ * would have wrapped it; or why it stays as it is.
  * What the command is, is looked at again: the file may have changed since the scan. The result is
  * checked as the report will check it (see cageCheck): one that would still not count as caged,
  * because of a PATH, a client place or an envFile that only the user can change, stays as it is,
  * with what to do, instead of being called caged.
  */
-function rewrite(entry: ServerEntry, command: McpcageCommand, writable: boolean, configFile: string): { entry: ServerEntry; envOnly?: boolean } | { skip: string } {
+function rewrite(entry: ServerEntry, command: McpcageCommand, writable: boolean, configFile: string): { entry: ServerEntry; alreadyCaged?: boolean } | { skip: string } {
   const rewritten = rewriteEntry(entry, command, writable);
   if ("skip" in rewritten) return rewritten;
   const reason = cageCheck(rewritten.entry, { command, configFile });
@@ -848,7 +868,7 @@ function rewrite(entry: ServerEntry, command: McpcageCommand, writable: boolean,
   return rewritten.entry === entry ? { skip: "its env no longer runs on your machine" } : rewritten;
 }
 
-function rewriteEntry(entry: ServerEntry, command: McpcageCommand, writable: boolean): { entry: ServerEntry; envOnly?: boolean } | { skip: string } {
+function rewriteEntry(entry: ServerEntry, command: McpcageCommand, writable: boolean): { entry: ServerEntry; alreadyCaged?: boolean } | { skip: string } {
   if (serverType(entry) !== "mcpcage") return wrapEntry(entry, { command, writable });
   const found = mcpcageAt(entry as ServerEntry & { command: string }, command);
   if (found === "other program") {
@@ -856,9 +876,13 @@ function rewriteEntry(entry: ServerEntry, command: McpcageCommand, writable: boo
     return "skip" in inner ? inner : wrapEntry(inner.entry, { command, writable });
   }
   if (found === "not found") return { skip: "its mcpcage can no longer be found" };
-  // Nothing to move: the entry as it is, which the check says what to do about.
-  const moved = moveHostEnv(entry);
-  return moved === undefined ? { entry } : "skip" in moved ? moved : { entry: moved.entry, envOnly: true };
+  // The same mcpcage with the same options, without the batch file some clients cannot start.
+  const launched = relaunch(entry, command) ?? entry;
+  const moved = moveHostEnv(launched);
+  if (moved !== undefined && "skip" in moved) return moved;
+  const after = moved?.entry ?? launched;
+  // Nothing to change: the entry as it is, which the check says what to do about.
+  return after === entry ? { entry } : { entry: after, alreadyCaged: true };
 }
 
 /** JSON in the file's own style: its indentation unit, line endings, final newline and byte order mark. */
