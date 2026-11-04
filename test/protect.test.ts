@@ -916,6 +916,128 @@ describe("an entry's env that makes a shell run code", () => {
   });
 });
 
+describe("an entry's env that tells Windows' programs where to look", () => {
+  // On Windows, docker.exe loads its plugins from %ProgramData%\Docker\cli-plugins and
+  // %ProgramFiles%\Docker\cli-plugins: `docker build` is its buildx plugin. An entry whose env set
+  // ProgramData had mcpcage run that entry's docker-buildx.exe on the host, while protect called it
+  // caged. node loads Windows' rsaenh.dll from %SystemRoot%\System32 as it starts, and GODEBUG with
+  // execerrdot=0 makes docker start a credential helper found in the current directory, the project's.
+  const env = {
+    ProgramData: "C:\\never-printed\\data",
+    PROGRAMFILES: "C:\\never-printed\\files",
+    "ProgramFiles(x86)": "C:\\never-printed\\files32",
+    ProgramW6432: "C:\\never-printed\\files64",
+    CommonProgramFiles: "C:\\never-printed\\common",
+    "CommonProgramFiles(x86)": "C:\\never-printed\\common32",
+    CommonProgramW6432: "C:\\never-printed\\common64",
+    ALLUSERSPROFILE: "C:\\never-printed\\all",
+    SystemRoot: "C:\\never-printed\\windows",
+    windir: "C:\\never-printed\\windows",
+    SystemDrive: "Q:",
+    ComSpec: "C:\\never-printed\\cmd.exe",
+    PATHEXT: ".EXE;.JS",
+    API_KEY: "sk-live-0123456789abcdef",
+    APPDATA: "C:\\never-printed\\roaming",
+    LocalAppData: "C:\\never-printed\\local",
+    TEMP: "C:\\never-printed\\temp",
+    TMP: "C:\\never-printed\\tmp",
+    HOMEDRIVE: "Q:",
+    HOMEPATH: "\\never-printed",
+    GODEBUG: "execerrdot=0",
+    // Only spelled alike: variables of the server like any other.
+    MY_PROGRAMDATA: "server-setting",
+    TEMPLATE: "server-setting",
+  };
+  const server = ["API_KEY", "MY_PROGRAMDATA", "TEMPLATE"];
+  const moved = Object.keys(env).filter((name) => !server.includes(name));
+
+  it("moves each of them into the cage as NAME=value on Windows, out of env, and leaves them elsewhere", () => {
+    expect(onWindows(() => wrapEntry({ command: "npx", args: ["-y", "pkg"], env }, { command: "mcpcage" }))).toEqual({
+      entry: {
+        command: "mcpcage",
+        args: ["run", ...Object.entries(env).flatMap(([name, value]) => ["--env", server.includes(name) ? name : `${name}=${value}`]), "--", "npx", "-y", "pkg"],
+        env: Object.fromEntries(server.map((name) => [name, env[name as keyof typeof env]])),
+      },
+    });
+    // An entry caged before mcpcage knew them gets the same move.
+    const caged = { command: "mcpcage", args: ["run", ...Object.keys(env).flatMap((name) => ["--env", name]), "--", "npx", "-y", "pkg"], env };
+    expect(onWindows(() => moveHostEnv(caged))).toEqual({
+      entry: {
+        command: "mcpcage",
+        args: ["run", ...moved.flatMap((name) => ["--env", `${name}=${env[name as keyof typeof env]}`]), ...server.flatMap((name) => ["--env", name]), "--", "npx", "-y", "pkg"],
+        env: Object.fromEntries(server.map((name) => [name, env[name as keyof typeof env]])),
+      },
+    });
+    // On macOS and Linux nothing reads them.
+    if (process.platform !== "win32") expect(moveHostEnv(caged)).toBeUndefined();
+  });
+
+  it("does not count as caged on Windows an entry that sets them, names each once in the report, and --fix moves them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-windows-env-"));
+    const file = join(dir, "mcp.json");
+    const own = idleProgram(join(dir, "bin"), "mcpcage");
+    const args = ["run", ...Object.keys(env).flatMap((name) => ["--env", name]), "--", "npx", "-y", "@acme/notes-mcp"];
+    writeJsonFile(file, { mcpServers: { notes: { command: own, args, env }, plain: { command: own, args: ["run", "--env", "API_KEY", "--", "npx", "-y", "@acme/plain-mcp"], env: { API_KEY: env.API_KEY } } } });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const scan = () => scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, ownCommand: own });
+    const report = await onWindows(scan);
+    const text = renderReport(report, { home: dir });
+    const indent = " ".repeat(16);
+    expect(text).not.toContain("never-printed");
+    expect(text).toMatch(/^ {2}notes .* {2}caged, but its env runs on your machine$/m);
+    const where = "tells docker, npm and node on your machine where to find programs, plugins and settings";
+    expect(text).toContain(
+      moved
+        .map((name) =>
+          name === "SystemRoot"
+            ? `${indent}env SystemRoot: is where Windows keeps its own code, which node loads from there as it starts mcpcage, before the cage starts`
+            : name === "GODEBUG"
+              ? `${indent}env GODEBUG: can make docker on your machine start a program it finds in the current directory, the project's`
+              : `${indent}env ${name}: ${where}`,
+        )
+        .join("\n"),
+    );
+    // Named once, as a variable that acts on the host, not again as one that moves the clients' places.
+    expect(text).not.toContain("differs from yours");
+    expect(text).toMatch(/^ {2}plain .* {2}caged$/m);
+    expect(text).toContain("  1 runs on your machine with your permissions and no cage.");
+
+    const plan: string[] = [];
+    const outcome = onWindows(() => fixConfigs({ report, command: own, claudeCodeRunning: false, dryRun: true, home: dir, log: (line) => plan.push(line) }));
+    expect(plan).toEqual([`  cage notes in ${tilde(file, dir)}`]);
+    expect(outcome.files[0]!.changed[0]!.after).toEqual({
+      command: own,
+      args: ["run", ...moved.flatMap((name) => ["--env", `${name}=${env[name as keyof typeof env]}`]), ...server.flatMap((name) => ["--env", name]), "--", "npx", "-y", "@acme/notes-mcp"],
+      env: Object.fromEntries(server.map((name) => [name, env[name as keyof typeof env]])),
+    });
+    // On macOS and Linux the same entry is caged.
+    if (process.platform !== "win32") expect(renderReport(await scan(), { home: dir })).toMatch(/^ {2}notes .* {2}caged$/m);
+  });
+
+  it.runIf(process.platform === "win32")("is counted on Windows by the installed mcpcage, which --fix moves into the cage, and unwrap gives back", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-windows-places-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    const installed = fakeMcpcage();
+    const fresh = { command: "npx", args: ["-y", "@acme/fresh-mcp"], env: { ProgramData: env.ProgramData, GODEBUG: env.GODEBUG } };
+    writeJsonFile(cursor, { mcpServers: { fresh } });
+    const userEnv = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
+    const fix = mcpcageWithEnv(userEnv, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    expect(`${fix.stdout}${fix.stderr}`).not.toContain("never-printed");
+    expect(fix.code, fix.stderr).toBe(0);
+    const after = JSON.parse(readFileSync(cursor, "utf8")).mcpServers.fresh;
+    expect(after).toEqual({ command: installed.command, args: ["run", "--env", `ProgramData=${env.ProgramData}`, "--env", `GODEBUG=${env.GODEBUG}`, "--", "npx", "-y", "@acme/fresh-mcp"], env: {} });
+    const again = mcpcageWithEnv(userEnv, "protect", "--project", project, "--offline", "--command", installed.command);
+    expect(again.stdout).toMatch(/^ {2}fresh .* {2}caged$/m);
+    expect(again.code).toBe(0);
+    expect(mcpcageWithEnv(userEnv, "unwrap", cursor).code).toBe(0);
+    expect(JSON.parse(readFileSync(cursor, "utf8")).mcpServers.fresh).toEqual(fresh);
+  });
+});
+
 describe("addresses in options", () => {
   it("masks the credentials of an address given as the value of any option or variable, in wrapped entries too", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mcpcage-secrets-"));
@@ -3308,7 +3430,9 @@ describe("an entry's env that moves the client configurations run refuses to mou
     const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path, COPILOT_HOME: copilotHome });
     const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
     const line = (name: string) => `${" ".repeat(16)}env ${name}: differs from yours, so mcpcage run would look for the clients' configurations elsewhere, and its mount check would miss the real place`;
-    const moves = ["moved", "odd", ...(process.platform === "linux" ? ["xdg"] : []), ...(process.platform === "win32" ? ["local"] : [])];
+    const moves = ["moved", "odd", ...(process.platform === "linux" ? ["xdg"] : [])];
+    // On Windows LOCALAPPDATA is one of Windows' places, which acts on the host and --fix moves into the cage.
+    const windows = process.platform === "win32";
 
     const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
     expect(`${scan.stdout}${scan.stderr}`).not.toContain("never-printed");
@@ -3317,8 +3441,8 @@ describe("an entry's env that moves the client configurations run refuses to mou
     expect(scan.stdout).toContain(`${lineOf(scan.stdout, "odd")}\n${line("COPILOT_HOME")}\n  same `);
     expect(lineOf(scan.stdout, "same")).toMatch(/ {2}caged$/);
     if (process.platform !== "linux") expect(lineOf(scan.stdout, "xdg")).toMatch(/ {2}caged$/);
-    if (process.platform !== "win32") expect(lineOf(scan.stdout, "local")).toMatch(/ {2}caged$/);
-    expect(scan.stdout).toContain(`  ${moves.length} run on your machine with your permissions and no cage.`);
+    expect(lineOf(scan.stdout, "local")).toMatch(windows ? / {2}caged, but its env runs on your machine$/ : / {2}caged$/);
+    expect(scan.stdout).toContain(`  ${moves.length + (windows ? 1 : 0)} run on your machine with your permissions and no cage.`);
     expect(scan.code).toBe(1);
 
     const original = readFileSync(cursor);
@@ -3327,7 +3451,11 @@ describe("an entry's env that moves the client configurations run refuses to mou
     expect(fix.stdout).toContain(`\nPlan\n  not changed: moved in ${where}: its env sets COPILOT_HOME to another value than yours: check it, or remove it from its "env" by hand\n`);
     expect(`${fix.stdout}${fix.stderr}`).not.toContain("never-printed");
     expect(fix.code).toBe(1);
-    expect(readFileSync(cursor)).toEqual(original);
+    if (!windows) expect(readFileSync(cursor)).toEqual(original);
+    else {
+      const after = JSON.parse(readFileSync(cursor, "utf8")).mcpServers;
+      expect(after).toEqual({ ...servers, local: { ...servers.local, args: ["run", "--env", `LOCALAPPDATA=${servers.local.env.LOCALAPPDATA}`, "--", "npx", "-y", "@acme/notes-mcp"], env: {} } });
+    }
   });
 });
 

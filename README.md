@@ -157,7 +157,12 @@ build and run the cage; a `unix://` or `npipe://` `DOCKER_HOST` only names the l
 stays), `OPENSSL_*` and `GCONV_PATH` (they can load a library into Node or the C library),
 `BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `ZDOTDIR` and `BASH_FUNC_*` (what starts mcpcage or
 node is often a shell script, such as pnpm's shim or the asdf and nodenv shims, and these make a
-shell run code; `ENV` stays, since shells read it only when interactive) and `npm_config_*`.
+shell run code; `ENV` stays, since shells read it only when interactive) and `npm_config_*`; on
+Windows also Windows' own places, `SystemRoot`, `windir`, `SystemDrive`, `ComSpec`, `PATHEXT`,
+`ProgramData`, `ALLUSERSPROFILE`, `ProgramFiles` and the other program folders, `APPDATA`,
+`LOCALAPPDATA`, `TEMP`, `TMP`, `HOMEDRIVE` and `HOMEPATH` (docker loads its plugins from
+`%ProgramData%` and `%ProgramFiles%`, node loads Windows' own code from `%SystemRoot%`), and
+`GODEBUG` (with `execerrdot=0` docker starts a credential helper it finds in the project's directory).
 `HOME`, `USERPROFILE` and `MCPCAGE_HOME` are dropped: the cage has its
 own `HOME`, and where mcpcage keeps its pins is your choice, not a server's. `PATH` stays, because it
 is often what lets the client find `node`, but it must stay within your own `PATH`: mcpcage runs
@@ -167,9 +172,9 @@ yours (compared as they resolve, without case on macOS and Windows), and each re
 one, and does not count the entry as caged; `wrap` and `--fix` leave such an entry as it is, for
 you to check or remove that `PATH`.
 A `PATH` made of your own directories, such as the `/opt/homebrew/bin:/usr/bin:/bin` of many Claude
-Desktop configurations, is fine. The same goes for `COPILOT_HOME`, `XDG_CONFIG_HOME`, `APPDATA` and,
-on Windows, `LOCALAPPDATA` set to another place than yours: `mcpcage run` looks for the clients'
-configurations, which it refuses to mount, where they say. VS Code also adds the variables of the
+Desktop configurations, is fine. The same goes for `COPILOT_HOME` and `XDG_CONFIG_HOME` set to
+another place than yours: `mcpcage run` looks for the clients' configurations, which it refuses to
+mount, where they say. VS Code also adds the variables of the
 file an entry's `envFile` names to that environment: `protect` reads it as it reads `env` (a regular
 file, up to 1 MiB), names what in it would act on your machine (`envFile NODE_OPTIONS: ...`), and
 does not count the entry as caged when something does, or when the file cannot be read

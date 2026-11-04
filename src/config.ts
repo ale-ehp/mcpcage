@@ -9,6 +9,7 @@ import { cmdNpx, isNpx, npxArgv, parseLaunch } from "./launch.js";
 import { NOT_ON_A_DRIVE, offDrive } from "./sandbox.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
+import { WINDOWS_PLACES } from "./windows-places.js";
 
 /** One MCP server entry, as Claude Desktop, Claude Code, Cursor, VS Code, Copilot, Windsurf and Devin store it. */
 export interface ServerEntry {
@@ -120,7 +121,10 @@ export function envEffects(variables: unknown): EnvEffects {
       })
     : [];
   const path = foreignPath(variables);
-  return { hostEnv, ...(path === undefined ? {} : { foreignPath: path }), movedPlaces: movedPlaces(variables) };
+  // On Windows APPDATA and LOCALAPPDATA act on the host as Windows' places, which wrap moves into
+  // the cage: named once, as such, not again as places that only the user can change.
+  const moved = movedPlaces(variables).filter((name) => !hostEnv.some((variable) => variable.name === name));
+  return { hostEnv, ...(path === undefined ? {} : { foreignPath: path }), movedPlaces: moved };
 }
 
 /** Whether any of them acts on the host. */
@@ -172,9 +176,10 @@ function listOf(names: string[]): string {
  * docker and npm it starts there, before any cage exists. `container` variables were written for the
  * server, which keeps them: they become `--env NAME=value` arguments, whose value reaches the
  * container only, and leave `env`. `drop` variables are not passed at all. Names are compared
- * without case, as Windows compares them.
+ * without case, as Windows compares them. A rule with a `platform` holds there only: nothing reads
+ * its variables elsewhere.
  */
-export const HOST_ENV: ReadonlyArray<{ name: RegExp; to: "container" | "drop"; what: (name: string) => string }> = [
+export const HOST_ENV: ReadonlyArray<{ name: RegExp; to: "container" | "drop"; platform?: NodeJS.Platform; what: (name: string) => string }> = [
   // Node reads them when it starts mcpcage: NODE_OPTIONS can preload a module (--import, --require)
   // that runs on the host before mcpcage has read its first argument, and Node keeps adding more.
   // NODE_ENV is the exception (see hostVariable).
@@ -229,6 +234,24 @@ export const HOST_ENV: ReadonlyArray<{ name: RegExp; to: "container" | "drop"; w
   // mcpcage's store is the user's choice, not a server's: pointed at an empty store, trust on first
   // use approves whatever the server lists, and the audit log lands where `audit` never looks.
   { name: /^MCPCAGE_HOME$/i, to: "drop", what: () => "moves mcpcage's pins and audit log, so approvals start over" },
+  // Windows' own places (see WINDOWS_PLACES), through which docker, npm and node find code and
+  // settings on the host. An entry whose env set ProgramData had mcpcage run that entry's
+  // Docker\cli-plugins\docker-buildx.exe on the host at `docker build`, and protect called it caged.
+  {
+    name: new RegExp(`^(?:${WINDOWS_PLACES.map((place) => place.replace(/[()]/g, "\\$&")).join("|")})$`, "i"),
+    to: "container",
+    platform: "win32",
+    what: (name) =>
+      /^SystemRoot$/i.test(name)
+        ? "is where Windows keeps its own code, which node loads from there as it starts mcpcage, before the cage starts"
+        : "tells docker, npm and node on your machine where to find programs, plugins and settings",
+  },
+  // Go reads it in every Go program, docker, its plugins and its credential helpers among them, and
+  // on Windows its execerrdot=0 makes exec.LookPath take a program found in the current directory,
+  // the project's, before the PATH: with it, `docker pull` started the docker-credential-desktop.exe
+  // a project held. Elsewhere Go looks in the current directory only through a relative directory of
+  // the PATH, and docker's has none (see trustedPlaces in sandbox.ts).
+  { name: /^GODEBUG$/i, to: "container", platform: "win32", what: () => "can make docker on your machine start a program it finds in the current directory, the project's" },
 ];
 
 /** What a variable of an entry's `env` would do on the host once the entry starts mcpcage, or undefined for one meant only for the server. */
@@ -238,7 +261,7 @@ export function hostVariable(name: string, value: unknown): { to: "container" | 
   // Node never reads NODE_ENV: it is the application's own setting, which many servers are given
   // (NODE_ENV=production), so it stays an ordinary variable instead of a false alarm on each of them.
   if (/^NODE_ENV$/i.test(name)) return undefined;
-  const rule = HOST_ENV.find((candidate) => candidate.name.test(name));
+  const rule = HOST_ENV.find((candidate) => (candidate.platform === undefined || candidate.platform === process.platform) && candidate.name.test(name));
   return rule === undefined ? undefined : { to: rule.to, what: rule.what(name) };
 }
 
