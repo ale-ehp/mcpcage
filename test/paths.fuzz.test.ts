@@ -149,7 +149,9 @@ describe("Windows paths in the cage, fuzzed", () => {
           expect(mount.target, spelling).toBe(expected.target);
           expect(cagePath(mount.target)).toBe(cagePath(expected.target));
         }),
+        // Each run asks the disk twice.
         300,
+        5,
       );
       // Off any drive, refused before the disk is asked.
       for (const path of [`\\\\?\\${top}`, `\\\\localhost\\${drive![0]}$\\${rest.join("\\")}`, `//?/${top}`]) expect(() => hostMount(path, true)).toThrow(NOT_ON_A_DRIVE);

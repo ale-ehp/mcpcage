@@ -1,0 +1,44 @@
+name: fuzz
+
+# The property-based tests (test/*.fuzz.test.ts) far longer than npm test runs them, from a new seed
+# each time unless one is given: a failure prints the seed and the smallest failing case, and
+# MCPCAGE_FUZZ_SEED=<seed> runs the same cases again.
+on:
+  schedule:
+    - cron: "41 3 * * 0" # Sundays
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Runs of each property (those that start processes or write files run fewer)
+        default: "20000"
+      seed:
+        description: Seed to run again (empty for a new one)
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows for its paths and for cmd.exe, which only the Windows job can ask (test/cmd.fuzz.test.ts).
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Property-based tests, long
+        # A filter, not a glob: PowerShell on Windows would pass test/*.fuzz.test.ts on as it is.
+        run: npx vitest run .fuzz.test.ts
+        env:
+          MCPCAGE_FUZZ_RUNS: ${{ inputs.runs || '20000' }}
+          MCPCAGE_FUZZ_SEED: ${{ inputs.seed }}

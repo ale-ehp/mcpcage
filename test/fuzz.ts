@@ -8,10 +8,11 @@ import fc from "fast-check";
  * workflow), from the seed given or, without one, from a new seed each time, which the failure prints.
  */
 
-const LONG = process.env.MCPCAGE_FUZZ_RUNS;
+// An empty value is no value: the fuzz workflow passes its inputs as they are.
+const LONG = process.env.MCPCAGE_FUZZ_RUNS || undefined;
 const runs = LONG === undefined ? undefined : Number(LONG);
 if (runs !== undefined && !(Number.isInteger(runs) && runs > 0)) throw new Error(`MCPCAGE_FUZZ_RUNS must be a positive integer, not ${LONG}`);
-const given = process.env.MCPCAGE_FUZZ_SEED;
+const given = process.env.MCPCAGE_FUZZ_SEED || undefined;
 if (given !== undefined && !/^-?\d+$/.test(given)) throw new Error(`MCPCAGE_FUZZ_SEED must be an integer, not ${given}`);
 
 /** The seed of every property in this run: given, fixed for `npm test`, or a new one for a long run. */

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ToolDefinition } from "../src/manifest.js";
 import { describeFindings, describeResultSigns, describeViolationsWithFindings, scanChange, scanResult, scanResultText, scanText, scanTool, type Finding } from "../src/suspicious.js";
 import { UNPRINTABLE } from "../src/terminal.js";
-import { anyText, check, jsonValue, LONG_RUN, TIMEOUT } from "./fuzz.js";
+import { anyText, check, jsonValue, TIMEOUT } from "./fuzz.js";
 
 /*
  * The rules read text a server wrote, built to defeat them: they must never throw, take time in
@@ -61,7 +61,8 @@ describe("the rules, fuzzed", () => {
   it(
     "read any text made of those pieces in time proportional to it, with a bounded number of short printable findings",
     () => {
-      check(fc.property(adversarial, scanInTime), LONG_RUN ? 2000 : 60);
+      // Each run scans up to 120,000 characters twice: a long run takes a tenth of its runs here.
+      check(fc.property(adversarial, scanInTime), 60, 10);
     },
     TIMEOUT,
   );
