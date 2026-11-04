@@ -13,7 +13,7 @@ import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
 import type { SandboxOptions } from "./sandbox.js";
-import { accountHome, sensitivePath, thisMachine } from "./sensitive.js";
+import { accountHome, clientPlaces, sensitivePath, thisMachine } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
 import { terminalSafe } from "./terminal.js";
 
@@ -890,14 +890,23 @@ function broadPaths(args: string[], home: string): string[] {
 /**
  * Plain words for a path that opens the whole disk, the whole home directory or more, or a directory
  * with credentials, as sensitive.ts decides for every mount; undefined for an ordinary one. A home
- * directory written like C:\Users\me means Windows paths. This machine's PATH and the account's own
- * home directory (which counts whatever HOME says) count only for paths of this machine's kind: they
- * are written in that syntax.
+ * directory written like C:\Users\me means Windows paths. This machine's PATH, the account's own
+ * home directory (which counts whatever HOME says) and the client configurations where this
+ * environment puts them count only for paths of this machine's kind: they are written in that
+ * syntax. Without the client places, a configuration under COPILOT_HOME had no access line in the
+ * report, though wrap, run and the inspection refuse to mount it.
  */
 export function broadAccessKind(path: string, home: string): string | undefined {
   const platform = /^[A-Za-z]:/.test(home) ? "win32" : process.platform === "win32" ? "linux" : process.platform;
   const here = platform === process.platform;
-  return sensitivePath(expandHome(path, home), { home, account: here ? accountHome() : undefined, platform, cage: cageHome(), path: here ? process.env.PATH : undefined });
+  return sensitivePath(expandHome(path, home), {
+    home,
+    account: here ? accountHome() : undefined,
+    platform,
+    cage: cageHome(),
+    path: here ? process.env.PATH : undefined,
+    clients: here ? clientPlaces({ platform, home, env: process.env }) : undefined,
+  });
 }
 
 function expandHome(path: string, home: string): string {

@@ -1126,6 +1126,28 @@ describe("a token as the user name of an address", () => {
   });
 });
 
+describe("the report's access lines", () => {
+  it("name a client configuration where the environment moves it, which wrap and the inspection refuse", async () => {
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-relocated-"));
+    const copilot = join(top, "copilot");
+    const file = join(copilot, "mcp-config.json");
+    const config = join(top, "mcp.json");
+    writeJsonFile(config, { mcpServers: { rogue: { command: "npx", args: ["-y", "rogue", file] } } });
+    vi.stubEnv("COPILOT_HOME", copilot);
+    try {
+      const what = `the MCP servers and settings of GitHub Copilot CLI in ${copilot}`;
+      expect(broadAccessKind(file, home)).toBe(what);
+      const location = { client: "cursor" as const, clientName: "Cursor", scope: "project" as const, file: config, key: "mcpServers" as const, jsonc: false, exists: true };
+      const report = await scanConfigs({ locations: [location], home, offline: true, cacheDir: join(top, "cache"), npmRunner: noNpm });
+      expect(report.servers[0]!.broadAccess).toEqual([file]);
+      expect(renderReport(report, { home })).toContain(`\n                access: ${file}: ${what}\n`);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe("install scripts", () => {
   const answer = (stdout: string, status = 0) => vi.fn((_args: string[]) => ({ status, stdout, stderr: "" }));
 
