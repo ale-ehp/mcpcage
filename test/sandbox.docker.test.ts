@@ -1,4 +1,5 @@
 // Runs only with `npm run test:docker`: needs a working Docker daemon and network for the first build.
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -62,6 +63,26 @@ describe.skipIf(!docker.ok)("caged npm server (real Docker)", () => {
     expect(after.builtAt).toBe(before.builtAt);
     expect(after.integrity).toMatch(/^sha512-/);
   }, 120_000);
+
+  // Docker keys its build cache on the Dockerfile's lines and the files copied, which are the same in
+  // every fresh build of a package: the install that any earlier build of it left in the cache came
+  // back, so a new server, and --rebuild, got the version npm resolved then. The layers are compared,
+  // not the image ids, which differ anyway with each server's label.
+  it("resolves the package again for a new server and with --rebuild, not from Docker's build cache", () => {
+    const layers = (id: string) => {
+      const { image } = JSON.parse(readFileSync(join(home, "servers", id, "server.json"), "utf8")) as { image: string };
+      const result = spawnSync("docker", ["image", "inspect", "--format", "{{json .RootFS.Layers}}", image], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      return JSON.parse(result.stdout) as string[];
+    };
+    const fresh = mcpcage(home, "prepare", "--id", "probe-fresh", "--", ...server);
+    expect(fresh.code, fresh.stderr).toBe(0);
+    expect(layers("probe-fresh")).not.toEqual(layers("probe"));
+    const before = layers("probe-fresh");
+    const rebuilt = mcpcage(home, "prepare", "--rebuild", "--id", "probe-fresh", "--", ...server);
+    expect(rebuilt.code, rebuilt.stderr).toBe(0);
+    expect(layers("probe-fresh")).not.toEqual(before);
+  }, 600_000);
 
   it("gives network access only with --allow-net", async () => {
     const report = await probe(["--allow-net"]);

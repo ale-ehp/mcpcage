@@ -647,7 +647,13 @@ function prepareNpmImage(options: SandboxOptions): ServerRecord {
     }
     writeFileSync(join(context, "Dockerfile"), dockerfile(install));
     options.log(`mcpcage: building the sandbox image for ${options.serverId} (install scripts disabled)...`);
-    docker(["build", "--label", `mcpcage.server=${options.serverId}`, "-t", tag, context], true);
+    // A fresh install never comes from Docker's build cache. The cache is keyed on the Dockerfile's
+    // lines and the files copied, which are the same in every fresh build of a package, so the
+    // install an earlier build of it left there came back for a new server and for --rebuild: a new
+    // server-filesystem got 2.1.0 from a build made hours before, with 2.2.0 on npm. The builds from
+    // a pinned lockfile keep the cache: npm ci installs the same tree whatever the cache holds.
+    const cache = reusePinnedTree ? [] : ["--no-cache"];
+    docker(["build", ...cache, "--label", `mcpcage.server=${options.serverId}`, "-t", tag, context], true);
 
     // Keep the exact dependency tree that was installed, so every later build is identical.
     const container = docker(["create", tag]).trim();
