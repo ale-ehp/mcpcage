@@ -167,7 +167,10 @@ repository a `.git` file points to (a worktree, a submodule). The directories th
 them are held in place, so the server cannot move a setting away and put its own where it was: each
 is a mount point of its own, so renaming one fails with `EBUSY`, and moving a file from one held
 directory into another, or between a held directory and the rest of the mount, fails with `EXDEV`,
-as between two filesystems.
+as between two filesystems. On macOS and Windows, where `.GIT` and `.git` name the same file, a
+read-only mount on a file cannot stop the server from writing it under another case of its name, so
+`mcpcage run` refuses a writable mount that holds a setting that is a file (the `.git` file of a
+worktree or a submodule, `.mcp.json`): mount it read-only, or a narrower directory.
 
 ## How it works
 

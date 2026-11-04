@@ -168,9 +168,17 @@ export const SETTINGS_LIMITS = { entries: 100_000, mounts: 1_000 };
  * read-only too when a writable mount holds them, their directories in place as above. A pointer
  * mcpcage cannot read, or one that leads through a symlink the server could change, or to a place
  * the server could fill, refuses the start.
+ *
+ * macOS and Windows compare names without case (`platform`, this system's by default). A read-only
+ * mount covers the one name it is placed on, and the server writes through the writable mount under
+ * any other spelling of it: `.GIT` reached the host's `.git` file, `.MCP.JSON` its `.mcp.json`. A
+ * directory is a mount point under every spelling, but a file setting cannot be kept read-only
+ * there, so a writable mount that holds one refuses the start. Paths are compared as the system
+ * spells them on disk, and without case: a mount spelled `P10` reaches the repository `p10/meta`.
  */
-export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS): Mount[] {
+export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS, platform: NodeJS.Platform = process.platform): Mount[] {
   const isSetting = (name: string) => HOST_SETTINGS.has(name.toLowerCase());
+  const foldsCase = platform === "darwin" || platform === "win32";
   const refuse = (mount: Mount, problem: string, remedy = "Mount a narrower directory") =>
     new Error(`--mount ${mount.source}:rw: ${problem}. ${remedy}, or mount ${mount.source} read-only by dropping :rw.`);
   // Every mount by where it is in the container, compared resolved: docker refuses two mounts at one
@@ -226,6 +234,12 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS):
         // writable mount: in `<dir>/x,source=/home/me/.ssh,target=/k/.git` it would write fields of its own.
         if (path.includes(",")) throw refuse(mount, `${path} cannot be kept read-only, because paths containing commas are not supported`, "Rename it");
         const target = resolve(mount.target, relative(mount.source, path));
+        // Where the server can write next to it (a read-only mount the user gave covers every spelling).
+        if (foldsCase && !entry.isDirectory() && holder(dirname(target))?.readOnly === false) {
+          const other = join(dir, entry.name === entry.name.toUpperCase() ? entry.name.toLowerCase() : entry.name.toUpperCase());
+          const system = platform === "win32" ? "Windows" : "macOS";
+          throw refuse(mount, `${path} is ${entry.isFile() ? "a file" : "not a directory"}, and on ${system} the server could change it as ${other}, the same file under another case of its name, which a read-only mount does not cover`);
+        }
         if (entry.name.toLowerCase() === ".git" && entry.isFile()) gitFiles.set(path, mount);
         if (placed.has(target)) continue;
         add(mount, { source: path, target, readOnly: true });
@@ -236,9 +250,10 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS):
 
   if (gitFiles.size > 0) {
     // Where each writable mount really is, to tell whether a repository found by its path lies inside.
-    const writables = mounts.filter((mount) => !mount.readOnly).map((mount) => ({ mount, real: realpathSync(mount.source) }));
+    // As the system spells them on disk: realpathSync keeps the case a path was written in.
+    const writables = mounts.filter((mount) => !mount.readOnly).map((mount) => ({ mount, real: realpathSync.native(mount.source) }));
     const inContainer = (real: string) =>
-      writables.filter(({ real: root }) => within(real, root)).map(({ mount, real: root }) => ({ mount, inside: relative(root, real), target: resolve(mount.target, relative(root, real)) }));
+      writables.filter(({ real: root }) => within(real, root, foldsCase)).map(({ mount, real: root }) => ({ mount, inside: below(real, root), target: resolve(mount.target, below(real, root)) }));
     /** Whether the server could change what is at `real`: a writable mount reaches it, and nothing read-only is on top. */
     const changeable = (real: string) => inContainer(real).some(({ target }) => holder(target)?.readOnly === false);
     /** Keeps the repository `named` read-only wherever a writable mount reaches it, and says where it really is. */
@@ -281,7 +296,7 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS):
     for (const [file, from] of gitFiles) {
       let base: string;
       try {
-        base = realpathSync(dirname(file));
+        base = realpathSync.native(dirname(file));
       } catch (error) {
         throw refuse(from, `cannot follow ${file} to the repository it names (${(error as NodeJS.ErrnoException).code})`, "Fix or remove it");
       }
@@ -321,9 +336,21 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS):
   return [...mounts, ...added].sort((left, right) => depth(left) - depth(right));
 }
 
-/** Whether `path` is `dir` or lies inside it; both absolute and normalized. */
-function within(path: string, dir: string): boolean {
-  return path === dir || path.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`);
+/**
+ * Whether `path` is `dir` or lies inside it; both absolute and normalized. `foldCase` compares the
+ * names without case, as macOS and Windows do.
+ */
+export function within(path: string, dir: string, foldCase = false): boolean {
+  const [inner, outer] = foldCase ? [path.toLowerCase(), dir.toLowerCase()] : [path, dir];
+  return inner === outer || inner.startsWith(outer.endsWith(sep) ? outer : `${outer}${sep}`);
+}
+
+/**
+ * The names of `path` below `dir`, which within() found it in, as `path` spells them. Counted, not
+ * compared: `relative` compares with case, and from `/x/p10` it makes `/x/P10/meta` `../P10/meta`.
+ */
+function below(path: string, dir: string): string {
+  return path.split(sep).filter(Boolean).slice(dir.split(sep).filter(Boolean).length).join(sep);
 }
 
 /** Longer than any path a .git file or a commondir file holds. */

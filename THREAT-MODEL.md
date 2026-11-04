@@ -80,7 +80,11 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   lead to each of them are held in place, each a mount point of its own, so that none can be moved
   away and replaced: renaming one fails with `EBUSY`, and moving a file from one held directory into
   another, or between a held directory and the rest of the mount, fails with `EXDEV`, as between two
-  filesystems. A server that only needs to read should get a read-only mount.
+  filesystems. On macOS and Windows, which compare names without case, a read-only mount covers only
+  the spelling it is placed on: the server could write `.GIT` or `.MCP.JSON` and change the file
+  underneath, so a writable mount that holds a setting that is a file (a `.git` file, `.mcp.json`)
+  is refused, and paths are compared as spelled on disk and without case. A server that only needs
+  to read should get a read-only mount.
 - **Two cages writing in one directory.** The git and editor settings of a writable mount are
   found at start, then mounted read-only by Docker. Two cages of servers with write access to the
   same directory, running at once, give one of them a moment to swap a setting for a symlink before

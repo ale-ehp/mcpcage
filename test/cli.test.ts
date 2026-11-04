@@ -15,6 +15,8 @@ const HOSTILE = "\u001b[2J\r\u009b\u202e\u200b";
 const SPELLED = "[U+001B][2J\\r[U+009B][U+202E][U+200B]";
 /** HOSTILE as mcpcage prints it inside JSON, which escapes ESC and CR itself. */
 const SPELLED_IN_JSON = "\\u001b[2J\\r[U+009B][U+202E][U+200B]";
+/** macOS and Windows compare names without case, so a writable mount there cannot hold a file setting (see withSettingsReadOnly). */
+const FOLDS_CASE = process.platform === "darwin" || process.platform === "win32";
 
 describe("cli", () => {
   it("prints help and version", () => {
@@ -238,7 +240,7 @@ describe("cli", () => {
     expect(mcpcageWithEnv(env, "run", "--mount", project, ...server).stderr).toContain("Docker is required");
   });
 
-  it("follows a .git file to its repository at every run, and refuses to start when it cannot keep that read-only", () => {
+  it.skipIf(FOLDS_CASE)("follows a .git file to its repository at every run, and refuses to start when it cannot keep that read-only", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
     const project = join(top, "project");
     const file = join(project, "app", ".git");
@@ -256,6 +258,28 @@ describe("cli", () => {
     // Once the repository is there, it is kept read-only and the run goes on.
     mkdirSync(join(project, "meta"));
     expect(mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server).stderr).toContain("Docker is required");
+  });
+
+  it.runIf(FOLDS_CASE)("refuses a writable mount that holds a .git file or .mcp.json on macOS and Windows, and starts with it read-only", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
+    const project = join(top, "project");
+    mkdirSync(join(project, "app"), { recursive: true });
+    writeFileSync(join(project, ".mcp.json"), "{}\n");
+    // No docker on the PATH: a run that got past the settings would stop there.
+    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), { PATH: join(top, "no-docker-here") });
+    const server = ["--", "npx", "-y", "something"];
+    const system = process.platform === "win32" ? "Windows" : "macOS";
+    const refused = mcpcageWithEnv(env, "run", "--mount", `${project}:rw`, ...server);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toBe(
+      `mcpcage: --mount ${project}:rw: ${join(project, ".mcp.json")} is a file, and on ${system} the server could change it as ${join(project, ".MCP.JSON")}, ` +
+        `the same file under another case of its name, which a read-only mount does not cover. Mount a narrower directory, or mount ${project} read-only by dropping :rw.\n`,
+    );
+    expect(mcpcageWithEnv(env, "run", "--mount", project, ...server).stderr).toContain("Docker is required");
+    // Looked for at every run: a .git file that appeared since is refused the same way.
+    expect(mcpcageWithEnv(env, "run", "--mount", `${join(project, "app")}:rw`, ...server).stderr).toContain("Docker is required");
+    writeFileSync(join(project, "app", ".git"), "gitdir: ../meta\n");
+    expect(mcpcageWithEnv(env, "run", "--mount", `${join(project, "app")}:rw`, ...server).stderr).toContain(`${join(project, "app", ".git")} is a file, and on ${system}`);
   });
 
   it("refuses a mount of the account's own ~/.ssh when HOME names another directory", () => {

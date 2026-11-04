@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -11,7 +11,7 @@ import { parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep, type Pin, type ToolDefinition } from "../src/manifest.js";
 import { approvePending, loadPin, pendingCount, savePending, savePin } from "../src/pinstore.js";
-import { dockerfile, parseMount, runArgs, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
+import { dockerfile, parseMount, runArgs, SETTINGS_LIMITS, within, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
 import { describeViolationsWithFindings } from "../src/suspicious.js";
 import { fakeUserEnv, mcpcageWithEnv } from "./helpers.js";
 
@@ -310,10 +310,76 @@ describe("settings in a writable mount", () => {
   const rw = (path: string): Mount => ({ source: path, target: path, readOnly: false });
   const ro = (path: string): Mount => ({ source: path, target: path, readOnly: true });
   const byTarget = (mounts: Mount[]) => [...mounts].sort((left, right) => left.target.localeCompare(right.target));
+  // As on Linux, which compares names with their case, whatever system runs the tests: macOS and
+  // Windows refuse the file settings these projects hold (see the tests of those systems below).
+  const settings = (mounts: Mount[], limits = SETTINGS_LIMITS) => withSettingsReadOnly(mounts, limits, "linux");
+  /** Whether the temporary directory's filesystem compares names without case, as macOS and Windows do by default. */
+  const namesFoldCase = (() => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-case-"));
+    writeFileSync(join(dir, "probe"), "");
+    return existsSync(join(dir, "PROBE"));
+  })();
+
+  describe("on macOS and Windows, which compare names without case", () => {
+    const systems = [
+      ["darwin", "macOS"],
+      ["win32", "Windows"],
+    ] as const;
+
+    it("refuses a writable mount that holds a .git file or .mcp.json, which the server could change under another case of its name", () => {
+      for (const [platform, system] of systems) {
+        const dir = mkdtempSync(join(tmpdir(), "mcpcage-case-"));
+        mkdirSync(join(dir, ".git", "hooks"), { recursive: true });
+        mkdirSync(join(dir, ".vscode"));
+        // Directories only: each is a mount point under every spelling of its name.
+        expect(byTarget(withSettingsReadOnly([rw(dir)], SETTINGS_LIMITS, platform))).toEqual(byTarget([rw(dir), ro(join(dir, ".git")), ro(join(dir, ".vscode"))]));
+        writeFileSync(join(dir, ".mcp.json"), "{}\n");
+        expect(() => withSettingsReadOnly([rw(dir)], SETTINGS_LIMITS, platform)).toThrow(
+          `--mount ${dir}:rw: ${join(dir, ".mcp.json")} is a file, and on ${system} the server could change it as ${join(dir, ".MCP.JSON")}, the same file under another case of its name, ` +
+            `which a read-only mount does not cover. Mount a narrower directory, or mount ${dir} read-only by dropping :rw.`,
+        );
+        // A read-only mount the user put on the file itself does not cover its other spellings either.
+        expect(() => withSettingsReadOnly([rw(dir), ro(join(dir, ".mcp.json"))], SETTINGS_LIMITS, platform)).toThrow(`${join(dir, ".mcp.json")} is a file`);
+        rmSync(join(dir, ".mcp.json"));
+        // A worktree or a submodule, at any depth, its name in capitals.
+        mkdirSync(join(dir, "app"));
+        writeFileSync(join(dir, "app", ".GIT"), "gitdir: ../.git\n");
+        expect(() => withSettingsReadOnly([rw(dir)], SETTINGS_LIMITS, platform)).toThrow(
+          `--mount ${dir}:rw: ${join(dir, "app", ".GIT")} is a file, and on ${system} the server could change it as ${join(dir, "app", ".git")}, the same file under another case of its name`,
+        );
+        // Nothing to refuse where the server cannot write next to it: a read-only mount, the whole of
+        // it or the directory that holds the file, and a writable mount given for the file itself.
+        expect(withSettingsReadOnly([ro(dir)], SETTINGS_LIMITS, platform)).toEqual([ro(dir)]);
+        expect(withSettingsReadOnly([rw(dir), ro(join(dir, "app"))], SETTINGS_LIMITS, platform)).toContainEqual(ro(join(dir, "app", ".GIT")));
+        expect(withSettingsReadOnly([rw(join(dir, "app", ".GIT"))], SETTINGS_LIMITS, platform)).toEqual([rw(join(dir, "app", ".GIT"))]);
+        // Linux compares names with case: another spelling is another file, and the .git file is kept read-only.
+        expect(withSettingsReadOnly([rw(dir)], SETTINGS_LIMITS, "linux")).toContainEqual(ro(join(dir, "app", ".GIT")));
+      }
+    });
+
+    it("compares paths without case", () => {
+      expect(within(join("/x", "P10", "meta"), join("/x", "p10"))).toBe(false);
+      expect(within(join("/x", "P10", "meta"), join("/x", "p10"), true)).toBe(true);
+      expect(within(join("/x", "P10"), join("/x", "p10"), true)).toBe(true);
+      expect(within(join("/x", "p100"), join("/x", "P10"), true)).toBe(false);
+    });
+
+    it.runIf(namesFoldCase)("finds the repository a .git file names by where it is on disk, however the mount spells it", () => {
+      // `git init --separate-git-dir` writes the path as it is on disk; an entry's argument, mounted as
+      // written, may spell it otherwise. Followed as on Linux: on macOS and Windows the .git file refuses first.
+      const dir = mkdtempSync(join(tmpdir(), "mcpcage-case-"));
+      mkdirSync(join(dir, "p10", "app"), { recursive: true });
+      mkdirSync(join(dir, "p10", "meta", "hooks"), { recursive: true });
+      writeFileSync(join(dir, "p10", "meta", "config"), "[core]\n");
+      writeFileSync(join(dir, "p10", "app", ".git"), `gitdir: ${join(realpathSync.native(dir), "p10", "meta")}\n`);
+      const mount = join(dir, "P10");
+      expect(byTarget(settings([rw(mount)]))).toEqual(byTarget([rw(mount), rw(join(mount, "app")), ro(join(mount, "app", ".git")), ro(join(mount, "meta"))]));
+    });
+  });
 
   it("mounts every existing git and editor setting read-only on top of a writable directory, at any depth", () => {
     const dir = project();
-    const mounts = withSettingsReadOnly([rw(dir)]);
+    const mounts = settings([rw(dir)]);
     expect(mounts[0]).toEqual(rw(dir));
     expect(byTarget(mounts.slice(1))).toEqual(
       byTarget([...[".git", ".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"].map((path) => ro(join(dir, path))), ...["app", "sub", "worktree"].map((path) => rw(join(dir, path)))]),
@@ -326,20 +392,20 @@ describe("settings in a writable mount", () => {
     }
     expect(args).toHaveLength(10);
     // However the directory is spelled, each setting is mounted at its own place.
-    expect(byTarget(withSettingsReadOnly([rw(`${dir}/src/..`)]).slice(1))).toEqual(byTarget(mounts.slice(1)));
+    expect(byTarget(settings([rw(`${dir}/src/..`)]).slice(1))).toEqual(byTarget(mounts.slice(1)));
   });
 
   it("adds nothing to a read-only mount, nor on top of or inside a writable mount given for a setting itself", () => {
     const dir = project();
-    expect(withSettingsReadOnly([ro(dir)])).toEqual([ro(dir)]);
+    expect(settings([ro(dir)])).toEqual([ro(dir)]);
     // An explicit choice: `--mount <dir>/.git:rw` leaves that repository writable, and only that.
-    const mounts = withSettingsReadOnly([rw(dir), rw(join(dir, ".git"))]);
+    const mounts = settings([rw(dir), rw(join(dir, ".git"))]);
     expect(mounts.filter((mount) => mount.target === join(dir, ".git"))).toEqual([rw(join(dir, ".git"))]);
     expect(byTarget(mounts.slice(2))).toEqual(
       byTarget([...[".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"].map((path) => ro(join(dir, path))), ...["app", "sub", "worktree"].map((path) => rw(join(dir, path)))]),
     );
     // A directory mounted writable twice, as itself and inside its parent, gets each setting once.
-    const twice = withSettingsReadOnly([rw(dir), rw(join(dir, "sub"))]);
+    const twice = settings([rw(dir), rw(join(dir, "sub"))]);
     expect(twice.filter((mount) => mount.target === join(dir, "sub", ".git"))).toEqual([ro(join(dir, "sub", ".git"))]);
   });
 
@@ -347,23 +413,23 @@ describe("settings in a writable mount", () => {
     const dir = project();
     const elsewhere = mkdtempSync(join(tmpdir(), "mcpcage-elsewhere-"));
     symlinkSync(elsewhere, join(dir, "sub", ".vscode"));
-    expect(() => withSettingsReadOnly([rw(dir)])).toThrow(
+    expect(() => settings([rw(dir)])).toThrow(
       `--mount ${dir}:rw: ${join(dir, "sub", ".vscode")} is a symlink, and mcpcage keeps git's and the editors' settings read-only in a writable mount: ` +
         `a read-only mount would follow the link to wherever it points. Replace the link with what it points to, or mount ${dir} read-only by dropping :rw.`,
     );
     // Read-only, the directory needs nothing on top, so the link does not matter.
-    expect(withSettingsReadOnly([ro(dir)])).toEqual([ro(dir)]);
+    expect(settings([ro(dir)])).toEqual([ro(dir)]);
   });
 
   it("refuses to start when there are too many entries to look through or too many settings to mount", () => {
     const dir = project();
-    expect(() => withSettingsReadOnly([rw(dir)], { entries: 10, mounts: 1_000 })).toThrow(
+    expect(() => settings([rw(dir)], { entries: 10, mounts: 1_000 })).toThrow(
       `--mount ${dir}:rw: more than 10 entries to look through for git's and the editors' settings, which mcpcage keeps read-only in a writable mount. ` +
         `Mount a narrower directory, or mount ${dir} read-only by dropping :rw.`,
     );
     // Six settings, and the three directories that hold the nested ones.
-    expect(() => withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 8 })).toThrow(`--mount ${dir}:rw: more than 8 mounts to keep git's and the editors' settings`);
-    expect(withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 9 })).toHaveLength(10);
+    expect(() => settings([rw(dir)], { entries: 100_000, mounts: 8 })).toThrow(`--mount ${dir}:rw: more than 8 mounts to keep git's and the editors' settings`);
+    expect(settings([rw(dir)], { entries: 100_000, mounts: 9 })).toHaveLength(10);
   });
 
   it.skipIf(process.getuid?.() === 0)("refuses to start when a directory cannot be looked through", () => {
@@ -371,7 +437,7 @@ describe("settings in a writable mount", () => {
     mkdirSync(join(dir, "locked"));
     chmodSync(join(dir, "locked"), 0o000);
     try {
-      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(
+      expect(() => settings([rw(dir)])).toThrow(
         `--mount ${dir}:rw: cannot look inside ${join(dir, "locked")} for git's and the editors' settings (EACCES). Mount a narrower directory, or mount ${dir} read-only by dropping :rw.`,
       );
     } finally {
@@ -382,7 +448,7 @@ describe("settings in a writable mount", () => {
   it("refuses a setting whose path holds a comma, which would add fields to docker's --mount", () => {
     const dir = project();
     mkdirSync(join(dir, "a,source=", "b", ".git"), { recursive: true });
-    expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`${join(dir, "a,source=", "b", ".git")} cannot be kept read-only, because paths containing commas are not supported`);
+    expect(() => settings([rw(dir)])).toThrow(`${join(dir, "a,source=", "b", ".git")} cannot be kept read-only, because paths containing commas are not supported`);
   });
 
   describe("the directories that hold them", () => {
@@ -399,7 +465,7 @@ describe("settings in a writable mount", () => {
 
     it("mounts each directory on the way to a setting onto itself, writable, so that the server cannot move the setting away with it", () => {
       const dir = tree(["a/b/c/.git/config", "a/b/.vscode/settings.json", "a/notes.md"]);
-      const mounts = withSettingsReadOnly([rw(dir)]);
+      const mounts = settings([rw(dir)]);
       expect(byTarget(mounts)).toEqual(byTarget([rw(dir), rw(join(dir, "a")), rw(join(dir, "a/b")), rw(join(dir, "a/b/c")), ro(join(dir, "a/b/.vscode")), ro(join(dir, "a/b/c/.git"))]));
       // Each directory before what is mounted inside it, whatever order docker would put them in.
       expect(at(mounts, join(dir, "a"))).toBeLessThan(at(mounts, join(dir, "a/b")));
@@ -413,7 +479,7 @@ describe("settings in a writable mount", () => {
 
     it("puts a mount the user gave inside such a directory after it", () => {
       const dir = tree(["app/.vscode/settings.json", "app/docs/"]);
-      const mounts = withSettingsReadOnly([rw(dir), ro(join(dir, "app", "docs"))]);
+      const mounts = settings([rw(dir), ro(join(dir, "app", "docs"))]);
       expect(byTarget(mounts)).toEqual(byTarget([rw(dir), rw(join(dir, "app")), ro(join(dir, "app", "docs")), ro(join(dir, "app", ".vscode"))]));
       // Mounted after it, the directory would hide the read-only mount and leave the docs writable.
       expect(at(mounts, join(dir, "app"))).toBeLessThan(at(mounts, join(dir, "app", "docs")));
@@ -421,18 +487,18 @@ describe("settings in a writable mount", () => {
 
     it("adds no writable mount where the user gave one already, nor inside a read-only one", () => {
       const dir = tree(["a/b/.git/config", "c/d/.vscode/settings.json"]);
-      const mounts = withSettingsReadOnly([rw(dir), rw(join(dir, "a")), ro(join(dir, "c"))]);
+      const mounts = settings([rw(dir), rw(join(dir, "a")), ro(join(dir, "c"))]);
       // a is a mount point already. In the read-only c, a rename fails anyway (EROFS), and a writable c/d would open it.
       expect(byTarget(mounts)).toEqual(byTarget([rw(dir), rw(join(dir, "a")), ro(join(dir, "c")), rw(join(dir, "a/b")), ro(join(dir, "a/b/.git")), ro(join(dir, "c/d/.vscode"))]));
     });
 
     it("counts those mounts toward the limit", () => {
       const dir = tree(["a/b/c/.git/config"]);
-      expect(() => withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 3 })).toThrow(
+      expect(() => settings([rw(dir)], { entries: 100_000, mounts: 3 })).toThrow(
         `--mount ${dir}:rw: more than 3 mounts to keep git's and the editors' settings (.git, .vscode, .idea, .cursor, .claude, .devin, .windsurf, .mcp.json) read-only and the directories that hold them in place. ` +
           `Mount a narrower directory, or mount ${dir} read-only by dropping :rw.`,
       );
-      expect(withSettingsReadOnly([rw(dir)], { entries: 100_000, mounts: 4 })).toHaveLength(5);
+      expect(settings([rw(dir)], { entries: 100_000, mounts: 4 })).toHaveLength(5);
     });
   });
 
@@ -460,7 +526,7 @@ describe("settings in a writable mount", () => {
         ...at("repos/main.git", repository),
         "repos/main.git/worktrees/feature/commondir": "../..\n",
       });
-      const mounts = withSettingsReadOnly([rw(dir)]);
+      const mounts = settings([rw(dir)]);
       expect(byTarget(mounts)).toEqual(
         byTarget([
           rw(dir),
@@ -473,7 +539,7 @@ describe("settings in a writable mount", () => {
     it("follows the shared repository a worktree names even when its own lies outside the mount", () => {
       const dir = layout({ "project/feature/.git": "gitdir: <dir>/elsewhere/feature\n", "elsewhere/feature/commondir": "../../project/main.git\n", ...at("project/main.git", repository) });
       const project = join(dir, "project");
-      expect(byTarget(withSettingsReadOnly([rw(project)]))).toEqual(byTarget([rw(project), rw(join(project, "feature")), ro(join(project, "feature/.git")), ro(join(project, "main.git"))]));
+      expect(byTarget(settings([rw(project)]))).toEqual(byTarget([rw(project), rw(join(project, "feature")), ro(join(project, "feature/.git")), ro(join(project, "main.git"))]));
     });
 
     it("finds it by where it really is, through symlinks the server cannot change", () => {
@@ -481,7 +547,7 @@ describe("settings in a writable mount", () => {
       const dir = layout({ "project/app/.git": "gitdir: <dir>/alias/meta\n", ...at("project/meta", repository) });
       symlinkSync(join(dir, "project"), join(dir, "alias"));
       const project = join(dir, "project");
-      expect(byTarget(withSettingsReadOnly([rw(project)]))).toEqual(byTarget([rw(project), rw(join(project, "app")), ro(join(project, "app/.git")), ro(join(project, "meta"))]));
+      expect(byTarget(settings([rw(project)]))).toEqual(byTarget([rw(project), rw(join(project, "app")), ro(join(project, "app/.git")), ro(join(project, "meta"))]));
     });
 
     it("needs nothing for a repository no writable mount reaches, or one the user mounted for itself", () => {
@@ -495,7 +561,7 @@ describe("settings in a writable mount", () => {
         ...at("project/docs.git", repository),
       });
       const project = join(dir, "project");
-      const mounts = withSettingsReadOnly([rw(project), rw(join(project, "main", ".git")), ro(join(project, "docs.git"))]);
+      const mounts = settings([rw(project), rw(join(project, "main", ".git")), ro(join(project, "docs.git"))]);
       // Outside, missing outside, inside a writable .git the user chose, inside a read-only mount: only the .git files and their directories.
       expect(byTarget(mounts)).toEqual(
         byTarget([
@@ -511,18 +577,18 @@ describe("settings in a writable mount", () => {
     it("refuses to start when a .git file cannot be read or does not say where its repository is", () => {
       const dir = layout({ "app/.git": "gitdir:../meta\n", ...at("meta", repository) });
       const file = join(dir, "app", ".git");
-      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(
+      expect(() => settings([rw(dir)])).toThrow(
         `--mount ${dir}:rw: ${file} does not say where a git repository is in the form git writes (gitdir: <path>). Fix or remove it, or mount ${dir} read-only by dropping :rw.`,
       );
       writeFileSync(file, "gitdir: ../meta\nmore\n");
-      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`${file} does not say where a git repository is in the form git writes (gitdir: <path>)`);
+      expect(() => settings([rw(dir)])).toThrow(`${file} does not say where a git repository is in the form git writes (gitdir: <path>)`);
       writeFileSync(file, "gitdir: ../meta\n");
       writeFileSync(join(dir, "meta", "commondir"), "\n");
-      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`${join(dir, "meta", "commondir")} does not say where a git repository is in the form git writes (<path>)`);
+      expect(() => settings([rw(dir)])).toThrow(`${join(dir, "meta", "commondir")} does not say where a git repository is in the form git writes (<path>)`);
       if (process.getuid?.() === 0) return;
       chmodSync(file, 0o000);
       try {
-        expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`--mount ${dir}:rw: cannot read ${file}, which says where a git repository is (EACCES). Fix or remove it, or mount ${dir} read-only by dropping :rw.`);
+        expect(() => settings([rw(dir)])).toThrow(`--mount ${dir}:rw: cannot read ${file}, which says where a git repository is (EACCES). Fix or remove it, or mount ${dir} read-only by dropping :rw.`);
       } finally {
         chmodSync(file, 0o600);
       }
@@ -533,32 +599,32 @@ describe("settings in a writable mount", () => {
       symlinkSync(join(dir, "meta"), join(dir, "meta-link"));
       // Named where it really is, as mcpcage found it.
       const real = realpathSync(dir);
-      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(
+      expect(() => settings([rw(dir)])).toThrow(
         `--mount ${dir}:rw: ${join(dir, "app", ".git")} names ../meta-link, reached through the symlink ${join(real, "meta-link")}, which the server could point elsewhere, ` +
           `and mcpcage keeps the repository a .git file leads to read-only in a writable mount. Replace the link with what it points to, or mount ${dir} read-only by dropping :rw.`,
       );
       // Not only the repository itself: any link on the way that the mount holds.
       writeFileSync(join(dir, "app", ".git"), "gitdir: ../lib-link/../meta\n");
       symlinkSync(join(dir, "lib"), join(dir, "lib-link"));
-      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`reached through the symlink ${join(real, "lib-link")}, which the server could point elsewhere`);
+      expect(() => settings([rw(dir)])).toThrow(`reached through the symlink ${join(real, "lib-link")}, which the server could point elsewhere`);
       // Nor a commondir that is a link: git writes a file there.
       writeFileSync(join(dir, "app", ".git"), "gitdir: ../meta\n");
       symlinkSync(join(dir, "lib", "commondir"), join(dir, "meta", "commondir"));
-      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(`${join(dir, "meta", "commondir")}, which names the repository ${join(dir, "app", ".git")} shares, is not a file`);
+      expect(() => settings([rw(dir)])).toThrow(`${join(dir, "meta", "commondir")}, which names the repository ${join(dir, "app", ".git")} shares, is not a file`);
     });
 
     it("refuses to start when the repository is missing where the server could make one, or is a writable mount itself", () => {
       const dir = layout({ "app/.git": "gitdir: ../meta\n" });
-      expect(() => withSettingsReadOnly([rw(dir)])).toThrow(
+      expect(() => settings([rw(dir)])).toThrow(
         `--mount ${dir}:rw: ${join(dir, "app", ".git")} names ../meta, which does not exist: the server could make it a repository of its own there, ` +
           `and mcpcage keeps the repository a .git file leads to read-only in a writable mount. Point ${join(dir, "app", ".git")} at its repository, or remove it, or mount ${dir} read-only by dropping :rw.`,
       );
       mkdirSync(join(dir, "meta"));
       const meta = join(dir, "meta");
-      expect(() => withSettingsReadOnly([rw(dir), rw(meta)])).toThrow(
+      expect(() => settings([rw(dir), rw(meta)])).toThrow(
         `--mount ${meta}:rw: ${meta} is the git repository that ${join(dir, "app", ".git")} names, and mcpcage keeps the repository a .git file leads to read-only in a writable mount. Mount it read-only by dropping :rw.`,
       );
-      expect(withSettingsReadOnly([rw(dir), ro(meta)])).toHaveLength(4);
+      expect(settings([rw(dir), ro(meta)])).toHaveLength(4);
     });
   });
 });

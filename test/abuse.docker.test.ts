@@ -277,7 +277,9 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
     }
   }, 120_000);
 
-  it("cannot change the repository a .git file leads to, under another name in the same read-write mount", async () => {
+  // On macOS and Windows a read-write mount that holds a .git file is refused before any cage starts:
+  // the server could write it as .GIT (see withSettingsReadOnly, and its tests in units.test.ts).
+  it.skipIf(process.platform === "darwin" || process.platform === "win32")("cannot change the repository a .git file leads to, under another name in the same read-write mount", async () => {
     // As `git init --separate-git-dir` leaves it: app/.git only says where the repository is, and git
     // on the host would run a command written into meta/config.
     const project = mkdtempSync(join(root, "test", "fixtures", "abuse-project-"));
