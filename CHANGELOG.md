@@ -3,41 +3,133 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-11-04
+
+Hardening, second round. Independent reviews tried to break 0.4.0 from both sides: a server
+talking to the proxy or writing in its mounts, and a client configuration entry that nobody meant
+to write. Two more reviews then tried to break the fixes. Every change below closes something one
+of them found.
+
+### Changed
+
+- `wrap` and `protect --fix` mount the paths a server is configured with read-only. Three review
+  rounds each found another way for a server with a writable mount of a project to have the host
+  run code (git hooks and configuration, editor settings, `.env` files a client loads), and no list
+  of names to protect can be complete. `--writable` keeps the previous behavior, with a warning for
+  each writable mount, and `protect` reports a writable mount as an opened cage.
+- On macOS and Windows, a writable mount that holds a file setting (a `.git` file, `.mcp.json`)
+  refuses to start: the server could rewrite it under another case of its name. An entry that
+  0.4.0 caged with such a mount starts again once its `:rw` is dropped.
+- mcpcage runs docker from the standard install places and npm from next to the node running it,
+  each with a PATH of those places only, instead of the PATH a client was given.
+- `protect` exits 1 when it could not check a configuration file, as it does for an uncaged server.
+- The server's stderr reaches the client's log line by line, prefixed with `[<server-id>]`.
+- `wrap` and `protect --fix` move some variables of an entry's `env` into the cage as
+  `--env NAME=value` arguments (see Fixed), so their values show in the process list while the
+  server runs; `unwrap` puts them back in `env`.
+- Many more paths are never mounted (see Fixed): `wrap` and `--fix` may leave uncaged a server that
+  0.4.0 caged, with the reason, and `run` refuses its `--mount` without `--allow-sensitive-mount`.
+- Inside a writable mount, existing git and editor settings are mounted read-only and the
+  directories that lead to them are held in place: a server can no longer rename those directories,
+  and moving a file across them fails (EXDEV).
+- `protect` counts an entry as caged only when it starts the mcpcage on your PATH (or the one that
+  runs the report), and says when an entry's run options, its own `PATH` (any directory that is not
+  on yours), its `envFile`, or a writable mount open the cage. `wrap` and `--fix` check the entry
+  they write with the same rules and leave one that would not count as caged as it is.
+- `mcpcage run` refuses a `--memory` or `--cpus` that is not positive, and a server id with other
+  characters than letters, digits, dots, dashes and underscores.
+- A definition approved by an earlier version with a `"__proto__"` key counts as changed once and
+  needs a fresh approval, and an audit entry an earlier version wrote with such a key no longer
+  verifies.
 
 ### Fixed
 
+The proxy and the pin
+
 - Names that every JavaScript object inherits fooled the pinning: what a definition held under a
-  `"__proto__"` key was left out of its fingerprint, so hidden text added there passed as no
-  change; a `tools/call` for `constructor`, `toString`, `__proto__` or another such name reached the
-  server although no tool of that name was approved; a tool named `__proto__` was never saved and
-  blocked its server at the next start; and a key named `constructor` added to a definition or
-  removed from it crashed the proxy, `mcpcage diff` and `mcpcage approve`. Every key now counts, in
-  fingerprints and in the hashes of the audit log, and a call passes only for a tool approved under
-  its own name. A definition approved by an earlier version with a `"__proto__"` key therefore
-  counts as changed once and needs a fresh approval, and an audit entry that an earlier version
-  wrote with such a key no longer verifies.
-- Trust on first use reached past the first listing: once anything was pinned in a session, every
-  page the client asked for with a cursor was pinned without comparison, so a server that had the
-  client list again, or answered a cursor it never issued, replaced approved definitions and added
-  tools unseen. Only the first listing is trusted now, its first page and the pages asked for with
-  the cursor each page returned, and none of its pages may redefine a tool pinned before. The limit
-  of 10,000 tools, checked on each page alone, now also holds for what is pinned or pending, where
-  pages and listings add up.
-- The signs of hidden instructions missed three places the model reads: the keys of a definition
-  (an argument named like an instruction), anything but a plain URI or JSON pointer under `$schema`,
-  `$id` and `$ref`, and the address, name, title and description of a `resource_link` or an
-  embedded resource in a tool's result. They are now read like any other text, a key counts toward
-  the 20,000 strings of the scan budget, and its path ends with `(key)`.
-- `wrap` and `protect --fix` mounted read-write, and `run --mount` accepted, the places where a
-  writable mount lets a server out of the cage: a caged server given `~/.cursor` read the GitHub
-  token of another server in `mcp.json` and added an uncaged server of its own. Other clients' MCP
-  and agent configurations, shell and login startup files, git's configuration and any
-  repository's `.git`, a project's `.vscode`, `.idea`, `.claude` or `.mcp.json`, more credentials
-  (`~/.config/gh`, `~/.pypirc`, `~/.cargo/credentials`...), the programs on the PATH and where they
-  are installed, and the sockets of Rancher Desktop, Lima, Docker Desktop and rootless Docker or
-  Podman now count like `~/.ssh`: the entry is left as it is with the reason, `run` refuses the
-  mount without `--allow-sensitive-mount`, and `protect` names the path.
+  `"__proto__"` key was left out of its fingerprint, so hidden text added there passed as no change,
+  and a `tools/call` for `constructor`, `toString` or `__proto__` reached the server although no tool
+  of that name was approved. Every key now counts, and a call passes only for a tool approved under
+  its own name.
+- Trust on first use reached past the first listing: a server that had the client list again, or
+  answered a cursor it never issued, replaced approved definitions. Only the first listing is trusted
+  now, its first page and the pages asked for with the cursor each page returned, and none of them
+  may redefine a tool pinned before.
+- The limit of 10,000 tools held for one page only. It now holds for what is pinned and pending
+  together, across pages, listings and approvals.
+- Text a server controls reached the terminal raw: escape sequences in a tool's name could clear or
+  rewrite what `mcpcage diff` shows before approval, and the server's stderr could print lines that
+  read like mcpcage's own. Everything mcpcage prints from a server or a configuration spells out
+  control and format characters as `[U+XXXX]`, long names and keys show a 200-character excerpt
+  with their length, and the new-tool view shows every field the user approves.
+- With a client that does not read mcpcage's stderr, log lines piled up in memory, and one long
+  message went through whole. At most 1 MiB now waits; a message that does not fit is cut with its
+  length or dropped, and the dropped lines are counted.
+- The signs of hidden instructions missed the keys of a definition, anything but a plain URI or
+  JSON pointer under `$schema`, `$id` and `$ref`, and the address, name, title and description of a
+  `resource_link` or an embedded resource in a result.
+
+The cage and its mounts
+
+- `wrap`, `protect --fix` and `run --mount` reached places from which the machine later runs
+  commands: other clients' MCP configurations (also where XDG_CONFIG_HOME, COPILOT_HOME or APPDATA
+  move them), shell and login startup files, git's configuration and any repository's `.git`,
+  project editor and agent settings, the programs on the PATH and where they are installed, and
+  more Docker sockets. They are never mounted now, and the report names them.
+- A writable mount of a project let a caged server change the project's `.git` and editor
+  settings, from which git and editors run commands on the host as soon as the project is open, or
+  rename the directory holding them and write new ones in its place, or change the repository a
+  `.git` file points to. Existing settings are now mounted read-only, the directories leading to
+  them are held in place, and a repository a `.git` file or `commondir` points to is followed and kept
+  read-only; anything that cannot be kept so refuses the start.
+- A server entry's `env` configured mcpcage itself once `wrap` or `--fix` routed it through mcpcage:
+  NODE_OPTIONS or OPENSSL_CONF ran code on the host before the cage existed, DOCKER_HOST sent the cage
+  to another daemon, a HOME pointed elsewhere turned the real `~/.ssh` into an ordinary path, and
+  MCPCAGE_HOME moved the pins to an empty store. `NODE_*` (except `NODE_ENV`), `LD_*`, `DYLD_*`,
+  `DOCKER_*` (except a local-socket `DOCKER_HOST`), `OPENSSL_*`, `GCONV_PATH`, `npm_config_*` and
+  the shell's `BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `ZDOTDIR` and `BASH_FUNC_*` now move into
+  the cage as `--env NAME=value`; HOME, USERPROFILE and MCPCAGE_HOME are dropped; the mount
+  check counts the account's own home whatever HOME says; a relative MCPCAGE_HOME is made absolute.
+- `protect --inspect` read a path argument ending in `:rw` as a mount option, so a directory named
+  `~/.ssh:rw` got the real `~/.ssh` mounted writable, and it mounted sensitive paths for the listing.
+  It now mounts each path argument read-only as written, never one that `wrap` refuses, and names in
+  the report what a server was inspected without.
+- An entry's `PATH` chose the docker mcpcage runs, the credential helpers docker runs and the npm
+  that packs a local package, and a VS Code `envFile` could set any of the variables above unseen.
+  docker and npm now come from trusted places, an entry's `PATH` counts only when it stays within
+  yours, and `protect` reads an `envFile` like `env`.
+- When a package declares several programs, the launcher in the image ran the first one where npx
+  refuses to choose; it now chooses as npx does.
+- `run --id` and the id given to `diff`, `approve`, `audit show` and `audit verify` were used as
+  given, so `../../x` read and wrote outside mcpcage's store.
+
+The report of `mcpcage protect`
+
+- `protect` said "caged" for any command named `mcpcage`, a look-alike or one next to a package.json
+  that claims the name included, for entries whose run options open the cage, and for entries whose
+  own `PATH` makes the client start another `node`. An entry now counts as caged only when its
+  command is the same file as the mcpcage `--fix` writes or the one running the report; a
+  look-alike is caged by `--fix` and by `wrap`; opened cages and a `PATH` that picks other programs
+  are named, one line each, and not counted as caged.
+- One malformed entry or file stopped the whole report: an argument that is not a string, a value
+  nested thousands of levels deep, a FIFO in a configuration's place or an `npm view` answer of an
+  unexpected shape. Each now becomes a line of the report and the scan goes on; a file over 16 MiB
+  is reported without being read.
+- The report printed credentials it promises to keep out: the second value of a repeated query
+  name, a SAS signature or an Azure Functions key, a real key containing `xxx` or `changeme`, an
+  address behind `--url=`, a token used as the user name of an address, and values a server copied
+  into its tools during `--inspect`, whole, cut up, spliced with invisible characters or printed on
+  several lines. All are masked now.
+- `protect` missed VS Code configurations under XDG_CONFIG_HOME on Linux and in named profiles.
+
+`wrap`, `unwrap` and `--inspect`
+
+- `wrap` and `unwrap` wrote the configuration straight over the live file, stopped at one malformed
+  entry, and dropped an env variable named `__proto__`. They now replace the file atomically, leave a
+  malformed entry as it is with the reason, and keep every variable.
+- `protect --inspect` queued without bound the answers and requests for a server that does not
+  read its input, and accepted a listing of any size over its pages. Nothing is added while 16 MiB
+  wait to be sent, and a listing over 16 MiB in total is refused.
 
 ## [0.4.0] - 2026-11-04
 
