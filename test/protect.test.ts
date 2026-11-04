@@ -1333,6 +1333,23 @@ describe("install scripts", () => {
     installScripts("pkg@1", { offline: false, cacheDir, runner }); // online, it is looked up again
     expect(runner).toHaveBeenCalledTimes(2);
   });
+
+  it("starts npm without a shell, so Node has no warning about it in the report (DEP0190)", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-npm-shell-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    writeJsonFile(join(project, ".mcp.json"), { mcpServers: { filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", project] } } });
+    const env = fakeUserEnv(home, cage);
+    // Node prints its warnings unless told not to.
+    delete env.NODE_NO_WARNINGS;
+
+    // Offline, npm is still asked, for its cache.
+    const result = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(result.stdout).toContain("                install scripts: unknown (offline, not in cache)\n");
+    expect(result.stderr).not.toContain("DEP0190");
+  });
 });
 
 describe("mcpcage protect", () => {

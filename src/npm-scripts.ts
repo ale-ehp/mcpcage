@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { sha256 } from "./canonical.js";
 import { isJsonObject } from "./jsonc.js";
 import { readJson, writeJson } from "./pinstore.js";
+import { npmProgram } from "./sandbox.js";
 
 /** Whether installing a package runs code of its own first: the hook that worms like Shai-Hulud use. */
 export interface InstallScripts {
@@ -103,14 +104,20 @@ function readCache(file: string): CachedAnswer | undefined {
   }
 }
 
+/**
+ * Runs the npm that packs a local package (npmProgram), never through a shell: the package spec comes
+ * from a client's configuration, and on Windows npm.cmd starts only through cmd.exe, which reads its
+ * command line for commands and variables. There it is the node running mcpcage with npm's own script.
+ */
 function runNpm(args: string[]): ReturnType<NpmRunner> {
-  const windows = process.platform === "win32";
-  // npm.cmd only starts through a shell on Windows; double quotes keep each argument whole there.
-  if (windows && args.some((arg) => /["%]/.test(arg))) return { status: null, stdout: "", stderr: "this package name cannot be looked up on Windows" };
-  const result = spawnSync(windows ? "npm.cmd" : "npm", windows ? args.map((arg) => `"${arg}"`) : args, {
+  const npm = npmProgram();
+  // Without that script npmProgram gives the bare name, which Windows looks for in the current
+  // directory first, where a project can keep an npm.exe of its own: npm counts as not installed.
+  if (process.platform === "win32" && npm.file !== process.execPath) return { status: null, stdout: "", stderr: "npm is not installed" };
+  const result = spawnSync(npm.file, [...npm.args, ...args], {
     encoding: "utf8",
     timeout: 20_000,
-    shell: windows,
+    env: npm.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (result.error) {

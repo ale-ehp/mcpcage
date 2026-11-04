@@ -642,7 +642,7 @@ export function dockerProgram(): HostProgram {
   return { file: file ?? name, args: [], env: trustedEnv(file === undefined ? [] : [dirname(file)]) };
 }
 
-/** The npm mcpcage runs to pack a local package: the one next to the node running mcpcage, else as docker is found (see trustedPlaces). */
+/** The npm mcpcage runs to pack a local package or look one up: the one next to the node running mcpcage, else as docker is found (see trustedPlaces). */
 export function npmProgram(): HostProgram {
   const here = dirname(process.execPath);
   if (process.platform === "win32") {
