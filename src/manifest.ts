@@ -1,4 +1,5 @@
 import { canonicalJson, sha256 } from "./canonical.js";
+import { printable, terminalSafe } from "./terminal.js";
 
 /** A tool as returned by `tools/list`: name, description, inputSchema, annotations... */
 export interface ToolDefinition {
@@ -144,32 +145,48 @@ export function describeViolations(violations: Violation[]): string {
   return violations.flatMap((violation) => describeViolation(violation)).join("\n");
 }
 
-/** The lines for one violation, so callers can add their own lines under each tool. */
+/**
+ * The lines for one violation, so callers can add their own lines under each tool. Names, keys and
+ * values are the server's text, so each goes through terminalSafe: printed raw, an escape sequence
+ * or a carriage return in them cleared or rewrote the screen the user reads before approving.
+ */
 export function describeViolation(violation: Violation): string[] {
+  const name = terminalSafe(violation.name);
   if (violation.kind === "new-tool") {
-    return [`+ new tool "${violation.name}" was not in the approved manifest`, ...indent(fieldsOf(violation.after))];
+    return [`+ new tool "${name}" was not in the approved manifest`, ...indent(fieldsOf(violation.after))];
   }
   return [
-    `~ tool "${violation.name}" changed since it was approved`,
+    `~ tool "${name}" changed since it was approved`,
     ...jsonChanges(violation.before, violation.after).map((change) => `    ${change}`),
   ];
 }
 
+/** The fields a new tool shows first, in the order a reader expects them; any other follows, sorted. */
+const FIELD_ORDER = ["title", "description", "inputSchema", "outputSchema", "annotations"];
+
+/**
+ * Every field of a new tool that approving it pins: all but `name`, which heads the view, and `_meta`,
+ * which the fingerprint leaves out. Only description and inputSchema were shown before, so a title, an
+ * output schema or annotations were approved unseen.
+ */
 function fieldsOf(tool: ToolDefinition): string[] {
-  const out: string[] = [];
-  if (typeof tool.description === "string") out.push(`description: ${clip(tool.description)}`);
-  if (tool.inputSchema !== undefined) out.push(`inputSchema: ${clip(canonicalJson(tool.inputSchema))}`);
-  return out;
+  const keys = Object.keys(tool).filter((key) => key !== "name" && key !== "_meta");
+  const ordered = [...FIELD_ORDER.filter((key) => keys.includes(key)), ...keys.filter((key) => !FIELD_ORDER.includes(key)).sort()];
+  return ordered.flatMap((key) => {
+    const value = own(tool, key);
+    if (value === undefined) return [];
+    return [`${terminalSafe(key)}: ${clip(typeof value === "string" ? value : canonicalJson(value))}`];
+  });
 }
 
-/** Lists the paths that differ between two JSON values, with before and after values. */
+/** Lists the paths that differ between two JSON values, with before and after values, all as terminalSafe shows them. */
 export function jsonChanges(before: unknown, after: unknown, path = ""): string[] {
   if (canonicalJson(before) === canonicalJson(after)) return [];
   const bothObjects =
     before !== null && after !== null && typeof before === "object" && typeof after === "object" &&
     !Array.isArray(before) && !Array.isArray(after);
   if (!bothObjects) {
-    return [`${path || "(root)"}: ${clip(show(before))} -> ${clip(show(after))}`];
+    return [`${terminalSafe(path || "(root)")}: ${clip(show(before))} -> ${clip(show(after))}`];
   }
   const changes: string[] = [];
   const keys = new Set([...Object.keys(before as object), ...Object.keys(after as object)]);
@@ -188,8 +205,10 @@ function show(value: unknown): string {
   return value === undefined ? "(absent)" : typeof value === "string" ? JSON.stringify(value) : canonicalJson(value);
 }
 
+/** `text` as terminalSafe shows it, clipped after `max` characters, with its full length when clipped. */
 function clip(text: string, max = 400): string {
-  return text.length > max ? `${text.slice(0, max)}... (${text.length} chars)` : text;
+  const { shown, clipped } = printable(text, max);
+  return clipped ? `${shown}... (${text.length} chars)` : shown;
 }
 
 function indent(lines: string[]): string[] {

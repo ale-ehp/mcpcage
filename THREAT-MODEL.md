@@ -85,8 +85,9 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   exists. Shipping entries to an external store is not implemented yet.
 - **The rate of log entries.** Every line dropped, request refused and unsolicited response writes
   one audit entry and one line on stderr, with ids recorded as the server sent them, up to 16 MiB
-  each. A server can grow the audit log and the client's log as fast as it writes; there is no rate
-  limit.
+  each. A server can grow the audit log, and the client's log while the client reads it, as fast as
+  it writes; there is no rate limit. When the client does not read, at most 1 MiB of lines waits in
+  mcpcage's memory: the next ones are dropped and counted, and one line gives the count once it reads.
 - **Ids of another type.** An answer must carry the id of its request with the same type, as
   JSON-RPC requires. A server that answers the request with id `5` using the id `"5"` has its answer
   dropped as unsolicited, and the request goes unanswered.

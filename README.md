@@ -208,7 +208,9 @@ pending entry like that is left out, so its tool needs a fresh approval. A serve
 client and ask for its roots. A request to run the model (`sampling/createMessage`) or to put a
 question to you (`elicitation/create`) is a way in for a prompt injection and a way out for data:
 mcpcage answers it with an error unless you pass `--allow-server-requests`, and does the same with
-any request it does not know. Every drop and refusal is recorded in the audit log.
+any request it does not know. Every drop and refusal is recorded in the audit log. What the server
+writes to its stderr reaches your client's log a line at a time, after its id in brackets
+(`[<server-id>] `) and with control characters spelled out, so it cannot pass for mcpcage's lines.
 
 **Finding exposed servers.** `mcpcage protect` reads the configuration files the clients document
 and never writes outside `~/.mcpcage` unless you pass `--fix`:

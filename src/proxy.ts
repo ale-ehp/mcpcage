@@ -7,9 +7,13 @@ import { LineSplitter, MAX_LINE_BYTES } from "./lines.js";
 import { checkFirstListing, checkTools, isToolList, MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, own, pinTools, tooDeep, type Pin, type ToolDefinition, type Violation } from "./manifest.js";
 import { loadPin, pendingCount, savePending, savePin } from "./pinstore.js";
 import { countFindings, countSuspicious, describeResultSigns, describeViolationsWithFindings, highSeveritySigns, scanResult } from "./suspicious.js";
+import { terminalSafe } from "./terminal.js";
 
 /** JSON-RPC error code mcpcage uses when it refuses a message (implementation-defined range). */
 export const BLOCKED = -32001;
+
+/** The longest line of the server's stderr that mcpcage passes on; a longer one is cut there. */
+export const MAX_STDERR_LINE_BYTES = 64 * 1024;
 
 /**
  * Requests a server may send to the client without --allow-server-requests: a ping, and the list of
@@ -40,6 +44,10 @@ export interface ProxyOptions {
   audit: AuditLog;
   input: Readable;
   output: Writable;
+  /**
+   * Where mcpcage's lines and the server's stderr go, one message at a time. `mcpcage run` passes a
+   * boundedLog of its stderr, so that a client that never reads it cannot make the lines pile up.
+   */
   log: (message: string) => void;
 }
 
@@ -76,7 +84,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
   const fromClient = new Map<Id, { method: string; tool?: string; cursor?: string; listing?: number; started: number }>();
 
   const child = spawn(options.command, options.args, {
-    stdio: ["pipe", "pipe", "inherit"],
+    stdio: ["pipe", "pipe", "pipe"],
     env: options.env ?? process.env,
   });
   audit.write("start", { strict, allowServerRequests, pinned: pin !== undefined, tools: pin ? Object.keys(pin.tools).length : 0 });
@@ -193,7 +201,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     }
     const reason = `${SERVER_REQUESTS_REFUSED.get(method) ?? "the server sent a request that mcpcage does not know"}. Pass --allow-server-requests to allow it.`;
     audit.write("server-request-blocked", { id, method });
-    log(`mcpcage: blocked ${method} from ${serverId}: ${reason}`);
+    log(`mcpcage: blocked ${terminalSafe(method)} from ${serverId}: ${reason}`);
     answerServer(blocked(id, `mcpcage blocked ${method}: ${reason}`));
     return undefined;
   };
@@ -270,7 +278,8 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       // recorded as it is: writing it down would run out of stack.
       const shown = nestedDeeperThan(id, MAX_DEPTH) ? `(nested more than ${MAX_DEPTH} levels deep)` : (id ?? null);
       audit.write("unsolicited-response", { id: shown });
-      log(`mcpcage: dropped a response from the server to a request the client is not waiting for (id ${JSON.stringify(shown)})`);
+      // JSON.stringify escapes U+0000 to U+001F only: C1 controls and bidi characters would pass raw.
+      log(`mcpcage: dropped a response from the server to a request the client is not waiting for (id ${terminalSafe(JSON.stringify(shown))})`);
       return undefined;
     }
     fromClient.delete(id);
@@ -295,7 +304,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     if (tools.length > MAX_TOOLS) return tooMany(id, tools.length);
     const deep = tooDeep(tools);
     if (deep) {
-      return refuseListing(id, `the definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep`, "the server listed a definition nested too deep", {
+      return refuseListing(id, `the definition of "${terminalSafe(deep.name)}" is nested more than ${MAX_DEPTH} levels deep`, "the server listed a definition nested too deep", {
         reason: "too-deep",
         tool: deep.name,
         limit: MAX_DEPTH,
@@ -350,7 +359,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     const messages = values.filter(isJsonRpc);
     if (values.length === 0 || messages.length < values.length) {
       audit.write("stdout-noise", { bytes: line.length });
-      log(`mcpcage: dropped output from the server that is not JSON-RPC: ${line.slice(0, 120)}`);
+      log(`mcpcage: dropped output from the server that is not JSON-RPC: ${terminalSafe(line.slice(0, 120))}`);
     }
     const out = messages.map(fromServer).filter((message) => message !== undefined);
     if (out.length === 0) return;
@@ -374,6 +383,18 @@ export function runProxy(options: ProxyOptions): Promise<number> {
   child.stdout.on("data", (chunk: Buffer) => serverLines.push(chunk));
   child.stdout.on("end", () => serverLines.end());
 
+  // The server's stderr reaches the client's log a line at a time, never byte for byte: inherited, it
+  // let a server print escape sequences into the user's terminal, or lines that read exactly like
+  // mcpcage's own ("mcpcage: approved all tools"). Each line is spelled out, tabs kept, and starts
+  // with the server's id in brackets, as no line of mcpcage's does. The server cannot write over that
+  // start: a carriage return ends a line here, and every other control is spelled out.
+  const relay = (text: string) => log(`[${serverId}] ${text.split("\t").map(terminalSafe).join("\t")}`);
+  const stderrLines = new LineSplitter(MAX_STDERR_LINE_BYTES, relay, (bytes, head) =>
+    relay(`${head.toString("utf8")}... (a line of ${bytes} bytes, cut at ${MAX_STDERR_LINE_BYTES / 1024} KiB)`),
+  );
+  child.stderr.on("data", (chunk: Buffer) => stderrLines.push(chunk));
+  child.stderr.on("end", () => stderrLines.end());
+
   // Once the server is gone, the client interface is closed too. Reading the client's stdin would keep
   // this process alive, and a client that sees neither an answer nor an exit waits for its own timeout
   // and reports that, instead of the server's error printed above.
@@ -386,12 +407,26 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     });
     child.on("exit", (code, signal) => {
       audit.write("stop", { code, signal });
-      if (fromClient.size > 0) {
-        const requests = `${fromClient.size} request${fromClient.size === 1 ? "" : "s"}`;
-        log(`mcpcage: the server exited (${code !== null ? `code ${code}` : `signal ${signal}`}) with ${requests} unanswered; see the lines above`);
-      }
       clientLines.close();
-      resolve(code ?? 1);
+      // The server's last lines on stderr can still be in the pipe when it exits. They are what "the
+      // lines above" points at, so they are passed on first. A process the server left behind can hold
+      // the pipe open: after a second it is closed, or reading it would keep mcpcage alive.
+      const finish = () => {
+        clearTimeout(timer);
+        child.stderr.off("end", finish);
+        if (!child.stderr.readableEnded) {
+          child.stderr.destroy();
+          stderrLines.end();
+        }
+        if (fromClient.size > 0) {
+          const requests = `${fromClient.size} request${fromClient.size === 1 ? "" : "s"}`;
+          log(`mcpcage: the server exited (${code !== null ? `code ${code}` : `signal ${signal}`}) with ${requests} unanswered; see the lines above`);
+        }
+        resolve(code ?? 1);
+      };
+      const timer = setTimeout(finish, 1000);
+      if (child.stderr.readableEnded) finish();
+      else child.stderr.once("end", finish);
     });
   });
 }

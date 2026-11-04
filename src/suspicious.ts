@@ -1,5 +1,6 @@
 import { canonicalJson } from "./canonical.js";
 import { describeViolation, MAX_DEPTH, nestedDeeperThan, type ToolDefinition, type Violation } from "./manifest.js";
+import { printable, UNPRINTABLE } from "./terminal.js";
 
 /*
  * Explains why a tool definition looks dangerous, with fixed rules: no model, no network, no
@@ -557,29 +558,6 @@ function growth(field: string, from: number, to: number): Finding {
 function visibleJson(tool: ToolDefinition): string {
   const { _meta: _ignored, ...visible } = tool;
   return canonicalJson(visible);
-}
-
-// What a terminal shows as nothing, or not at all: controls, format and unassigned characters,
-// line separators and variation selectors.
-const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Cn}\p{Zl}\p{Zp}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]/u;
-
-/** Text as a terminal should show it: invisible characters spelled out, clipped after `max` characters. */
-function printable(text: string, max: number): { shown: string; clipped: boolean } {
-  let shown = "";
-  for (const char of text) {
-    const next = spell(char);
-    if (shown.length + next.length > max) return { shown, clipped: true };
-    shown += next;
-  }
-  return { shown, clipped: false };
-}
-
-function spell(char: string): string {
-  if (char === "\n") return "\\n";
-  if (char === "\r") return "\\r";
-  if (char === "\t") return "\\t";
-  if (!UNPRINTABLE.test(char)) return char;
-  return `[U+${char.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}]`;
 }
 
 /** A fragment as a finding shows it: quoted, printable, with its full length when clipped. */

@@ -358,6 +358,15 @@ describe("server line splitting", () => {
     expect(split([Buffer.from("z".repeat(2000))], 1024)).toEqual(["<2000 bytes dropped>"]);
   });
 
+  it("hands over the first bytes of a line over the limit, for a caller that shows it cut", () => {
+    const heads: string[] = [];
+    const splitter = new LineSplitter(1024, () => {}, (bytes, head) => heads.push(`${head.toString()} (${bytes} bytes)`));
+    // Over the limit at once, and over it across chunks after a start that fits.
+    splitter.push(Buffer.from(`${"a".repeat(1500)}\n${"b".repeat(1000)}`));
+    splitter.push(Buffer.from(`${"c".repeat(1000)}\n`));
+    expect(heads).toEqual([`${"a".repeat(1024)} (1500 bytes)`, `${"b".repeat(1000)}${"c".repeat(24)} (2000 bytes)`]);
+  });
+
   it("keeps its memory bounded while a server streams a line of 1 GiB", () => {
     const chunk = Buffer.alloc(64 * 1024, "a");
     const lines: string[] = [];

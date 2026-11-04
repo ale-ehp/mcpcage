@@ -19,6 +19,7 @@ import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, ty
 import { runProxy } from "./proxy.js";
 import { dockerAvailable, INSTALL_BASE, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
+import { boundedLog, terminalSafe } from "./terminal.js";
 
 // Read from the package's own package.json, one level above dist/, so a release never reports a stale number.
 const VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
@@ -146,14 +147,16 @@ async function prepare(argv: string[]): Promise<number> {
     keepImageUser: values["keep-image-user"], rebuild: values.rebuild, log: (message) => console.error(message),
   });
   const record = prepared.record;
-  console.log(`${serverId}: ${record.packageName ? `${record.packageName}@${record.version} ` : ""}-> ${record.image}`);
+  // The name and version come from the installed package's metadata, which the package author wrote.
+  console.log(terminalSafe(`${serverId}: ${record.packageName ? `${record.packageName}@${record.version} ` : ""}-> ${record.image}`));
   if (record.integrity) console.log(`  integrity ${record.integrity}`);
   return 0;
 }
 
 async function run(argv: string[]): Promise<number> {
   const { values, server, spec, serverId, sensitive } = parseRun(argv);
-  const log = (message: string) => process.stderr.write(`${message}\n`);
+  // Bounded: the client may never read mcpcage's stderr, and the proxy logs what the server makes it log.
+  const log = boundedLog(process.stderr);
   const sessionId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}`;
   const auditLog = new AuditLog(serverId, sessionId);
 
@@ -247,7 +250,7 @@ function buildImages(changes: Array<{ name: string; after: ServerEntry }>): numb
         serverId: serverIdFor(spec), spec, mounts: [], env: [], allowNet: false, memory: "512m", cpus: "1",
         keepImageUser: false, rebuild: false, log: (message) => console.error(message),
       });
-      console.log(`  built ${change.name}: ${prepared.record.packageName}@${prepared.record.version} -> ${prepared.record.image}`);
+      console.log(`  built ${change.name}: ${terminalSafe(`${prepared.record.packageName}@${prepared.record.version}`)} -> ${prepared.record.image}`);
     } catch (error) {
       status = 1;
       console.error(`  could not build ${change.name}: ${(error as Error).message}`);
@@ -408,7 +411,7 @@ function refuseTooDeep(serverId: string, pending: Pending): void {
   const deep = tooDeep(pendingDefinitions(pending));
   if (!deep) return;
   throw new Error(
-    `the pending definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep, so it is neither shown nor approved. ` +
+    `the pending definition of "${terminalSafe(deep.name)}" is nested more than ${MAX_DEPTH} levels deep, so it is neither shown nor approved. ` +
       `Delete ${join(serverDir(serverId), "pending.json")} to discard it.`,
   );
 }
@@ -423,10 +426,13 @@ function list(): number {
     const pin = loadPin(serverId);
     const pending = loadPending(serverId);
     const record = readJson<ServerRecord>(`${serverDir(serverId)}/server.json`);
+    // The package name and version come from the installed package's metadata, which its author wrote.
     const what = record?.packageName ? `${record.packageName}@${record.version}` : record?.image ?? "";
     console.log(
-      `${serverId}  ${what}  tools: ${pin ? Object.keys(pin.tools).length : 0}` +
-        `${pin ? `  approved ${pin.approvedAt}` : "  not approved"}${pending ? "  PENDING CHANGES" : ""}`,
+      terminalSafe(
+        `${serverId}  ${what}  tools: ${pin ? Object.keys(pin.tools).length : 0}` +
+          `${pin ? `  approved ${pin.approvedAt}` : "  not approved"}${pending ? "  PENDING CHANGES" : ""}`,
+      ),
     );
   }
   return 0;
@@ -459,7 +465,9 @@ function audit(argv: string[]): number {
       .slice(-Number(values.lines));
     for (const entry of entries) {
       const { seq: _seq, ts, server: _server, session: _session, event, prev: _prev, hash: _hash, ...data } = entry;
-      console.log(`${ts}  ${event.padEnd(14)} ${JSON.stringify(data)}`);
+      // Entries hold what the server sent (tool names, methods, ids), and JSON.stringify escapes only
+      // U+0000 to U+001F: C1 controls, bidi and other format characters would reach the terminal raw.
+      console.log(terminalSafe(`${ts}  ${event.padEnd(14)} ${JSON.stringify(data)}`));
     }
     return 0;
   }

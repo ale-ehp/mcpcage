@@ -2,8 +2,18 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AuditLog } from "../src/audit.js";
 import { auditDir, checkServerId, serverDir } from "../src/paths.js";
 import { connectFake, fakeUserEnv, freshHome, mcpcage, mcpcageWithEnv, root } from "./helpers.js";
+
+/** A control, C1 or format character, raw: what a terminal acts on or hides instead of showing. */
+const RAW_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/;
+/** An escape sequence that clears the screen, a carriage return, a one-byte CSI, a right-to-left override and a zero-width space. */
+const HOSTILE = "\u001b[2J\r\u009b\u202e\u200b";
+/** HOSTILE as mcpcage prints it on its own. */
+const SPELLED = "[U+001B][2J\\r[U+009B][U+202E][U+200B]";
+/** HOSTILE as mcpcage prints it inside JSON, which escapes ESC and CR itself. */
+const SPELLED_IN_JSON = "\\u001b[2J\\r[U+009B][U+202E][U+200B]";
 
 describe("cli", () => {
   it("prints help and version", () => {
@@ -45,6 +55,74 @@ describe("cli", () => {
       expect(result.stderr).toContain('mcpcage: the pending definition of "nested" is nested more than 256 levels deep, so it is neither shown nor approved.');
     }
     expect(existsSync(join(dir, "pin.json"))).toBe(false);
+  });
+
+  it("spells out control and format characters in diff and approve, and shows every field of a new tool", () => {
+    const home = freshHome();
+    const before = { name: `evil${HOSTILE}`, title: "Evil", description: "Reads a file.", inputSchema: { type: "object", properties: { path: { type: "string" } } } };
+    const after = {
+      ...before,
+      title: `Evil${HOSTILE}`,
+      description: `Reads a file.${HOSTILE}HIDDEN`,
+      inputSchema: { type: "object", properties: { path: { type: "string" }, [`key${HOSTILE}`]: { type: `value${HOSTILE}` } } },
+    };
+    const added = { ...after, name: `new${HOSTILE}`, outputSchema: { type: "object" }, annotations: { readOnlyHint: true }, _meta: { note: "never pinned" } };
+    const dir = join(home, "servers", "evil");
+    mkdirSync(dir, { recursive: true });
+    const violations = [
+      { kind: "changed-tool", name: before.name, before, after },
+      { kind: "new-tool", name: added.name, after: added },
+    ];
+    writeFileSync(join(dir, "pending.json"), JSON.stringify({ serverId: "evil", seenAt: "2026-11-04T00:00:00.000Z", tools: [after, added], violations }));
+
+    const diff = mcpcage(home, "diff", "evil");
+    const approve = mcpcage(home, "approve", "evil", "--yes");
+    expect(approve.code).toBe(0);
+    for (const output of [diff.stdout, approve.stdout]) {
+      expect(output).not.toMatch(RAW_CONTROL);
+      const lines = output.split("\n");
+      expect(lines).toEqual(
+        expect.arrayContaining([
+          `~ tool "evil${SPELLED}" changed since it was approved`,
+          `    description: "Reads a file." -> "Reads a file.${SPELLED_IN_JSON}HIDDEN"`,
+          `    inputSchema.properties.key${SPELLED}: (absent) -> {"type":"value${SPELLED_IN_JSON}"}`,
+          `    title: "Evil" -> "Evil${SPELLED_IN_JSON}"`,
+          `+ new tool "new${SPELLED}" was not in the approved manifest`,
+          `    title: Evil${SPELLED}`,
+          `    description: Reads a file.${SPELLED}HIDDEN`,
+          `    inputSchema: {"properties":{"key${SPELLED_IN_JSON}":{"type":"value${SPELLED_IN_JSON}"},"path":{"type":"string"}},"type":"object"}`,
+          '    outputSchema: {"type":"object"}',
+          '    annotations: {"readOnlyHint":true}',
+        ]),
+      );
+      // The new tool shows its fields in that order, and nothing of _meta, which is not pinned.
+      const added = lines.indexOf(`+ new tool "new${SPELLED}" was not in the approved manifest`);
+      expect(lines.slice(added + 1, added + 6).map((line) => line.trim().split(":")[0])).toEqual(["title", "description", "inputSchema", "outputSchema", "annotations"]);
+      expect(output).not.toContain("never pinned");
+    }
+  });
+
+  it("spells out control and format characters in audit entries and package names", () => {
+    const home = freshHome();
+    vi.stubEnv("MCPCAGE_HOME", home);
+    try {
+      const audit = new AuditLog("evil", "session");
+      audit.write("unsolicited-response", { id: "forged\u009b2J\u202e" });
+      audit.write("server-request-blocked", { id: "hostile-1", method: "evil\u001b[2K\u2066\u200b" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    const dir = join(home, "servers", "evil");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "server.json"), JSON.stringify({ packageName: `evil${HOSTILE}pkg`, version: "1.0.0\u009b", image: "mcpcage/evil" }));
+
+    const shown = mcpcage(home, "audit", "show", "evil").stdout;
+    expect(shown).not.toMatch(RAW_CONTROL);
+    expect(shown).toMatch(/unsolicited-response +\{"id":"forged\[U\+009B\]2J\[U\+202E\]"\}/);
+    expect(shown).toContain('"method":"evil\\u001b[2K[U+2066][U+200B]"');
+    const listed = mcpcage(home, "list").stdout;
+    expect(listed).not.toMatch(RAW_CONTROL);
+    expect(listed).toContain(`evil  evil${SPELLED}pkg@1.0.0[U+009B]  tools: 0  not approved`);
   });
 
   it("shows the audit trail without arguments or results", async () => {

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { join } from "node:path";
 import { MAX_DEPTH, nestedDeeperThan, own, pinTools, tooDeep, type Pin, type ToolDefinition, type Violation } from "./manifest.js";
 import { cageHome, serverDir } from "./paths.js";
+import { terminalSafe } from "./terminal.js";
 
 /** A manifest that was seen but not approved yet, waiting for `mcpcage approve`. */
 export interface Pending {
@@ -22,7 +23,8 @@ export function loadPin(serverId: string, warn: (message: string) => void = (mes
   const deep = Object.keys(pin.tools).filter((name) => nestedDeeperThan(own(pin.tools, name)?.definition, MAX_DEPTH));
   if (deep.length === 0) return pin;
   for (const name of deep) delete pin.tools[name];
-  const names = deep.map((name) => JSON.stringify(name)).join(", ");
+  // A tool name is the server's text, and JSON.stringify escapes only U+0000 to U+001F of what a terminal acts on.
+  const names = deep.map((name) => terminalSafe(JSON.stringify(name))).join(", ");
   warn(
     deep.length === 1
       ? `mcpcage: left out the approved tool ${names} of ${serverId}: its definition is nested more than ${MAX_DEPTH} levels deep, so it counts as new and needs a fresh approval`

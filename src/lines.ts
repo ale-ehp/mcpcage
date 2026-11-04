@@ -14,7 +14,7 @@ export const MAX_LINE_BYTES = 16 * 1024 * 1024;
  * an ending still counts. Unlike readline it never holds more than `maxBytes` of a line: once a line
  * is longer, the rest of it is counted and thrown away as it streams in, so a server that writes
  * gigabytes without a newline cannot exhaust mcpcage's memory. `oversize` gets the full size of such
- * a line when it ends.
+ * a line when it ends, and its first `maxBytes` bytes, for a caller that shows the line cut.
  */
 export class LineSplitter {
   /** The start of the current line, when it began in an earlier chunk. */
@@ -27,7 +27,7 @@ export class LineSplitter {
   constructor(
     private readonly maxBytes: number,
     private readonly onLine: (line: string) => void,
-    private readonly onOversize: (bytes: number) => void,
+    private readonly onOversize: (bytes: number, head: Buffer) => void,
   ) {}
 
   push(chunk: Buffer): void {
@@ -66,25 +66,25 @@ export class LineSplitter {
 
   private add(chunk: Buffer, from: number, to: number): void {
     if (to <= from) return;
-    const kept = this.bytes;
+    // Only the first maxBytes are kept; past them a line is only counted.
+    const kept = Math.min(this.bytes, this.maxBytes);
     this.bytes += to - from;
-    if (this.bytes > this.maxBytes) {
-      this.held = NOTHING;
-      return;
-    }
-    if (this.bytes > this.held.length) {
-      const grown = Buffer.allocUnsafe(Math.min(this.maxBytes, Math.max(this.bytes, this.held.length * 2, 64 * 1024)));
+    const end = Math.min(to, from + this.maxBytes - kept);
+    if (end <= from) return;
+    const needed = kept + end - from;
+    if (needed > this.held.length) {
+      const grown = Buffer.allocUnsafe(Math.min(this.maxBytes, Math.max(needed, this.held.length * 2, 64 * 1024)));
       this.held.copy(grown, 0, 0, kept);
       this.held = grown;
     }
-    chunk.copy(this.held, kept, from, to);
+    chunk.copy(this.held, kept, from, end);
   }
 
   private finish(): void {
     const { bytes, held } = this;
     this.bytes = 0;
     this.held = NOTHING;
-    if (bytes > this.maxBytes) this.onOversize(bytes);
+    if (bytes > this.maxBytes) this.onOversize(bytes, held.subarray(0, this.maxBytes));
     else this.onLine(held.toString("utf8", 0, bytes));
   }
 }

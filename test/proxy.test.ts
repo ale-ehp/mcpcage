@@ -27,6 +27,22 @@ function auditEvents(home: string, server = "notes"): string[] {
   return auditEntries(home, server).map((entry) => entry.event);
 }
 
+/**
+ * The lines the server wrote to its stderr that start with `start`, without the start: mcpcage passes
+ * each one on after the server id in brackets.
+ */
+function serverLines(session: { stderr: () => string }, server: string, start: string): string[] {
+  const prefix = `[${server}] ${start}`;
+  return session
+    .stderr()
+    .split("\n")
+    .filter((line) => line.startsWith(prefix))
+    .map((line) => line.slice(prefix.length));
+}
+
+/** A control, C1 or format character, raw: what a terminal acts on or hides instead of showing. */
+const RAW_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/;
+
 /** The block message is one stderr write that ends with this line; wait for it before reading stderr. */
 async function blockLogged(session: { stderr: () => string }) {
   await vi.waitFor(() => expect(session.stderr()).toContain("`mcpcage approve notes`"));
@@ -167,12 +183,7 @@ describe("rug-pull protection", () => {
  */
 describe("names that every object inherits", () => {
   /** The tools the hostile server was called with, in the order the calls reached it. */
-  const calledAtServer = (session: { stderr: () => string }) =>
-    session
-      .stderr()
-      .split("\n")
-      .filter((line) => line.startsWith("hostile-server called "))
-      .map((line) => line.slice("hostile-server called ".length));
+  const calledAtServer = (session: { stderr: () => string }) => serverLines(session, "hostile", "hostile-server called ");
 
   /** The block message is one stderr write that ends with this line; wait for it before reading stderr. */
   const blockLoggedFor = (session: { stderr: () => string }) =>
@@ -490,7 +501,11 @@ function rawClient(home: string, run: string[], env: Record<string, string>, rea
   });
   // mcpcage may exit while the test is still writing to it; that write fails, and that is all.
   proxy.stdin.on("error", () => {});
-  const exited = new Promise<number | null>((resolve) => proxy.once("exit", (code) => resolve(code)));
+  // Once mcpcage exits and its stderr is read to the end (or closed): the server's last lines come through it.
+  const exited = Promise.all([
+    new Promise<number | null>((resolve) => proxy.once("exit", (code) => resolve(code))),
+    new Promise((resolve) => proxy.stderr.once("close", resolve)),
+  ]).then(([code]) => code);
   // Complete lines only: the last piece may be a line that is still arriving.
   const lines = () => stdout.split("\n").slice(0, -1).filter(Boolean);
   const received = () => lines().map((line) => JSON.parse(line) as { id?: unknown });
@@ -501,6 +516,8 @@ function rawClient(home: string, run: string[], env: Record<string, string>, rea
     unread: () => proxy.stdout.readableLength,
     /** The client goes away: its end of mcpcage's stdout is closed. */
     closeOutput: () => proxy.stdout.destroy(),
+    /** The client stops taking mcpcage's log lines: its end of mcpcage's stderr is closed. */
+    closeLog: () => proxy.stderr.destroy(),
     /** The exit code of mcpcage. */
     exited,
     /** Waits for the answer to the request with this id. */
@@ -562,6 +579,40 @@ describe("stdout hygiene", () => {
     const unsolicited = auditEntries(home, "hostile").filter((entry) => entry.event === "unsolicited-response");
     expect(unsolicited.map((entry) => entry.id)).toEqual([999, 2]);
     expect(session.stderr()).toContain("mcpcage: dropped a response from the server to a request the client is not waiting for (id 999)");
+  });
+});
+
+describe("what reaches the user's terminal", () => {
+  it("passes the server's stderr on spelled out and marked as the server's, and spells out the server's text in mcpcage's lines", async () => {
+    const home = freshHome();
+    // The server writes to stderr as it starts; on tools/list, it writes a line that is not JSON-RPC,
+    // sends a request and answers a request never made, all of them with escape sequences, C1 controls
+    // or bidi characters. Before, all of it reached the client's log or terminal raw.
+    const session = await connectHostile(home, "terminal");
+    expect((await session.client.listTools()).tools.map((tool) => tool.name)).toEqual(["echo"]);
+    const expected = [
+      "[hostile] mcpcage: approved all tools[U+001B][2K",
+      "[hostile] column one\tcolumn two",
+      "[hostile] progress 10%",
+      "[hostile] progress 100%",
+      `[hostile] ${"y".repeat(64 * 1024)}... (a line of ${70 * 1024} bytes, cut at 64 KiB)`,
+      "mcpcage: dropped output from the server that is not JSON-RPC: [U+001B][2J[U+001B][Hnot JSON-RPC[U+009B]31m",
+      "mcpcage: blocked evil[U+009B]2J/[U+202E]create from hostile: the server sent a request that mcpcage does not know. Pass --allow-server-requests to allow it.",
+      'mcpcage: dropped a response from the server to a request the client is not waiting for (id "forged[U+009B][U+202E]")',
+    ];
+    await vi.waitFor(() => expect(session.stderr().split("\n")).toEqual(expect.arrayContaining(expected)), { timeout: 10_000 });
+    await session.close();
+
+    const stderr = session.stderr();
+    expect(stderr).not.toMatch(RAW_CONTROL);
+    // Every line is mcpcage's own or carries the server's id, and none of the server's passes for one of mcpcage's.
+    const lines = stderr.split("\n").filter(Boolean);
+    for (const line of lines) expect(line).toMatch(/^(?:mcpcage: |\[hostile\] )/);
+    expect(lines.filter((line) => line.startsWith("mcpcage:")).join("\n")).not.toContain("approved all tools");
+    // The audit log records all of it as the server sent it.
+    const entries = auditEntries(home, "hostile");
+    expect(entries).toContainEqual(expect.objectContaining({ event: "server-request-blocked", method: "evil\u009b2J/\u202ecreate" }));
+    expect(entries).toContainEqual(expect.objectContaining({ event: "unsolicited-response", id: "forged\u009b\u202e" }));
   });
 });
 
@@ -699,13 +750,12 @@ describe("listings with too many tools", () => {
 describe("requests from the server", () => {
   /** The answer the hostile server got to its request, which it prints on stderr. */
   async function answerToServer(session: { stderr: () => string }) {
-    const prefix = "hostile-server got ";
     let line: string | undefined;
     await vi.waitFor(() => {
-      line = session.stderr().split("\n").find((entry) => entry.startsWith(prefix));
+      line = serverLines(session, "hostile", "hostile-server got ")[0];
       expect(line).toBeDefined();
     }, { timeout: 10_000 });
-    return JSON.parse(line!.slice(prefix.length)) as Record<string, unknown>;
+    return JSON.parse(line!) as Record<string, unknown>;
   }
 
   it.each([
@@ -800,13 +850,7 @@ describe("tool results", () => {
       'mcpcage: the result of "list_notes" carries 3 high-severity signs of hidden instructions (hidden-tag: "<IMPORTANT>", ' +
       'override-instruction: "Ignore previous instructions", sensitive-path: "~/.ssh/id_rsa"). Run `mcpcage audit show notes` for the record.';
     /** The line the server wrote for this id, as it printed it on stderr. */
-    const sent = (id: number) =>
-      session
-        .stderr()
-        .split("\n")
-        .filter((line) => line.startsWith("fake-server sent "))
-        .map((line) => line.slice("fake-server sent ".length))
-        .find((line) => (JSON.parse(line) as { id?: unknown }).id === id);
+    const sent = (id: number) => serverLines(session, "notes", "fake-server sent ").find((line) => (JSON.parse(line) as { id?: unknown }).id === id);
     await vi.waitFor(() => {
       expect(session.stderr()).toContain(warning);
       expect(sent(4)).toBeDefined();
@@ -928,6 +972,24 @@ describe("client failure", () => {
     await vi.waitFor(() => expect(() => process.kill(server, 0)).toThrow(), { timeout: 10_000 });
     expect(Date.now() - closed).toBeLessThan(10_000);
     expect(auditEntries(home, "hostile").at(-1)).toMatchObject({ event: "stop", signal: "SIGTERM" });
+  });
+
+  it("keeps serving when the client closes the pipe of its log lines while the server writes to its stderr", async () => {
+    const home = freshHome();
+    // Every line the server writes to its stderr now goes through mcpcage's, where writing fails with EPIPE.
+    const session = rawSession(home, "terminal");
+    session.closeLog();
+    session.send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "raw", version: "0" } } });
+    await session.answer(1);
+    session.send({ method: "notifications/initialized" });
+    session.send({ id: 2, method: "tools/list" });
+    await session.answer(2);
+    session.send({ id: 3, method: "ping" });
+    await session.answer(3);
+    await session.close();
+    expect(await session.exited).toBe(0);
+    expect(session.received().map((message) => message.id)).toEqual([1, 2, 3]);
+    expect(auditEntries(home, "hostile").at(-1)).toMatchObject({ event: "stop", code: 0 });
   });
 
   it("exits with the server's code when the client is gone and the server ends on its own", async () => {
