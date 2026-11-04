@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { isJsonObject, parseJsonc } from "./jsonc.js";
 
@@ -159,13 +159,21 @@ export const MAX_CONFIG_BYTES = 16 * 1024 * 1024;
 /**
  * The bytes of a configuration file, its size looked at before anything is read: a file over
  * MAX_CONFIG_BYTES is refused unread, and one that grows past it while it is read is refused too.
+ * Only a regular file is read, or a symlink to one. A FIFO at a configuration's place made the open
+ * wait for a writer that never came, and `protect` printed nothing at all; a device or a socket is
+ * no configuration either. The type is looked at before the file is opened, and again on what was
+ * opened, without waiting where the system allows it, in case the file was replaced in between.
  */
 export function readConfigFile(file: string): Buffer {
-  const fd = openSync(file, "r");
+  const notRegular = () => new Error("not a regular file");
+  if (!statSync(file).isFile()) throw notRegular();
+  const fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
     const tooLarge = (size: number) =>
       new Error(`too large to read (${(size / 1024 / 1024).toFixed(1)} MiB; mcpcage reads configuration files up to ${MAX_CONFIG_BYTES / 1024 / 1024} MiB)`);
-    const size = fstatSync(fd).size;
+    const info = fstatSync(fd);
+    if (!info.isFile()) throw notRegular();
+    const size = info.size;
     if (size > MAX_CONFIG_BYTES) throw tooLarge(size);
     const chunks: Buffer[] = [];
     const chunk = Buffer.alloc(64 * 1024);

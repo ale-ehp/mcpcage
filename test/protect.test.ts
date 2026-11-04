@@ -1578,6 +1578,46 @@ describe("a malformed entry or file", () => {
   });
 });
 
+describe("a configuration that is not a regular file", () => {
+  // Opening a FIFO waits for a writer: on a machine with one at ~/.cursor/mcp.json, protect printed nothing, ever.
+  it.skipIf(process.platform === "win32")("says so for a FIFO, a symlink to one and a directory, reads a symlink to a regular file, and goes on", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-special-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const at = locationsFor(home, project);
+    const fifo = (file: string) => {
+      mkdirSync(dirname(file), { recursive: true });
+      const made = spawnSync("mkfifo", [file], { encoding: "utf8" });
+      expect(made.status, made.stderr).toBe(0);
+    };
+    const link = (file: string, target: string) => {
+      mkdirSync(dirname(file), { recursive: true });
+      symlinkSync(target, file);
+    };
+    // ~/.claude.json is read during discovery too, before the scan.
+    fifo(at("claude-code", "user"));
+    fifo(at("cursor", "user"));
+    fifo(join(top, "pipe"));
+    link(at("copilot", "user"), join(top, "pipe"));
+    mkdirSync(at("claude-desktop", "user"), { recursive: true });
+    writeJsonFile(join(top, "windsurf.json"), { mcpServers: { linked: { command: "npx", args: ["-y", "@acme/linked-mcp"] } } });
+    link(at("windsurf", "user"), join(top, "windsurf.json"));
+    writeJsonFile(at("devin", "user"), { mcpServers: { "devin-tool": { command: "npx", args: ["-y", "@acme/devin-tool"] } } });
+
+    // A timeout, so that a blocked read fails the test instead of hanging it.
+    const result = spawnSync(process.execPath, [cli, "protect", "--project", project, "--offline"], { encoding: "utf8", env: fakeUserEnv(home, cage), timeout: 20_000 });
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).toBe("");
+    const refused = [["claude-desktop", "Claude Desktop"], ["claude-code", "Claude Code"], ["cursor", "Cursor"], ["copilot", "GitHub Copilot CLI"]] as const;
+    for (const [client, name] of refused) expect(result.stdout).toContain(`${name}  ${tilde(at(client, "user"), home)}\n  could not read this file: not a regular file\n`);
+    expect(result.stdout).toContain(`Windsurf  ${tilde(at("windsurf", "user"), home)}\n  linked `);
+    expect(result.stdout).toContain(`Devin  ${tilde(at("devin", "user"), home)}\n  devin-tool `);
+    expect(result.status).toBe(1); // the two npx servers are not caged
+  });
+});
+
 describe("backups", () => {
   it("--fix never replaces an earlier backup: it takes the next free name", async () => {
     // The clock stands still, so the name with the time is taken too, and a random suffix is added.
