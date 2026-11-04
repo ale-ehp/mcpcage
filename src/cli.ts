@@ -1,10 +1,9 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
@@ -18,6 +17,7 @@ import { cageHome, checkServerId, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, refuseTooMany, type Pending } from "./pinstore.js";
 import { envFileNote, fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, uncheckedFiles, writableMounts, writableWarning, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
+import { claudeCodeIsRunning } from "./running.js";
 import { dockerAvailable, INSTALL_BASE, npxProgram, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
 import { boundedLog, terminalSafe } from "./terminal.js";
@@ -373,14 +373,6 @@ const inspectInCage: Inspector = async (launch) => {
  */
 function installedCommand(): string {
   return commandOnPath("mcpcage") ?? "mcpcage";
-}
-
-/** Claude Code rewrites ~/.claude.json while it runs, so a change made meanwhile could be lost or lose its state. */
-function claudeCodeIsRunning(): boolean {
-  if (process.env.CLAUDECODE !== undefined) return true;
-  if (process.platform !== "darwin" && process.platform !== "linux") return false;
-  const listed = spawnSync("ps", ["-axo", "comm="], { encoding: "utf8" });
-  return listed.status === 0 && listed.stdout.split("\n").some((line) => basename(line.trim()) === "claude");
 }
 
 /**
