@@ -693,6 +693,44 @@ describe("credentials in the report", () => {
   });
 });
 
+describe("signatures and keys in query strings", () => {
+  it("masks an Azure SAS signature, an Azure Functions key and presigned signatures, and leaves decode and encoding alone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-secrets-"));
+    const file = join(dir, "mcp.json");
+    writeJsonFile(file, {
+      mcpServers: {
+        sas: { type: "http", url: "https://acct.blob.core.windows.net/c?sv=2022-11-02&sp=r&sig=Q2w8abcdEFGH1234ijklMNOP%3D" },
+        functions: { type: "http", url: "https://contoso-fn.azurewebsites.net/api/mcp?code=Zx9vAbCdEfGh1234567890abcdEFGH==" },
+        presigned: {
+          command: "npx",
+          args: [
+            "-y",
+            "s-mcp",
+            "https://b.s3.amazonaws.com/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=0a1b2c3d4e5f6a7b8c9d",
+            "https://storage.googleapis.com/b/o?X-Goog-Signature=9f8e7d6c5b4a39281706&Signature=AbCdEf0123456789&sas=sv2022sasValue01",
+          ],
+        },
+        ordinary: { type: "http", url: "https://example.test/mcp?encoding=base64url-padded&decode=entities-and-more" },
+      },
+    });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm });
+    expect(report.servers.map((server) => [server.name, server.secrets])).toEqual([
+      ["sas", ["url"]],
+      ["functions", ["url"]],
+      ["presigned", ["url"]],
+      ["ordinary", []],
+    ]);
+    const text = renderReport(report, { home: dir });
+    for (const value of ["Q2w8abcd", "Zx9vAbCd", "0a1b2c3d", "9f8e7d6c", "AbCdEf01", "sv2022sas"]) expect(text).not.toContain(value);
+    expect(text).toContain("  sas           https://acct.blob.core.windows.net/c?sv=2022-11-02&sp=r&sig=*** ");
+    expect(text).toContain("  functions     https://contoso-fn.azurewebsites.net/api/mcp?code=*** ");
+    expect(text).toContain("X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=*** ");
+    expect(text).toContain("X-Goog-Signature=***&Signature=***&sas=*** ");
+    expect(text).toContain("  ordinary      https://example.test/mcp?encoding=base64url-padded&decode=entities-and-more ");
+  });
+});
+
 describe("inspection", () => {
   it("hides the values a server was given wherever its tools repeat them, whole or in part", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mcpcage-inspection-"));

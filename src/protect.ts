@@ -751,6 +751,10 @@ function serialize(config: unknown, original: string): string {
 
 // "author" is not "auth": GIT_AUTHOR_NAME holds a name, not a credential (Authorization still counts).
 const SECRET_NAME = /token|secret|key|password|passwd|pwd|auth(?!or(?!iz))|credential|api/i;
+// Query parameters that carry a credential under a name SECRET_NAME does not know: the signature of
+// an Azure SAS (sig), an Azure Functions key (code), the signature of a presigned AWS or Google
+// address. A SAS address printed its sig in clear. Whole names only: "decode" and "encoding" are not.
+const SECRET_QUERY = /^(?:sig|signature|code|sas|x-amz-signature|x-goog-signature)$/i;
 const MASK = "***";
 
 function secretNames(entry: ServerEntry): string[] {
@@ -847,7 +851,8 @@ function maskArgs(args: string[], wrapped = false): { shown: string[]; secrets: 
 
 /**
  * An address with its credentials masked: the password, a user name that is really a token
- * (https://ghp_...@github.com), and query values with a credential name. `root@localhost` stays.
+ * (https://ghp_...@github.com), and query values with a credential name (SECRET_NAME or
+ * SECRET_QUERY). `root@localhost` stays.
  */
 function maskUrl(text: string): { shown: string; hidden: string[] } {
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return { shown: text, hidden: [] };
@@ -878,7 +883,7 @@ function maskUrl(text: string): { shown: string; hidden: string[] } {
   // token in clear, because only the first value of each name was looked at.
   let masked = false;
   const query = [...url.searchParams].map(([name, value]): [string, string] => {
-    if (!SECRET_NAME.test(name) || !looksLikeSecret(value)) return [name, value];
+    if (!(SECRET_NAME.test(name) || SECRET_QUERY.test(name)) || !looksLikeSecret(value)) return [name, value];
     hidden.push(value);
     masked = true;
     return [name, MASK];
