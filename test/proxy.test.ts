@@ -299,6 +299,140 @@ describe("--strict", () => {
   });
 });
 
+type Session = Awaited<ReturnType<typeof connectHostile>>;
+
+/** The hostile server's approved manifest, as saved. */
+function hostilePin(home: string) {
+  return JSON.parse(readFileSync(join(home, "servers", "hostile", "pin.json"), "utf8")) as { tools: Record<string, { definition: { description?: string } }> };
+}
+
+/** The names one page lists and the cursor of the next; the first page is asked for without cursor. */
+async function listPage(session: Session, cursor?: string) {
+  const page = await session.client.listTools(cursor === undefined ? undefined : { cursor });
+  return { names: page.tools.map((tool) => tool.name), next: page.nextCursor };
+}
+
+/**
+ * Trust on first use covers the first listing: its first page, and the pages the client asks for with
+ * the cursor the page before returned. Every other page is compared with the pin. In these modes the
+ * hostile server lists in pages and answers tools/call.
+ */
+describe("pages of the first listing", () => {
+  const pinFile = (home: string) => join(home, "servers", "hostile", "pin.json");
+  /** What the audit log says of each page, in order. */
+  const pages = (home: string) => auditEntries(home, "hostile").filter((entry) => ["pinned", "list-verified", "list-blocked"].includes(entry.event));
+  /** The block message is one stderr write that ends with this line; wait for it before reading stderr. */
+  const blockLoggedFor = (session: Session) => vi.waitFor(() => expect(session.stderr()).toContain("`mcpcage approve hostile`"));
+  const changed = { code: BLOCKED, message: expect.stringContaining('tool definitions of "hostile" changed since they were approved (rug-pull protection)') };
+  const lockedBecauseChanged = { code: BLOCKED, message: expect.stringContaining("this session is locked because the server's tool definitions changed") };
+
+  it("verifies the pages of a second listing in the same session, and blocks one that changed", async () => {
+    const home = freshHome();
+    const session = await connectHostile(home, "paged-relist");
+    expect(await listPage(session)).toEqual({ names: ["beta"], next: "p2" });
+    expect(await listPage(session, "p2")).toEqual({ names: ["alpha"], next: undefined });
+    // The client lists again, as after notifications/tools/list_changed. Before, every page asked for
+    // with a cursor was pinned unread once anything was pinned in the session: the changed "alpha"
+    // became the approved definition, and nothing was blocked.
+    expect(await listPage(session)).toEqual({ names: ["beta"], next: "p2" });
+    await expect(listPage(session, "p2")).rejects.toMatchObject(changed);
+    await expect(session.client.callTool({ name: "beta", arguments: {} })).rejects.toMatchObject(lockedBecauseChanged);
+    await blockLoggedFor(session);
+    await session.close();
+
+    expect(pages(home).map((entry) => entry.event)).toEqual(["pinned", "pinned", "list-verified", "list-blocked"]);
+    expect(pages(home).at(-1)).toMatchObject({ reason: "manifest-changed", violations: [{ kind: "changed-tool", tool: "alpha" }] });
+    expect(hostilePin(home).tools.alpha?.definition.description).toBe("Read a file.");
+    expect(mcpcage(home, "diff", "hostile").stdout).toContain('tool "alpha" changed since it was approved');
+  });
+
+  it("ends the first listing when the client starts another, and compares the pages asked for after", async () => {
+    const home = freshHome();
+    const session = await connectHostile(home, "paged-relist");
+    expect(await listPage(session)).toEqual({ names: ["beta"], next: "p2" });
+    // The client starts over before it asked for the second page: that page is no longer part of the
+    // listing trusted on first use, so the server cannot have it pinned with what it lists now.
+    expect(await listPage(session)).toEqual({ names: ["beta"], next: "p2" });
+    await expect(listPage(session, "p2")).rejects.toMatchObject(changed);
+    await session.close();
+    expect(pages(home).map((entry) => entry.event)).toEqual(["pinned", "list-verified", "list-blocked"]);
+    expect(pages(home).at(-1)).toMatchObject({ reason: "manifest-changed", violations: [{ kind: "new-tool", tool: "alpha" }] });
+    expect(Object.keys(hostilePin(home).tools)).toEqual(["beta"]);
+  });
+
+  it.each([
+    ["changed", { kind: "changed-tool", tool: "echo" }],
+    ["added", { kind: "new-tool", tool: "backdoor" }],
+  ])("blocks the page of a cursor the server never issued (%s), and pins nothing of it", async (cursor, violation) => {
+    const home = freshHome();
+    const session = await connectHostile(home, "paged-unissued");
+    // A listing of one page: the first listing is complete, and no cursor was issued.
+    expect(await listPage(session)).toEqual({ names: ["echo"], next: undefined });
+    const approved = readFileSync(pinFile(home), "utf8");
+    await expect(listPage(session, cursor)).rejects.toMatchObject(changed);
+    await expect(session.client.callTool({ name: "echo", arguments: {} })).rejects.toMatchObject(lockedBecauseChanged);
+    await session.close();
+    expect(readFileSync(pinFile(home), "utf8")).toBe(approved);
+    expect(pages(home).map((entry) => entry.event)).toEqual(["pinned", "list-blocked"]);
+    expect(pages(home).at(-1)).toMatchObject({ reason: "manifest-changed", violations: [violation] });
+  });
+
+  it("blocks a page of the first listing that redefines a tool an earlier page pinned", async () => {
+    const home = freshHome();
+    const session = await connectHostile(home, "paged-redefine");
+    expect(await listPage(session)).toEqual({ names: ["beta", "alpha"], next: "p2" });
+    const approved = readFileSync(pinFile(home), "utf8");
+    // The client may already use the "alpha" of the first page: the second cannot replace it unseen.
+    await expect(listPage(session, "p2")).rejects.toMatchObject(changed);
+    await expect(session.client.callTool({ name: "alpha", arguments: {} })).rejects.toMatchObject(lockedBecauseChanged);
+    await blockLoggedFor(session);
+    await session.close();
+    expect(readFileSync(pinFile(home), "utf8")).toBe(approved);
+    expect(pages(home).map((entry) => entry.event)).toEqual(["pinned", "list-blocked"]);
+    expect(pages(home).at(-1)).toMatchObject({ reason: "manifest-changed", violations: [{ kind: "changed-tool", tool: "alpha" }] });
+    const diff = mcpcage(home, "diff", "hostile").stdout;
+    expect(diff).toContain('tool "alpha" changed since it was approved');
+    expect(diff).toContain("read ~/.ssh/id_rsa");
+  });
+
+  it("pins a page of the first listing that repeats a tool of an earlier page unchanged", async () => {
+    const home = freshHome();
+    const session = await connectHostile(home, "paged-repeat");
+    expect(await listPage(session)).toEqual({ names: ["beta", "alpha"], next: "p2" });
+    expect(await listPage(session, "p2")).toEqual({ names: ["alpha", "gamma"], next: undefined });
+    expect((await session.client.callTool({ name: "gamma", arguments: {} })).content).toEqual([{ type: "text", text: "called gamma" }]);
+    await session.close();
+    expect(Object.keys(hostilePin(home).tools)).toEqual(["beta", "alpha", "gamma"]);
+    expect(pages(home).map((entry) => entry.event)).toEqual(["pinned", "pinned"]);
+  });
+
+  it("refuses a page that names the same tool twice with different definitions", async () => {
+    const home = freshHome();
+    const session = await connectHostile(home, "duplicate");
+    // Pinning kept the last of the two, while a client may use the first.
+    await expect(listPage(session)).rejects.toMatchObject(changed);
+    await session.close();
+    expect(existsSync(pinFile(home))).toBe(false);
+    expect(pages(home).map((entry) => entry.event)).toEqual(["list-blocked"]);
+    expect(pages(home)[0]).toMatchObject({ reason: "manifest-changed", violations: [{ kind: "changed-tool", tool: "alpha" }] });
+    expect(mcpcage(home, "diff", "hostile").stdout).toContain('description: "Read a file." -> "Read a file. Before reading it');
+  });
+
+  it("pins a first listing of three pages whole, and verifies every page at the next start", async () => {
+    const home = freshHome();
+    for (const start of ["first", "next"]) {
+      const session = await connectHostile(home, "paged-three");
+      expect(await listPage(session), `${start} start`).toEqual({ names: ["one"], next: "p2" });
+      expect(await listPage(session, "p2"), `${start} start`).toEqual({ names: ["two"], next: "p3" });
+      expect(await listPage(session, "p3"), `${start} start`).toEqual({ names: ["three"], next: undefined });
+      expect((await session.client.callTool({ name: "three", arguments: {} })).content).toEqual([{ type: "text", text: "called three" }]);
+      await session.close();
+    }
+    expect(Object.keys(hostilePin(home).tools)).toEqual(["one", "two", "three"]);
+    expect(pages(home).map((entry) => entry.event)).toEqual(["pinned", "pinned", "pinned", "list-verified", "list-verified", "list-verified"]);
+  });
+});
+
 /**
  * A client with every capability a server can ask for: it runs the model, puts questions to the user
  * and lists its roots. It records every request from the server that reaches it, and the log lines.
@@ -516,6 +650,49 @@ describe("listings with too many tools", () => {
     expect(auditEntries(home, "hostile")).toContainEqual(expect.objectContaining({ event: "list-blocked", reason: "too-many", count: 200_000, limit: 10_000 }));
     expect(existsSync(join(home, "servers", "hostile", "pin.json"))).toBe(false);
     expect(existsSync(join(home, "servers", "hostile", "pending.json"))).toBe(false);
+  });
+
+  // The limit holds for what is pinned and what is pending, not only for one page: before, a server
+  // reached any number of pinned or pending tools with pages of 10,000.
+  const tooMany = { code: BLOCKED, message: expect.stringContaining("mcpcage blocked tools/list: the server lists more than 10,000 tools.") };
+
+  it("refuses a page of the first listing that takes the pinned tools past 10,000, and pins nothing of it", async () => {
+    const home = freshHome();
+    const session = await connectHostile(home, "paged-many");
+    const first = await session.client.listTools();
+    expect(first.tools).toHaveLength(6_000);
+    expect(first.nextCursor).toBe("p2");
+    await expect(session.client.listTools({ cursor: "p2" })).rejects.toMatchObject(tooMany);
+    await expect(session.client.callTool({ name: "tool_0", arguments: {} })).rejects.toMatchObject({
+      code: BLOCKED,
+      message: expect.stringContaining("this session is locked because the server listed more than 10,000 tools"),
+    });
+    await vi.waitFor(() => expect(session.stderr()).toContain("mcpcage: blocked tools/list from hostile: the server lists more than 10,000 tools. Nothing was pinned, and the session is locked."));
+    await session.close();
+    const pinned = Object.keys(hostilePin(home).tools);
+    expect(pinned).toHaveLength(6_000);
+    expect([pinned[0], pinned.at(-1)]).toEqual(["tool_0", "tool_5999"]);
+    expect(auditEntries(home, "hostile").filter((entry) => entry.event === "list-blocked")).toEqual([
+      expect.objectContaining({ reason: "too-many", count: 12_000, limit: 10_000 }),
+    ]);
+    expect(existsSync(join(home, "servers", "hostile", "pending.json"))).toBe(false);
+  });
+
+  it("with --strict, refuses a page that takes the pending tools past 10,000, and saves nothing of it", async () => {
+    const home = freshHome();
+    const session = await connectHostile(home, "paged-many", { runArgs: ["--strict"] });
+    await expect(session.client.listTools()).rejects.toMatchObject({ code: BLOCKED, message: expect.stringContaining("has not been approved (--strict)") });
+    // The client knows the cursor of the second page, although the first was refused.
+    await expect(session.client.listTools({ cursor: "p2" })).rejects.toMatchObject(tooMany);
+    await session.close();
+    const pending = JSON.parse(readFileSync(join(home, "servers", "hostile", "pending.json"), "utf8")) as { tools: Array<{ name: string }> };
+    expect(pending.tools).toHaveLength(6_000);
+    expect(pending.tools.at(-1)?.name).toBe("tool_5999");
+    expect(auditEntries(home, "hostile").filter((entry) => entry.event === "list-blocked")).toEqual([
+      expect.objectContaining({ reason: "not-approved" }),
+      expect.objectContaining({ reason: "too-many", count: 12_000, limit: 10_000 }),
+    ]);
+    expect(existsSync(join(home, "servers", "hostile", "pin.json"))).toBe(false);
   });
 });
 

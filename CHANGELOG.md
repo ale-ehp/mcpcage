@@ -17,6 +17,13 @@ and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   its own name. A definition approved by an earlier version with a `"__proto__"` key therefore
   counts as changed once and needs a fresh approval, and an audit entry that an earlier version
   wrote with such a key no longer verifies.
+- Trust on first use reached past the first listing: once anything was pinned in a session, every
+  page the client asked for with a cursor was pinned without comparison, so a server that had the
+  client list again, or answered a cursor it never issued, replaced approved definitions and added
+  tools unseen. Only the first listing is trusted now, its first page and the pages asked for with
+  the cursor each page returned, and none of its pages may redefine a tool pinned before. The limit
+  of 10,000 tools, checked on each page alone, now also holds for what is pinned or pending, where
+  pages and listings add up.
 
 ## [0.4.0] - 2026-11-04
 

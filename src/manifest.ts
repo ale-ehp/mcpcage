@@ -67,6 +67,31 @@ export function checkTools(pin: Pin, tools: ToolDefinition[]): Violation[] {
   return violations;
 }
 
+/**
+ * Compares a page of the first listing, the one trusted on first use, with what that listing pinned so
+ * far: `base` holds its earlier pages. A tool not pinned yet is new. A name that comes back with another
+ * definition, from an earlier page or from earlier in the same page, is a changed tool: pinning the page
+ * would replace a definition the client may already use, or keep the last of two while the client uses
+ * the first. A definition repeated unchanged is harmless. One violation per name, a change outranking
+ * the addition, so that the pending manifest shows what approving it would pin.
+ */
+export function checkFirstListing(tools: ToolDefinition[], base?: Pin): Violation[] {
+  // A Map, so that a tool named "__proto__" is looked up like any other.
+  const known = new Map<string, PinnedTool>(base ? Object.entries(base.tools) : []);
+  const violations = new Map<string, Violation>();
+  for (const tool of tools) {
+    const hash = toolFingerprint(tool);
+    const before = known.get(tool.name);
+    if (!before) {
+      known.set(tool.name, { hash, definition: tool });
+      violations.set(tool.name, { kind: "new-tool", name: tool.name, after: tool });
+    } else if (before.hash !== hash) {
+      violations.set(tool.name, { kind: "changed-tool", name: tool.name, before: before.definition, after: tool });
+    }
+  }
+  return [...violations.values()];
+}
+
 export function isToolList(value: unknown): value is ToolDefinition[] {
   return (
     Array.isArray(value) &&
@@ -84,10 +109,12 @@ export function isToolList(value: unknown): value is ToolDefinition[] {
 export const MAX_DEPTH = 256;
 
 /**
- * The most tools one listing may hold. Real servers list a few dozen. Every tool listed is pinned,
- * compared and scanned: a single line of 200,000 tools made `protect --inspect` throw, and took the
- * proxy two seconds and 11 MiB of log lines to explain once blocked. A listing with more is refused
- * whole, like a definition nested too deep.
+ * The most tools a server may list, in one page or in all its pages. Real servers list a few dozen.
+ * Every tool listed is pinned, compared and scanned: a single line of 200,000 tools made `protect
+ * --inspect` throw, and took the proxy two seconds and 11 MiB of log lines to explain once blocked. A
+ * page with more is refused whole, like a definition nested too deep, and so is a page that would take
+ * the pinned or the pending tools of a server past it: pages and listings add up there, and a server
+ * reached any number of them with pages of 10,000.
  */
 export const MAX_TOOLS = 10_000;
 

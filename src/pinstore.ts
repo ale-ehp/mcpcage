@@ -44,12 +44,29 @@ export function pendingDefinitions(pending: Pending): ToolDefinition[] {
   return [...pending.tools, ...pending.violations.flatMap((violation) => (violation.kind === "changed-tool" ? [violation.before, violation.after] : [violation.after]))];
 }
 
+/**
+ * The pending manifest that the next page is merged with. An older version may have saved a definition
+ * nested deeper than MAX_DEPTH, which can never be shown or approved, and writing it again would run
+ * JSON.stringify out of stack: such a manifest is left out.
+ */
+function previousPending(serverId: string): Pending | undefined {
+  const loaded = loadPending(serverId);
+  return loaded && !tooDeep(pendingDefinitions(loaded)) ? loaded : undefined;
+}
+
+/**
+ * How many tools the pending manifest would hold once `tools` are saved, merged by name as savePending
+ * merges them. The proxy refuses a page that would take it past MAX_TOOLS.
+ */
+export function pendingCount(serverId: string, tools: ToolDefinition[]): number {
+  const names = new Set((previousPending(serverId)?.tools ?? []).map((tool) => tool.name));
+  for (const tool of tools) names.add(tool.name);
+  return names.size;
+}
+
 /** Pagination can deliver a manifest in pieces: pending tools accumulate until approved. */
 export function savePending(serverId: string, tools: ToolDefinition[], violations: Violation[]): Pending {
-  // An older version may have saved a definition nested deeper than MAX_DEPTH, which can never be
-  // shown or approved, and writing it again would run JSON.stringify out of stack: it is left out.
-  const loaded = loadPending(serverId);
-  const previous = loaded && !tooDeep(pendingDefinitions(loaded)) ? loaded : undefined;
+  const previous = previousPending(serverId);
   const byName = new Map<string, ToolDefinition>();
   for (const tool of previous?.tools ?? []) byName.set(tool.name, tool);
   for (const tool of tools) byName.set(tool.name, tool);

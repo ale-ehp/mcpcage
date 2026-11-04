@@ -156,10 +156,12 @@ dependency tree with the same integrity hashes runs every time, until you pass `
 image copies only the installed files into a distroless, nonroot Node runtime: no shell, no npm.
 Base images are pinned by digest in [runtime/bases.Dockerfile](runtime/bases.Dockerfile).
 
-**Pinning the tools.** The first `tools/list` a server returns becomes its approved manifest (trust
-on first use; `--strict` refuses until you approve explicitly). mcpcage fingerprints everything the
+**Pinning the tools.** The first listing a server returns becomes its approved manifest: the first
+page of `tools/list` and the pages the client asks for with the cursor each page returned (trust on
+first use; `--strict` refuses until you approve explicitly). mcpcage fingerprints everything the
 model reads about each tool: name, title, description, input and output schema, annotations. If a
-later listing adds a tool or changes one, the listing is replaced with an error, the session is
+later page adds a tool or changes one, in the same session or after, or a page of the first listing
+redefines a tool an earlier page approved, the listing is replaced with an error, the session is
 locked so no call reaches the server, and the change waits in `mcpcage diff <id>` until you run
 `mcpcage approve <id>`. Removing a tool is allowed. Server ids do not include the version, so an
 upgrade is compared with what you approved before rather than trusted as a new server.
@@ -192,16 +194,17 @@ definition, which is then too much to review and should be treated as hidden, me
 **What the server may send.** The proxy passes on JSON-RPC only: other output is dropped, and so
 is a response to a request the client never sent or already got an answer to. A line longer than
 16 MiB is counted and thrown away as it streams in, so a server cannot exhaust mcpcage's memory. A
-listing of more than 10,000 tools, or with a definition nested more than 256 levels deep, is refused
+page of more than 10,000 tools, or with a definition nested more than 256 levels deep, is refused
 whole, before anything walks it: the client gets an error, nothing is pinned, and the session is
-locked. Nothing else a server sends that is nested more than 256 levels deep is serialized again or
-walked: a result passes unmeasured with a `scan-budget` sign, an unasked answer or a batch message
-like that is dropped, and a pin or pending entry like that is left out, so its tool needs a fresh
-approval. A server may ping the client and ask for its roots. A request to run the model
-(`sampling/createMessage`) or to put a question to you (`elicitation/create`) is a way in for a
-prompt injection and a way out for data: mcpcage answers it with an error unless you pass
-`--allow-server-requests`, and does the same with any request it does not know. Every drop and
-refusal is recorded in the audit log.
+locked. The limit of 10,000 tools holds for a whole listing and for what is pinned or pending for a
+server too: a page that would take them past it is refused the same way. Nothing else a server sends
+that is nested more than 256 levels deep is serialized again or walked: a result passes unmeasured
+with a `scan-budget` sign, an unasked answer or a batch message like that is dropped, and a pin or
+pending entry like that is left out, so its tool needs a fresh approval. A server may ping the
+client and ask for its roots. A request to run the model (`sampling/createMessage`) or to put a
+question to you (`elicitation/create`) is a way in for a prompt injection and a way out for data:
+mcpcage answers it with an error unless you pass `--allow-server-requests`, and does the same with
+any request it does not know. Every drop and refusal is recorded in the audit log.
 
 **Finding exposed servers.** `mcpcage protect` reads the configuration files the clients document
 and never writes outside `~/.mcpcage` unless you pass `--fix`:

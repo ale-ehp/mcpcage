@@ -4,8 +4,8 @@ import type { Readable, Writable } from "node:stream";
 import { AuditLog } from "./audit.js";
 import { canonicalJson, sha256 } from "./canonical.js";
 import { LineSplitter, MAX_LINE_BYTES } from "./lines.js";
-import { checkTools, isToolList, MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, own, pinTools, tooDeep, type Pin, type ToolDefinition } from "./manifest.js";
-import { loadPin, savePending, savePin } from "./pinstore.js";
+import { checkFirstListing, checkTools, isToolList, MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, own, pinTools, tooDeep, type Pin, type ToolDefinition, type Violation } from "./manifest.js";
+import { loadPin, pendingCount, savePending, savePin } from "./pinstore.js";
 import { countFindings, countSuspicious, describeResultSigns, describeViolationsWithFindings, highSeveritySigns, scanResult } from "./suspicious.js";
 
 /** JSON-RPC error code mcpcage uses when it refuses a message (implementation-defined range). */
@@ -63,10 +63,17 @@ type Message = { jsonrpc?: string; id?: Id | null; method?: string; params?: any
 export function runProxy(options: ProxyOptions): Promise<number> {
   const { serverId, audit, log, strict, allowServerRequests } = options;
   let pin: Pin | undefined = loadPin(serverId, log);
-  let pinnedThisSession = false;
   /** Why the session is locked, once a listing was blocked: every call is refused from then on. */
   let locked: string | undefined;
-  const fromClient = new Map<Id, { method: string; tool?: string; cursor?: boolean; started: number }>();
+  /** How many listings the client started: tools/list requests without a cursor. */
+  let listings = 0;
+  /**
+   * While the listing trusted on first use is open, the nextCursor its last page returned: the page the
+   * client asks for with that very cursor continues it. Undefined once a page of it has no next page,
+   * once the client starts another listing, and once a page is refused.
+   */
+  let awaitedCursor: string | undefined;
+  const fromClient = new Map<Id, { method: string; tool?: string; cursor?: string; listing?: number; started: number }>();
 
   const child = spawn(options.command, options.args, {
     stdio: ["pipe", "pipe", "inherit"],
@@ -130,9 +137,18 @@ export function runProxy(options: ProxyOptions): Promise<number> {
           const args = message.params?.arguments ?? {};
           audit.write("call", { id: message.id, tool, args: sha256(canonicalJson(args)), argKeys: Object.keys(args).sort() });
           fromClient.set(message.id, { method: message.method, tool, started: Date.now() });
+        } else if (message.method === "tools/list") {
+          // A server issues cursors as non-empty strings (an empty nextCursor ends a listing). A request
+          // without one, or with anything else, is taken as the start of a listing: it ends the listing
+          // trusted on first use, so that no later page can continue it.
+          const cursor = typeof message.params?.cursor === "string" && message.params.cursor !== "" ? message.params.cursor : undefined;
+          if (cursor === undefined) {
+            listings += 1;
+            awaitedCursor = undefined;
+          }
+          fromClient.set(message.id, { method: message.method, cursor, listing: listings, started: Date.now() });
         } else {
-          const cursor = message.method === "tools/list" && message.params?.cursor !== undefined;
-          fromClient.set(message.id, { method: message.method, cursor, started: Date.now() });
+          fromClient.set(message.id, { method: message.method, started: Date.now() });
         }
       }
       forward.push(message);
@@ -193,12 +209,49 @@ export function runProxy(options: ProxyOptions): Promise<number> {
     const warning = describeResultSigns(tool, findings);
     if (warning) log(`mcpcage: ${warning}. Run \`mcpcage audit show ${serverId}\` for the record.`);
   };
+  /** A page was refused: every call is refused from then on, and no later page continues the first listing. */
+  const lock = (reason: string) => {
+    locked = reason;
+    awaitedCursor = undefined;
+  };
   /** A listing refused whole: the client gets an error, the session is locked, nothing is pinned or saved. */
-  const refuseListing = (id: Id, refusal: string, lock: string, entry: Record<string, unknown>): Message => {
-    locked = lock;
+  const refuseListing = (id: Id, refusal: string, reason: string, entry: Record<string, unknown>): Message => {
+    lock(reason);
     audit.write("list-blocked", entry);
     log(`mcpcage: blocked tools/list from ${serverId}: ${refusal}. Nothing was pinned, and the session is locked.`);
     return blocked(id, `mcpcage blocked tools/list: ${refusal}.`);
+  };
+  const most = MAX_TOOLS.toLocaleString("en-US");
+  /** More than MAX_TOOLS tools: in one page, or pinned or pending once a page is added to those. */
+  const tooMany = (id: Id, count: number): Message =>
+    refuseListing(id, `the server lists more than ${most} tools`, `the server listed more than ${most} tools`, { reason: "too-many", count, limit: MAX_TOOLS });
+  /**
+   * Saves a blocked page as pending for `mcpcage diff` and `approve`, merged with the tools already
+   * waiting there, unless that would take them past MAX_TOOLS: pages and listings add up in the pending
+   * manifest, and a server could pile up any number of tools in it, 10,000 a page. The refusal to send
+   * instead, if so.
+   */
+  const savePage = (id: Id, tools: ToolDefinition[], violations: Violation[]): Message | undefined => {
+    const count = pendingCount(serverId, tools);
+    if (count > MAX_TOOLS) return tooMany(id, count);
+    savePending(serverId, tools, violations);
+    return undefined;
+  };
+  /** A page with tools that are new or changed against the pin: blocked, saved as pending, the session locked. */
+  const blockChanged = (id: Id, tools: ToolDefinition[], violations: Violation[]): Message => {
+    const refused = savePage(id, tools, violations);
+    if (refused) return refused;
+    lock("the server's tool definitions changed");
+    const suspicious = countSuspicious(violations);
+    audit.write("list-blocked", {
+      reason: "manifest-changed",
+      violations: violations.map((violation) => ({ kind: violation.kind, tool: violation.name })),
+      suspicious,
+    });
+    log(`mcpcage: blocked ${serverId}: its tool definitions changed since they were approved.\n${describeViolationsWithFindings(violations)}\nReview with \`mcpcage diff ${serverId}\`; approve with \`mcpcage approve ${serverId}\`.`);
+    // The client may show only this message, so it carries the count of the worst signs too.
+    const signs = suspicious.high > 0 ? ` ${highSeveritySigns(suspicious.high)}.` : "";
+    return blocked(id, `mcpcage blocked tools/list: tool definitions of "${serverId}" changed since they were approved (rug-pull protection).${signs} Run \`mcpcage diff ${serverId}\`.`);
   };
   /** What becomes of one message from the server: passed on, replaced, or dropped (undefined). */
   const fromServer = (message: Message): Message | undefined => {
@@ -239,14 +292,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
 
     const tools: ToolDefinition[] = message.result.tools;
     // Refused before anything walks it: nothing of such a listing is pinned, saved or explained.
-    const most = MAX_TOOLS.toLocaleString("en-US");
-    if (tools.length > MAX_TOOLS) {
-      return refuseListing(id, `the server lists more than ${most} tools`, `the server listed more than ${most} tools`, {
-        reason: "too-many",
-        count: tools.length,
-        limit: MAX_TOOLS,
-      });
-    }
+    if (tools.length > MAX_TOOLS) return tooMany(id, tools.length);
     const deep = tooDeep(tools);
     if (deep) {
       return refuseListing(id, `the definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep`, "the server listed a definition nested too deep", {
@@ -256,41 +302,47 @@ export function runProxy(options: ProxyOptions): Promise<number> {
       });
     }
     if (!pin && strict) {
-      locked = "the server's tool definitions changed";
       const unapproved = tools.map((tool) => ({ kind: "new-tool" as const, name: tool.name, after: tool }));
-      savePending(serverId, tools, unapproved);
+      const refused = savePage(id, tools, unapproved);
+      if (refused) return refused;
+      lock("the server's tool definitions changed");
       audit.write("list-blocked", { reason: "not-approved", tools: tools.map((tool) => tool.name), suspicious: countSuspicious(unapproved) });
       log(`mcpcage: ${serverId} has no approved tools and --strict is on.\n${describeViolationsWithFindings(unapproved)}\nReview with \`mcpcage diff ${serverId}\`, then \`mcpcage approve ${serverId}\`.`);
       return blocked(id, `mcpcage blocked tools/list: server "${serverId}" has not been approved (--strict).`);
     }
-    // Trust on first use: the first listing becomes the approved manifest. Only later pages of
-    // that same listing (requests with a cursor) may extend it; a fresh listing in the same
-    // session is verified like any other, so a server cannot swap definitions right after pinning.
-    if (!pin || (pinnedThisSession && request.cursor)) {
+    // Trust on first use covers the first listing and nothing else: its first page, asked for without
+    // a cursor while nothing is pinned, and each page the client asks for with the cursor that the
+    // page before it returned. Every other page, of a later listing or for a cursor the server never
+    // issued in that listing, is compared with the pin. Before, once anything was pinned, every page
+    // asked for with a cursor was pinned too: the server decides what each page holds and can have the
+    // client list again at any time, so it replaced approved definitions at will.
+    const first = !pin && request.cursor === undefined;
+    if (first || (awaitedCursor !== undefined && request.cursor === awaitedCursor)) {
+      // Pages add up in the pin, and it may not grow past MAX_TOOLS either.
+      const names = new Set(pin ? Object.keys(pin.tools) : []);
+      for (const tool of tools) names.add(tool.name);
+      if (names.size > MAX_TOOLS) return tooMany(id, names.size);
+      // Nor may a page replace a definition an earlier page pinned, or name a tool twice with two.
+      const violations = checkFirstListing(tools, pin);
+      if (violations.some((violation) => violation.kind === "changed-tool")) return blockChanged(id, tools, violations);
       pin = pinTools(serverId, tools, pin);
-      pinnedThisSession = true;
       savePin(pin);
       audit.write("pinned", { tools: tools.map((tool) => ({ name: tool.name, hash: own(pin!.tools, tool.name)!.hash })) });
+      // The listing goes on if the server named a next page and, after its first page, if the client
+      // has not started another listing since it asked for that page.
+      const next: unknown = message.result.nextCursor;
+      awaitedCursor = typeof next === "string" && next !== "" && (!first || request.listing === listings) ? next : undefined;
       return message;
     }
 
-    const violations = checkTools(pin, tools);
+    // Compared with the pin. With nothing pinned yet (a page asked for with a cursor before any first
+    // page was pinned), every tool in it is new.
+    const violations = checkTools(pin ?? pinTools(serverId, []), tools);
     if (violations.length === 0) {
       audit.write("list-verified", { tools: tools.length });
       return message;
     }
-    locked = "the server's tool definitions changed";
-    savePending(serverId, tools, violations);
-    const suspicious = countSuspicious(violations);
-    audit.write("list-blocked", {
-      reason: "manifest-changed",
-      violations: violations.map((violation) => ({ kind: violation.kind, tool: violation.name })),
-      suspicious,
-    });
-    log(`mcpcage: blocked ${serverId}: its tool definitions changed since they were approved.\n${describeViolationsWithFindings(violations)}\nReview with \`mcpcage diff ${serverId}\`; approve with \`mcpcage approve ${serverId}\`.`);
-    // The client may show only this message, so it carries the count of the worst signs too.
-    const signs = suspicious.high > 0 ? ` ${highSeveritySigns(suspicious.high)}.` : "";
-    return blocked(id, `mcpcage blocked tools/list: tool definitions of "${serverId}" changed since they were approved (rug-pull protection).${signs} Run \`mcpcage diff ${serverId}\`.`);
+    return blockChanged(id, tools, violations);
   };
   const fromServerLine = (line: string) => {
     if (line.trim() === "") return;
