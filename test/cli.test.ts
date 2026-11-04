@@ -181,6 +181,30 @@ describe("cli", () => {
     expect(allowed.stderr).toContain("Docker is required"); // past the check, stopped where Docker is needed
   });
 
+  it("refuses a memory or CPU limit that is not positive, which Docker reads as no limit", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
+    const cage = join(top, "cage");
+    // No docker on the PATH: a run that got past the check would stop there, never before it.
+    const env = fakeUserEnv(join(top, "home"), cage, { PATH: join(top, "no-docker-here") });
+    const server = ["--", "npx", "-y", "something"];
+    const memory = (value: string) => `mcpcage: --memory ${value}: give a positive size, such as 512m or 2g (Docker reads 0 as no limit)\n`;
+    const cpus = (value: string) => `mcpcage: --cpus ${value}: give a positive number of CPUs, such as 1 or 0.5 (Docker reads 0 as no limit)\n`;
+    for (const value of ["0", "0g", "0.0", "-1", "lots"]) {
+      const refused = mcpcageWithEnv(env, "run", `--memory=${value}`, ...server);
+      expect(refused.code).toBe(1);
+      expect(refused.stderr).toBe(memory(value));
+    }
+    for (const value of ["0", "0.0", "-0.5", "one"]) {
+      const refused = mcpcageWithEnv(env, "run", `--cpus=${value}`, ...server);
+      expect(refused.code).toBe(1);
+      expect(refused.stderr).toBe(cpus(value));
+    }
+    expect(mcpcageWithEnv(env, "prepare", "--memory", "0", ...server).stderr).toBe(memory("0"));
+    expect(mcpcageWithEnv(env, "run", "--image", "mcp/time", "--cpus", "0").stderr).toBe(cpus("0"));
+    expect(existsSync(cage)).toBe(false); // refused before anything else, the audit log included
+    expect(mcpcageWithEnv(env, "run", "--memory", "1.5g", "--cpus", ".5", ...server).stderr).toContain("Docker is required");
+  });
+
   it("refuses a writable mount of a shell startup file unless --allow-sensitive-mount is given", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
     const home = join(top, "home");

@@ -9,7 +9,7 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
 import { discoverConfigs } from "./clients.js";
-import { unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
+import { RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
@@ -107,25 +107,14 @@ function parseRun(argv: string[]) {
   const separator = argv.indexOf("--");
   const own = separator === -1 ? argv : argv.slice(0, separator);
   const server = separator === -1 ? [] : argv.slice(separator + 1);
-  const { values } = parseArgs({
-    args: own,
-    options: {
-      mount: { type: "string", multiple: true, default: [] },
-      "allow-sensitive-mount": { type: "boolean", default: false },
-      env: { type: "string", multiple: true, default: [] },
-      "allow-net": { type: "boolean", default: false },
-      "allow-server-requests": { type: "boolean", default: false },
-      strict: { type: "boolean", default: false },
-      id: { type: "string" },
-      image: { type: "string" },
-      memory: { type: "string", default: "512m" },
-      cpus: { type: "string", default: "1" },
-      "keep-image-user": { type: "boolean", default: false },
-      rebuild: { type: "boolean", default: false },
-      "no-sandbox": { type: "boolean", default: false },
-    },
-    strict: true,
-  });
+  const { values } = parseArgs({ args: own, options: RUN_OPTIONS, strict: true });
+  // Docker reads a memory or CPU limit of 0 as no limit at all, which leaves the server the whole machine.
+  if (!/^\d+(?:\.\d+)? ?[kmgtp]?i?b?$/i.test(values.memory) || Number.parseFloat(values.memory) <= 0) {
+    throw new Error(`--memory ${terminalSafe(values.memory)}: give a positive size, such as 512m or 2g (Docker reads 0 as no limit)`);
+  }
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(values.cpus) || Number(values.cpus) <= 0) {
+    throw new Error(`--cpus ${terminalSafe(values.cpus)}: give a positive number of CPUs, such as 1 or 0.5 (Docker reads 0 as no limit)`);
+  }
   // Checked before anything else, the audit log included: a mount of the whole disk, the home
   // directory or a directory with credentials would undo the cage it belongs to (see sensitive.ts).
   const sensitive = values.mount.flatMap((mount) => sensitiveMount(mount) ?? []);
@@ -281,14 +270,15 @@ async function protect(argv: string[]): Promise<number> {
   });
   const home = homedir();
   const locations = discoverConfigs({ platform: process.platform, home, env: process.env, project: resolve(values.project ?? process.cwd()) });
+  // Known before the scan: an entry that starts the command --fix writes is mcpcage, whatever its shim.
+  const command = values.command ?? installedCommand();
   const report = await scanConfigs({
-    locations, home, offline: values.offline, cacheDir: join(cageHome(), "cache"), inspect: values.inspect ? inspectInCage : undefined,
+    locations, home, offline: values.offline, cacheDir: join(cageHome(), "cache"), inspect: values.inspect ? inspectInCage : undefined, ownCommand: command,
   });
   console.log(renderReport(report, { home }));
   const uncaged = report.servers.filter(isUncaged).length;
   if (!values.fix) return uncaged > 0 ? 1 : 0;
 
-  const command = values.command ?? installedCommand();
   const claudeCodeRunning = claudeCodeIsRunning();
   console.log("\nPlan");
   const planned: string[] = [];

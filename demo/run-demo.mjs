@@ -6,10 +6,10 @@
 //   node demo/run-demo.mjs --work <dir>  reuse <dir> (or $MCPCAGE_DEMO_WORK): images, pins and npm lookups are kept
 //   node demo/run-demo.mjs --pace        one screen per scene and time to read it (demo/demo.tape records this)
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -220,6 +220,15 @@ say("\n$ mcpcage protect");
 // CLAUDECODE, set when the demo runs inside Claude Code.
 const protectEnv = { ...env };
 for (const name of ["CLAUDECODE", "COPILOT_HOME", "APPDATA", "USERPROFILE", "XDG_CONFIG_HOME"]) delete protectEnv[name];
+// mcpcage installed as on a user's machine: protect counts an entry as caged only when its command
+// is an installed mcpcage. `npm install -g` links bin/mcpcage to the package's dist/cli.js and makes
+// that file executable; this is the repository's own build, whose package.json names it mcpcage.
+const bin = join(work, "bin");
+mkdirSync(bin, { recursive: true });
+rmSync(join(bin, "mcpcage"), { force: true }); // a work directory used before keeps its link
+symlinkSync(cli, join(bin, "mcpcage"));
+chmodSync(cli, 0o755);
+protectEnv.PATH = `${bin}${delimiter}${protectEnv.PATH ?? ""}`;
 const report = spawnSync(process.execPath, [cli, "protect", "--project", project], { env: protectEnv, encoding: "utf8" });
 if (`${report.stdout}${report.stderr}`.includes(token)) throw new Error("mcpcage protect printed the value of a secret");
 // Exit code 1 means that some servers run without a cage, which is what this scene shows.

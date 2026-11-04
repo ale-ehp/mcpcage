@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import type { ParseArgsOptionsConfig } from "node:util";
 import { isJsonObject } from "./jsonc.js";
 import { parseLaunch } from "./launch.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
@@ -18,6 +19,26 @@ export interface ServerEntry {
   headers?: Record<string, string>;
   [field: string]: unknown;
 }
+
+/**
+ * The options of `mcpcage run` and `mcpcage prepare`, before `--`. `protect` reads a wrapped entry's
+ * arguments with the same definitions, so that it finds the options that open a cage as `run` does.
+ */
+export const RUN_OPTIONS = {
+  mount: { type: "string", multiple: true, default: [] as string[] },
+  "allow-sensitive-mount": { type: "boolean", default: false },
+  env: { type: "string", multiple: true, default: [] as string[] },
+  "allow-net": { type: "boolean", default: false },
+  "allow-server-requests": { type: "boolean", default: false },
+  strict: { type: "boolean", default: false },
+  id: { type: "string" },
+  image: { type: "string" },
+  memory: { type: "string", default: "512m" },
+  cpus: { type: "string", default: "1" },
+  "keep-image-user": { type: "boolean", default: false },
+  rebuild: { type: "boolean", default: false },
+  "no-sandbox": { type: "boolean", default: false },
+} satisfies ParseArgsOptionsConfig;
 
 /** What starts a server, which decides whether mcpcage can cage it. */
 export type ServerType = "npx" | "uvx" | "docker" | "remote" | "mcpcage" | "other";
@@ -250,16 +271,22 @@ export function serverType(entry: ServerEntry): ServerType {
  */
 export function unwrapConfig(file: string, options: { dryRun: boolean }): WrapOutcome {
   return transform(file, options.dryRun, (name, entry, skip) => {
-    if (!isWrapped(entry)) return skip(name, "not wrapped");
-    const args = entry.args ?? [];
-    const separator = args.indexOf("--");
-    const original = args.slice(separator + 1);
-    if (separator === -1 || original.length === 0) return skip(name, "unexpected mcpcage arguments");
-    const restored: ServerEntry = { ...entry, command: original[0], args: original.slice(1) };
-    const moved = envValues(args);
-    if (moved.length > 0) restored.env = { ...(isJsonObject(entry.env) ? entry.env : {}), ...Object.fromEntries(moved.map((variable) => [variable.name, variable.value])) };
-    return restored;
+    const restored = unwrapEntry(entry);
+    return "skip" in restored ? skip(name, restored.skip) : restored.entry;
   });
+}
+
+/** The entry a wrapped one was made from: the command after `--`, with the values of its `--env NAME=value` back in `env`. */
+export function unwrapEntry(entry: ServerEntry): { entry: ServerEntry } | { skip: string } {
+  if (!isWrapped(entry)) return { skip: "not wrapped" };
+  const args = entry.args ?? [];
+  const separator = args.indexOf("--");
+  const original = args.slice(separator + 1);
+  if (separator === -1 || original.length === 0) return { skip: "unexpected mcpcage arguments" };
+  const restored: ServerEntry = { ...entry, command: original[0], args: original.slice(1) };
+  const moved = envValues(args);
+  if (moved.length > 0) restored.env = { ...(isJsonObject(entry.env) ? entry.env : {}), ...Object.fromEntries(moved.map((variable) => [variable.name, variable.value])) };
+  return { entry: restored };
 }
 
 export function isWrapped(entry: ServerEntry): boolean {

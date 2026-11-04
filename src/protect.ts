@@ -1,7 +1,11 @@
+import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { posix, win32 } from "node:path";
+import { delimiter, dirname, isAbsolute, join, posix, win32 } from "node:path";
+import { parseArgs } from "node:util";
 import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
-import { envValues, hostPath, hostVariable, isWrapped, moveHostEnv, replaceFile, serverType, wrapEntry, type ServerEntry, type ServerType } from "./config.js";
+import {
+  envValues, hostPath, hostVariable, isWrapped, moveHostEnv, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry, type ServerEntry, type ServerType,
+} from "./config.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
@@ -10,6 +14,7 @@ import { cageHome } from "./paths.js";
 import type { SandboxOptions } from "./sandbox.js";
 import { accountHome, sensitivePath, thisMachine } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
+import { terminalSafe } from "./terminal.js";
 
 /*
  * `mcpcage protect`: every MCP configuration of this machine and of the current project, what each
@@ -31,8 +36,18 @@ export interface ServerReport {
   command: string;
   /** For npx entries, wrapped ones too (from the part after "--"): `name@range`, `name` or `local package <path>`. */
   packageSpec?: string;
-  /** Started through `mcpcage run` with its sandbox: false for `mcpcage run --no-sandbox`, which runs on the host. */
+  /**
+   * Started through `mcpcage run` with its sandbox: false for `mcpcage run --no-sandbox`, which runs
+   * on the host, and for a command that is not an installed mcpcage.
+   */
   protectedByMcpcage: boolean;
+  /**
+   * For a wrapped entry, what its command is (see mcpcageAt): an installed mcpcage, another program
+   * that only has the name, or nothing that can be found on this machine.
+   */
+  mcpcage?: "installed" | "other program" | "not found";
+  /** For a caged entry: each run option that opens its cage, in plain words. */
+  opened: string[];
   /** Names of the env variables, headers and arguments whose value looks like a secret. */
   secrets: string[];
   /** Arguments and --mount paths, as written, that open the whole disk, the whole home directory or a directory with credentials. */
@@ -75,6 +90,11 @@ export interface ScanOptions {
   cacheDir: string;
   npmRunner?: NpmRunner;
   inspect?: Inspector;
+  /**
+   * The mcpcage command --fix writes into configurations (`--command`, or the one found in PATH): an
+   * entry that starts the same file counts as an installed mcpcage, whatever its shim (see mcpcageAt).
+   */
+  ownCommand?: string;
 }
 
 /** Reads every configuration that exists and describes each of its servers. */
@@ -130,6 +150,7 @@ async function describeServer(
     broadAccess: [],
     hostEnv: [],
     problems: [],
+    opened: [],
   };
   // Anything on the machine may have written the entry, and the report exists to find the ones
   // nobody meant to be there: whatever in one trips its description up is said on its own lines, and
@@ -138,7 +159,10 @@ async function describeServer(
   try {
     const shown = shownCommand(entry, type);
     server.command = shown.line;
-    server.protectedByMcpcage = isWrapped(entry) && !withoutSandbox(entry);
+    // Any program can be named mcpcage: only an installed one cages anything.
+    if (type === "mcpcage") server.mcpcage = mcpcageAt(entry.command as string, options.ownCommand);
+    server.protectedByMcpcage = server.mcpcage === "installed" && !withoutSandbox(entry);
+    if (server.protectedByMcpcage) server.opened = openedBy(entry);
     server.secrets = [...new Set([...secretNames(entry), ...shown.secrets])];
     server.broadAccess = type === "remote" ? [] : broadPaths(stringArgs(entry), options.home);
     server.hostEnv = type === "npx" || type === "mcpcage" ? hostEnvOf(entry) : [];
@@ -148,8 +172,9 @@ async function describeServer(
     const npm = launch ? npmPackage(launch) : undefined;
     if (npm) server.packageSpec = npm.local ? `local package ${npm.spec}` : npm.spec;
     // Install scripts matter where they would run: an npx server outside the cage. A caged one whose
-    // env acts on the host still installs in the cage, with the scripts disabled.
-    if ((type === "npx" || (type === "mcpcage" && !server.protectedByMcpcage)) && npm && !npm.local) {
+    // env acts on the host still installs in the cage, with the scripts disabled; one whose mcpcage
+    // cannot be found does not start at all.
+    if ((type === "npx" || (type === "mcpcage" && !server.protectedByMcpcage && server.mcpcage !== "not found")) && npm && !npm.local) {
       let lookup = lookups.get(npm.spec);
       if (!lookup) {
         lookup = installScripts(npm.spec, { offline: options.offline, cacheDir: options.cacheDir, runner: options.npmRunner });
@@ -255,14 +280,120 @@ function npmLaunch(argv: string[]): NpmLaunch | undefined {
 }
 
 /**
- * A server that runs on this machine with the user's permissions: npx outside mcpcage, or
- * `mcpcage run --no-sandbox`; or a caged one whose env runs on this machine, in mcpcage, first.
+ * A server that runs on this machine with the user's permissions: npx outside mcpcage,
+ * `mcpcage run --no-sandbox`, or a program that is only named mcpcage; or a caged one whose env
+ * runs on this machine, in mcpcage, first. An mcpcage that cannot be found starts nothing.
  */
 export function isUncaged(server: ServerReport): boolean {
   if (server.type === "npx") return true;
   if (server.type !== "mcpcage") return false;
   // A wrapped entry that could not be described is not known to be caged.
-  return server.error !== undefined || !server.protectedByMcpcage || server.hostEnv.length > 0;
+  if (server.error !== undefined) return true;
+  if (server.mcpcage === "not found") return false;
+  return !server.protectedByMcpcage || server.hostEnv.length > 0;
+}
+
+/**
+ * What a wrapped entry's command is on this machine. An absolute path is taken as written, a bare
+ * name is looked up in PATH as `which` would; symlinks are followed (a global npm install links
+ * bin/mcpcage to the package's dist/cli.js) and the nearest package.json a few directories up must
+ * say "mcpcage". `/tmp/evil/mcpcage run -- ...` was reported caged, and left alone by --fix, for its
+ * name alone. The same file as `own`, the command --fix writes, is mcpcage whatever it is: pnpm and
+ * Volta install a script or a program of their own, not a link into the package, and an entry --fix
+ * wrote with one was a look-alike at the next scan, rewritten again by every --fix.
+ */
+export function mcpcageAt(command: string, own?: string): NonNullable<ServerReport["mcpcage"]> {
+  const real = realCommand(command);
+  if (real === undefined) return "not found";
+  if (own !== undefined && realCommand(own) === real) return "installed";
+  // npm on Windows installs a mcpcage.cmd script next to node_modules\mcpcage, not a link.
+  if (process.platform === "win32" && /\.(cmd|ps1)$/i.test(real) && packageName(join(dirname(real), "node_modules", "mcpcage")) === "mcpcage") return "installed";
+  let dir = dirname(real);
+  for (let level = 0; level < 4; level++) {
+    if (existsSync(join(dir, "package.json"))) return packageName(dir) === "mcpcage" ? "installed" : "other program";
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return "other program";
+}
+
+/** The file a command starts here, symlinks followed, or undefined when there is none. */
+function realCommand(command: string): string | undefined {
+  const found = onThisMachine(command);
+  if (found === undefined) return undefined;
+  try {
+    return realpathSync(found);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The file a command names here: an absolute path that exists, or a bare name's first match in PATH. */
+function onThisMachine(command: string): string | undefined {
+  if (isAbsolute(command)) return existsSync(command) ? command : undefined;
+  // A relative path depends on the directory the client starts it from, which is not known here.
+  if (/[/\\]/.test(command)) return undefined;
+  const windows = process.platform === "win32";
+  const extensions = windows && !/\.[^.]+$/.test(command) ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean) : [""];
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute(dir)) continue;
+    for (const extension of extensions) {
+      const file = join(dir, `${command}${extension}`);
+      try {
+        if (!statSync(file).isFile()) continue;
+        if (!windows) accessSync(file, constants.X_OK);
+        return file;
+      } catch {
+        // not here, or not a program: on to the next
+      }
+    }
+  }
+  return undefined;
+}
+
+function packageName(dir: string): unknown {
+  try {
+    const manifest = JSON.parse(readConfigFile(join(dir, "package.json")).toString("utf8")) as unknown;
+    return isJsonObject(manifest) ? manifest.name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The run options of a caged entry that open its cage, in plain words: each was written on purpose,
+ * so --fix leaves them, and the report is where they show. Options that `mcpcage run` refuses start
+ * nothing, and open nothing.
+ */
+function openedBy(entry: ServerEntry): string[] {
+  const args = stringArgs(entry);
+  const separator = args.indexOf("--");
+  let values: ReturnType<typeof runValues>;
+  try {
+    values = runValues(args.slice(1, separator === -1 ? args.length : separator));
+  } catch {
+    return [];
+  }
+  const lines: string[] = [];
+  if (values["allow-net"]) {
+    // Only what is passed with --env reaches the cage: its env alone stays outside.
+    const names = [...new Set(values.env.map((variable) => variable.split("=")[0]!))].filter((name) => SECRET_NAME.test(name)).map(terminalSafe);
+    const list = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0];
+    lines.push(`network: on (--allow-net)${list === undefined ? "" : `, so it can send ${list} over the network`}`);
+  }
+  if (values["allow-server-requests"]) lines.push("can ask your client to run the model or to question you (--allow-server-requests)");
+  if (values["keep-image-user"]) lines.push("runs as the image's own user, which may be root (--keep-image-user)");
+  // The access lines name the paths.
+  if (values["allow-sensitive-mount"]) lines.push("may mount the whole disk, your home directory or a directory with credentials (--allow-sensitive-mount)");
+  // Docker reads 0 as no limit at all.
+  if (Number.parseFloat(values.memory) <= 0) lines.push(`no memory limit (--memory ${terminalSafe(values.memory)})`);
+  if (Number.parseFloat(values.cpus) <= 0) lines.push(`no CPU limit (--cpus ${terminalSafe(values.cpus)})`);
+  return lines;
+}
+
+function runValues(own: string[]) {
+  return parseArgs({ args: own, options: RUN_OPTIONS, strict: true }).values;
 }
 
 /** The variables of an entry's env that act on the host once it starts mcpcage, with what each does. */
@@ -342,6 +473,7 @@ function serverLines(server: ServerReport, home: string): string[] {
   if (server.installScripts) details.push(installLine(server.installScripts));
   // Before what --inspect found, whose signs belong under its own line.
   for (const variable of server.hostEnv) details.push(`env ${printable(variable.name)}: ${variable.what}`);
+  details.push(...server.opened);
   for (const skipped of server.inspection?.skipped ?? []) details.push(`inspected without ${printable(tilde(skipped.path, home))}: ${printable(skipped.reason)}`);
   const findings: string[] = [];
   if (server.inspection?.error !== undefined) {
@@ -365,9 +497,15 @@ function status(server: ServerReport): string {
   switch (server.type) {
     case "npx":
       return "NOT CAGED";
-    case "mcpcage":
+    case "mcpcage": {
+      const command = terminalSafe(commandOf(server.command));
+      if (server.mcpcage === "other program") return `starts ${command}, which is not an installed mcpcage`;
+      if (server.mcpcage === "not found") return `starts ${command}, which ${/[/\\]/.test(command) ? "was not found" : "is not on your PATH"}`;
       if (!server.protectedByMcpcage) return "mcpcage --no-sandbox: pinning and audit only, no isolation";
-      return server.hostEnv.length > 0 ? "caged, but its env runs on your machine" : "caged";
+      // The env acts first, on the host, before any cage exists.
+      if (server.hostEnv.length > 0) return "caged, but its env runs on your machine";
+      return server.opened.length > 0 ? "caged, with the cage opened" : "caged";
+    }
     case "remote":
       return "remote, nothing to cage";
     case "docker":
@@ -400,7 +538,10 @@ function summary(report: ProtectReport): string[] {
   const present = report.files.filter((file) => file.exists).length;
   const uncaged = count(isUncaged);
   const elsewhere = count((server) => server.type !== "npx" && server.type !== "mcpcage");
-  const caged = count((server) => server.type === "mcpcage" && !isUncaged(server));
+  const inCage = (server: ServerReport) => server.type === "mcpcage" && server.mcpcage === "installed" && !isUncaged(server);
+  const caged = count((server) => inCage(server) && server.opened.length === 0);
+  const opened = count((server) => inCage(server) && server.opened.length > 0);
+  const missing = count((server) => server.type === "mcpcage" && server.error === undefined && server.mcpcage === "not found");
   const scripts = count((server) => server.installScripts?.status === "found");
   const run = `  ${many(uncaged, "runs", "run")} on your machine with your permissions and no cage.`;
   const lines = [
@@ -420,6 +561,8 @@ function summary(report: ProtectReport): string[] {
     `  ${many(elsewhere, "is", "are")} remote, already containerized, or started by another command: mcpcage cannot cage ${elsewhere === 1 ? "it" : "them"} yet.`,
     `  ${caged} already ${caged === 1 ? "runs" : "run"} through mcpcage.`,
   );
+  if (opened > 0) lines.push(`  ${many(opened, "runs", "run")} through mcpcage with the cage opened by ${opened === 1 ? "its" : "their"} options.`);
+  if (missing > 0) lines.push(`  ${many(missing, "starts", "start")} an mcpcage that could not be found.`);
   return lines;
 }
 
@@ -464,9 +607,12 @@ export function fixConfigs(options: FixOptions): FixOutcome {
   for (const file of options.report.files) {
     if (!file.exists || file.error !== undefined) continue;
     const servers = options.report.servers.filter((server) => server.file === file.file);
-    const targets = servers.filter((server) => server.type === "npx" || (server.type === "mcpcage" && server.protectedByMcpcage && server.hostEnv.length > 0));
+    // A program that is only named mcpcage gets the rewrite an npx entry gets.
+    const targets = servers.filter(
+      (server) => server.type === "npx" || (server.type === "mcpcage" && ((server.protectedByMcpcage && server.hostEnv.length > 0) || server.mcpcage === "other program")),
+    );
     // Already wrapped, so there is nothing to rewrite: only the person who chose --no-sandbox can drop it.
-    const onHost = servers.filter((server) => server.type === "mcpcage" && !server.protectedByMcpcage && server.error === undefined);
+    const onHost = servers.filter((server) => server.type === "mcpcage" && server.mcpcage === "installed" && !server.protectedByMcpcage && server.error === undefined);
     if (targets.length === 0 && onHost.length === 0) continue;
     try {
       files.push(fixFile(file, targets, onHost, options, home));
@@ -508,7 +654,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
       continue;
     }
     (servers as Record<string, unknown>)[server.name] = wrapped.entry;
-    fixed.changed.push({ name: server.name, label: server.label, after: wrapped.entry, ...(server.type === "mcpcage" ? { envOnly: true } : {}) });
+    fixed.changed.push({ name: server.name, label: server.label, after: wrapped.entry, ...(wrapped.envOnly ? { envOnly: true } : {}) });
     const before = isJsonObject((entry as ServerEntry).env) ? Object.keys((entry as ServerEntry).env!) : [];
     removed.set(wrapped.entry, before.filter((name) => !Object.hasOwn(wrapped.entry.env ?? {}, name)));
   }
@@ -556,10 +702,21 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   return fixed;
 }
 
-/** An npx entry wrapped, or a caged entry with its env moved off the host; or why it stays as it is. */
-function rewrite(entry: ServerEntry, command: string): { entry: ServerEntry } | { skip: string } {
+/**
+ * An npx entry wrapped, a caged entry with its env moved off the host, or the npx command a program
+ * only named mcpcage would start, wrapped as wrap would have wrapped it; or why it stays as it is.
+ * What the command is, is looked at again: the file may have changed since the scan.
+ */
+function rewrite(entry: ServerEntry, command: string): { entry: ServerEntry; envOnly?: boolean } | { skip: string } {
   if (serverType(entry) !== "mcpcage") return wrapEntry(entry, { command });
-  return moveHostEnv(entry) ?? { skip: "its env no longer runs on your machine" };
+  const found = mcpcageAt(entry.command as string, command);
+  if (found === "other program") {
+    const inner = unwrapEntry(entry);
+    return "skip" in inner ? inner : wrapEntry(inner.entry, { command });
+  }
+  if (found === "not found") return { skip: "its mcpcage can no longer be found" };
+  const moved = moveHostEnv(entry);
+  return moved === undefined ? { skip: "its env no longer runs on your machine" } : "skip" in moved ? moved : { entry: moved.entry, envOnly: true };
 }
 
 /** JSON in the file's own style: its indentation unit, line endings, final newline and byte order mark. */
@@ -850,9 +1007,14 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : typeof error === "string" ? error : "an unexpected error";
 }
 
-/** The program's file name, from the first word of a command line (quoted when it has spaces). */
+/** The first word of a command line, as written (quoted when it has spaces). */
+function commandOf(line: string): string {
+  return line.startsWith('"') ? (/^"([^"]*)"/.exec(line)?.[1] ?? line) : (line.split(" ")[0] ?? line);
+}
+
+/** The program's file name, from the first word of a command line. */
 function programOf(line: string): string {
-  const first = line.startsWith('"') ? (/^"([^"]*)"/.exec(line)?.[1] ?? line) : (line.split(" ")[0] ?? line);
+  const first = commandOf(line);
   return first.split(/[/\\]/).pop() || first;
 }
 
