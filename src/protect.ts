@@ -5,7 +5,7 @@ import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation 
 import {
   envValues, hostPath, hostVariable, isWrapped, moveHostEnv, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry, type ServerEntry, type ServerType,
 } from "./config.js";
-import { mcpcageAt, type McpcageKind } from "./installed.js";
+import { mcpcageAt, pathPicks, type McpcageKind, type PathPick } from "./installed.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
@@ -58,6 +58,11 @@ export interface ServerReport {
    * entry starts mcpcage (see HOST_ENV in config.ts), by name, with what each does. Never values.
    */
   hostEnv: Array<{ name: string; what: string }>;
+  /**
+   * For a wrapped entry that starts mcpcage: the node and docker its env's PATH makes the client and
+   * mcpcage start in place of those on the user's PATH (see pathPicks).
+   */
+  pathPicks: PathPick[];
   /** What in the entry is not as a client expects it, such as an argument that is not a string. */
   problems: string[];
   /** Why the entry could not be described whole: the report says so on its lines and goes on. */
@@ -154,6 +159,7 @@ async function describeServer(
     secrets: [],
     broadAccess: [],
     hostEnv: [],
+    pathPicks: [],
     problems: [],
     opened: [],
   };
@@ -171,6 +177,8 @@ async function describeServer(
     server.secrets = [...new Set([...secretNames(entry), ...shown.secrets])];
     server.broadAccess = type === "remote" ? [] : broadPaths(stringArgs(entry), options.home);
     server.hostEnv = type === "npx" || type === "mcpcage" ? hostEnvOf(entry) : [];
+    // Its PATH chooses, on the host, the node that runs mcpcage and the docker that mcpcage runs.
+    if (server.mcpcage === "installed") server.pathPicks = pathPicks(entry);
     const odd = Array.isArray(entry.args) ? entry.args.filter((arg) => typeof arg !== "string").length : 0;
     if (odd > 0) server.problems.push(`args: ${odd === 1 ? "an argument that is not a string" : `${odd} arguments that are not strings`}`);
     const launch = npxCommand(entry, type);
@@ -309,7 +317,8 @@ function npmLaunch(argv: string[]): NpmLaunch | undefined {
 /**
  * A server that runs on this machine with the user's permissions: npx outside mcpcage,
  * `mcpcage run --no-sandbox`, or a program that is only named mcpcage; or a caged one whose env
- * runs on this machine, in mcpcage, first. An mcpcage that cannot be found starts nothing.
+ * runs on this machine, in mcpcage, first, or whose PATH picks another node or docker than the
+ * user's. An mcpcage that cannot be found starts nothing.
  */
 export function isUncaged(server: ServerReport): boolean {
   if (server.type === "npx") return true;
@@ -317,7 +326,7 @@ export function isUncaged(server: ServerReport): boolean {
   // A wrapped entry that could not be described is not known to be caged.
   if (server.error !== undefined) return true;
   if (server.mcpcage === "not found") return false;
-  return !server.protectedByMcpcage || server.hostEnv.length > 0;
+  return !server.protectedByMcpcage || server.hostEnv.length > 0 || server.pathPicks.length > 0;
 }
 
 /**
@@ -432,6 +441,7 @@ function serverLines(server: ServerReport, home: string): string[] {
   if (server.installScripts) details.push(installLine(server.installScripts));
   // Before what --inspect found, whose signs belong under its own line.
   for (const variable of server.hostEnv) details.push(`env ${terminalSafe(variable.name)}: ${variable.what}`);
+  for (const pick of server.pathPicks) details.push(pathLine(pick));
   details.push(...server.opened);
   for (const skipped of server.inspection?.skipped ?? []) details.push(`inspected without ${terminalSafe(tilde(skipped.path, home))}: ${terminalSafe(skipped.reason)}`);
   const findings: string[] = [];
@@ -463,6 +473,7 @@ function status(server: ServerReport): string {
       if (!server.protectedByMcpcage) return "mcpcage --no-sandbox: pinning and audit only, no isolation";
       // The env acts first, on the host, before any cage exists.
       if (server.hostEnv.length > 0) return "caged, but its env runs on your machine";
+      if (server.pathPicks.length > 0) return "caged, but its PATH picks other programs";
       return server.opened.length > 0 ? "caged, with the cage opened" : "caged";
     }
     case "remote":
@@ -474,6 +485,13 @@ function status(server: ServerReport): string {
     default:
       return server.command === NO_COMMAND ? "no command: nothing to start" : `${terminalSafe(programOf(server.command))}, not npx: cannot be caged yet`;
   }
+}
+
+/** What an entry's PATH picks, in plain words: the client starts mcpcage with node, and mcpcage starts docker. */
+function pathLine(pick: PathPick): string {
+  const who = pick.program === "node" ? "the client" : "mcpcage";
+  if (pick.file === undefined) return `env PATH: which ${pick.program} ${who} starts depends on the directory the client starts the entry from`;
+  return `env PATH: makes ${who} start ${terminalSafe(pick.file)}, not the ${pick.program} on your PATH`;
 }
 
 function installLine(lookup: InstallScripts): string {
@@ -572,9 +590,11 @@ export function fixConfigs(options: FixOptions): FixOutcome {
     );
     // Already wrapped, so there is nothing to rewrite: only the person who chose --no-sandbox can drop it.
     const onHost = servers.filter((server) => server.type === "mcpcage" && server.mcpcage === "installed" && !server.protectedByMcpcage && server.error === undefined);
-    if (targets.length === 0 && onHost.length === 0) continue;
+    // A PATH is often what lets the client find node at all: which one was meant, only the user knows.
+    const picked = servers.filter((server) => server.pathPicks.length > 0 && server.error === undefined && !targets.includes(server));
+    if (targets.length === 0 && onHost.length === 0 && picked.length === 0) continue;
     try {
-      files.push(fixFile(file, targets, onHost, options, home));
+      files.push(fixFile(file, targets, onHost, picked, options, home));
     } catch (error) {
       // One file that cannot be rewritten leaves the others to be.
       const fixed: FixedFile = { file: file.file, changed: [], skipped: [], refused: messageOf(error) };
@@ -585,7 +605,7 @@ export function fixConfigs(options: FixOptions): FixOutcome {
   return { files };
 }
 
-function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerReport[], options: FixOptions, home: string): FixedFile {
+function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerReport[], picked: ServerReport[], options: FixOptions, home: string): FixedFile {
   const fixed: FixedFile = { file: file.file, changed: [], skipped: [] };
   const shown = shownFile(file, home);
   const where = (label: string | undefined) => (label === undefined ? shown : `${shown} (project ${terminalSafe(label)})`);
@@ -619,6 +639,10 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   }
   for (const server of onHost) {
     fixed.skipped.push({ name: server.name, label: server.label, reason: "it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand" });
+  }
+  for (const server of picked) {
+    const programs = server.pathPicks.map((pick) => pick.program).join(" and ");
+    fixed.skipped.push({ name: server.name, label: server.label, reason: `its env sets a PATH that picks another ${programs} than yours: check that PATH, or remove it from its "env" by hand` });
   }
   for (const skipped of fixed.skipped) options.log(`  not changed: ${terminalSafe(skipped.name)} in ${where(skipped.label)}: ${terminalSafe(skipped.reason)}`);
   if (fixed.changed.length === 0) return fixed;

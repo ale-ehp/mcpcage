@@ -2103,6 +2103,73 @@ describe("a configuration that is not a regular file", () => {
   });
 });
 
+describe("what a wrapped entry's PATH picks", () => {
+  /** Where `which` finds `program` on `path`, or undefined. */
+  const which = (program: string, path: string) => {
+    const found = spawnSync("which", [program], { encoding: "utf8", env: { PATH: path } });
+    return found.status === 0 ? found.stdout.trim() : undefined;
+  };
+
+  it("does not count as caged an entry whose PATH picks another node or docker, and --fix leaves that PATH to the user", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-path-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const installed = fakeMcpcage();
+    // A node and a docker of the entry's choice, first on its PATH.
+    const fake = join(top, "fake");
+    for (const program of ["node", "docker"]) {
+      writeText(join(fake, program), "#!/bin/sh\nexit 0\n");
+      chmodSync(join(fake, program), 0o755);
+    }
+    // Links to the node and docker that the PATH of protect finds: the same programs, in another directory.
+    const same = join(top, "same");
+    mkdirSync(same);
+    for (const program of ["node", "docker"]) {
+      const found = which(program, installed.path);
+      if (found !== undefined) symlinkSync(found, join(same, program));
+    }
+    const run = ["run", "--", "npx", "-y", "@acme/notes-mcp"];
+    const servers = {
+      picked: { command: installed.command, args: run, env: { PATH: `${fake}${delimiter}${installed.path}` } },
+      relative: { command: installed.command, args: run, env: { PATH: `.${delimiter}${installed.path}` } },
+      same: { command: installed.command, args: run, env: { PATH: same } },
+      plain: { command: installed.command, args: run },
+    };
+    const cursor = locationsFor(home, project)("cursor", "user");
+    writeJsonFile(cursor, { mcpServers: servers });
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
+    const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+    const indent = " ".repeat(16);
+
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(scan.stdout).toContain(
+      `  caged, but its PATH picks other programs\n${indent}env PATH: makes the client start ${join(fake, "node")}, not the node on your PATH\n` +
+        `${indent}env PATH: makes mcpcage start ${join(fake, "docker")}, not the docker on your PATH\n  relative `,
+    );
+    expect(scan.stdout).toContain(
+      `  caged, but its PATH picks other programs\n${indent}env PATH: which node the client starts depends on the directory the client starts the entry from\n` +
+        `${indent}env PATH: which docker mcpcage starts depends on the directory the client starts the entry from\n  same `,
+    );
+    expect(lineOf(scan.stdout, "picked")).toMatch(/ {2}caged, but its PATH picks other programs$/);
+    expect(lineOf(scan.stdout, "same")).toMatch(/ {2}caged$/);
+    expect(lineOf(scan.stdout, "plain")).toMatch(/ {2}caged$/);
+    expect(scan.stdout).toContain("  2 run on your machine with your permissions and no cage.");
+    expect(scan.stdout).toContain("  2 already run through mcpcage.");
+    expect(scan.code).toBe(1);
+
+    // Which PATH was meant, --fix cannot know: it says what to do by hand and changes nothing.
+    const original = readFileSync(cursor);
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build");
+    const where = tilde(cursor, home);
+    const byHand = `its env sets a PATH that picks another node and docker than yours: check that PATH, or remove it from its "env" by hand`;
+    expect(fix.stdout).toContain(`\nPlan\n  not changed: picked in ${where}: ${byHand}\n  not changed: relative in ${where}: ${byHand}\n  nothing that mcpcage can change by itself.\n`);
+    expect(fix.code).toBe(1);
+    expect(readFileSync(cursor)).toEqual(original);
+  });
+});
+
 describe("an env variable named __proto__", () => {
   // JSON.parse makes "__proto__" an own key like any other. Assigned on `{}`, it set the prototype
   // instead: wrap wrote the entry without its value and with its `--env __proto__`. Compared as JSON

@@ -121,8 +121,12 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 - **The Docker daemon itself.** Whoever controls it controls the containers.
 - **What stays in a server entry's `env`.** `PATH` stays, because it is often what lets the client
   find `node`: whoever can write the entry still chooses which `node`, `docker` and `npm` mcpcage
-  runs, as they chose the `npx` it replaced. A value moved into `--env NAME=value` is written in the
-  arguments, so it shows in the machine's process list while the server runs.
+  runs, as they chose the `npx` it replaced. `protect` compares the `node` and `docker` that the
+  entry's `PATH` picks with those on the user's own `PATH`, symlinks followed: an entry whose `PATH`
+  picks others is named and not counted as caged, and `--fix` leaves that `PATH` for the user to
+  check or remove, since it cannot know which one was meant. The `npm` that packs a local package is
+  not compared. A value moved into `--env NAME=value` is written in the arguments, so it shows in
+  the machine's process list while the server runs.
 - **`--no-sandbox`.** It keeps pinning and audit but provides no isolation at all. `protect` counts
   such entries as exposed.
 - **Configuration files mcpcage will not rewrite.** A file with comments (VS Code's `mcp.json`) is

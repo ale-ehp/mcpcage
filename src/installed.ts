@@ -36,6 +36,33 @@ export function mcpcageAt(entry: { command: string; env?: unknown }, own?: strin
   return known.includes(real) ? "installed" : "other program";
 }
 
+/** A program that a wrapped entry's PATH makes the client or mcpcage start in place of the one on the user's PATH. */
+export interface PathPick {
+  program: "node" | "docker";
+  /** Where the entry's PATH finds it; undefined when that depends on the directory the client starts the entry from. */
+  file?: string;
+}
+
+/**
+ * The programs an entry's own PATH picks on the host: `node`, which the `#!/usr/bin/env node` of
+ * mcpcage's script finds first in that PATH, and `docker`, which mcpcage starts with it. A client
+ * starts the entry with its `env`, so a PATH that led to a node of someone's choice ran it on the
+ * host before any cage, and the entry was reported caged. Each is compared, symlinks followed, with
+ * what this process's PATH finds: the same file says nothing, and so does a PATH that finds none,
+ * which starts nothing.
+ */
+export function pathPicks(entry: { env?: unknown }): PathPick[] {
+  const path = pathOf(entry.env);
+  if (path === undefined) return [];
+  return (["node", "docker"] as const).flatMap((program): PathPick[] => {
+    const theirs = onPath(program, path, true);
+    if (theirs === undefined) return [];
+    if (theirs === UNKNOWN) return [{ program }];
+    const real = realFile(theirs);
+    return real !== undefined && real === realCommand(program) ? [] : [{ program, file: theirs }];
+  });
+}
+
 /** The file a command names here, symlinks followed, looked up in this process's PATH; undefined when there is none. */
 function realCommand(command: string): string | undefined {
   const found = onPath(command, process.env.PATH ?? "", false);
