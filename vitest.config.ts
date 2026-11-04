@@ -5,6 +5,8 @@ import { defineConfig } from "vitest/config";
 // fail with a timeout while nothing was wrong. The limit here is for the slowest honest run.
 export default defineConfig({
   test: {
+    // One temporary directory for the whole run, removed at its end (see test/global-setup.ts).
+    globalSetup: ["test/global-setup.ts"],
     testTimeout: 30_000,
     hookTimeout: 30_000,
   },
