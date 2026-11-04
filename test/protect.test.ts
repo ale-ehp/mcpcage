@@ -2649,7 +2649,10 @@ describe("what wrap and --fix write", () => {
     const fake = join(top, "fake");
     for (const [dir, name] of [[evilDir, "mcpcage"], [theirsToo, "mcpcage"], [fake, "node"]] as const) idleProgram(dir, name);
     const run = ["run", "--", "npx", "-y", "rogue"];
-    const yours = (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir)).slice(-2);
+    // Directories of the user's PATH where a bare mcpcage finds nothing: on a machine with mcpcage
+    // installed, one of them holds it, and the entries wrap writes would start that one, not --command's.
+    const noMcpcage = (dir: string) => !["", ".cmd", ".exe"].some((extension) => existsSync(join(dir, `mcpcage${extension}`)));
+    const yours = (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir) && noMcpcage(dir)).slice(-2);
     const file = join(top, "mcp.json");
     const servers = {
       // As R3 found it: a bare mcpcage that the entry's PATH finds elsewhere.
