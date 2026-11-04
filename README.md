@@ -432,6 +432,7 @@ In short:
   home directory is shared by default).
 - Tested on macOS with Colima and Docker 29, and on Windows 10 with Docker Desktop 4.49 (Linux
   containers), where server-filesystem ran in the cage with read-only and writable folders.
+- The 24 most downloaded npx servers, and how each runs in the cage: [docs/compatibility.md](docs/compatibility.md).
 
 ## Roadmap
 
