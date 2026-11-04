@@ -1,0 +1,29 @@
+{
+  "about": "The MCP servers the compatibility run cages (test/compat/run.mjs), in the order of their npm downloads. How they were chosen, and what each result means, is in docs/compatibility.md. Fields: package, npx (npx's flags, default -y), args ({dir} is a fresh folder with one file, hello.txt), mounts, files (more files for that folder), env (given with --env: dummy keys for servers that refuse to start without one, or a setting), call (one harmless tool call; expect is text its answer must hold, {base} the folder's name), expected (ok, needs network, fails, build fails), notes.",
+  "servers": [
+    {"name": "playwright", "package": "@playwright/mcp", "args": [], "notes": "Lists its tools. Its browser tools need a browser, which the cage does not have: install scripts are off, and nothing is downloaded when it runs."},
+    {"name": "pdf", "package": "@modelcontextprotocol/server-pdf", "npx": ["-y", "--silent"], "args": ["--stdio"], "call": {"tool": "list_pdfs", "arguments": {}}, "notes": "Started as its README writes it, with npx --silent."},
+    {"name": "chrome-devtools", "package": "chrome-devtools-mcp", "args": [], "notes": "Lists its tools. It drives an installed Google Chrome, which the cage does not have."},
+    {"name": "filesystem", "package": "@modelcontextprotocol/server-filesystem", "args": ["{dir}"], "mounts": ["{dir}"], "call": {"tool": "list_allowed_directories", "arguments": {}, "expect": "{base}"}, "notes": "The folder is mounted read-only. On Windows the server sees it at /c/Users/..."},
+    {"name": "mcp-remote", "package": "mcp-remote", "args": ["https://mcp.deepwiki.com/mcp"], "expected": "needs network", "notes": "A bridge to a remote server, here DeepWiki's, which needs no key. It connects when it starts, so it needs --allow-net."},
+    {"name": "context7", "package": "@upstash/context7-mcp", "args": [], "notes": "Lists its tools without the network; its calls fetch documentation and need --allow-net."},
+    {"name": "desktop-commander", "package": "@wonderwhy-er/desktop-commander", "args": [], "call": {"tool": "get_config", "arguments": {}}, "notes": "Lists its tools. Its commands need a shell, and the cage's image has none."},
+    {"name": "notion", "package": "@notionhq/notion-mcp-server", "args": [], "notes": "Starts without a token."},
+    {"name": "everything", "package": "@modelcontextprotocol/server-everything", "args": [], "call": {"tool": "echo", "arguments": {"message": "hello from mcpcage"}, "expect": "hello from mcpcage"}, "notes": ""},
+    {"name": "memory", "package": "@modelcontextprotocol/server-memory", "args": [], "call": {"tool": "read_graph", "arguments": {}}, "notes": "Keeps its graph next to its code, which is read-only in the cage: to write, set MEMORY_FILE_PATH to a file in a :rw mount."},
+    {"name": "hostinger", "package": "hostinger-api-mcp", "args": [], "notes": "Starts without a token."},
+    {"name": "sentry", "package": "@sentry/mcp-server", "args": [], "env": {"SENTRY_ACCESS_TOKEN": "dummy-not-a-real-token"}, "notes": "Refuses to start without a token, so it is given a dummy one."},
+    {"name": "gitlab", "package": "@zereight/mcp-gitlab", "args": [], "env": {"GITLAB_PERSONAL_ACCESS_TOKEN": "dummy-not-a-real-token"}, "notes": "Refuses to start without a token, so it is given a dummy one."},
+    {"name": "pandacss", "package": "@pandacss/mcp", "args": ["--cwd", "{dir}"], "mounts": ["{dir}"], "files": {"panda.config.mjs": "export default { include: [], outdir: 'styled-system' };\n"}, "call": {"tool": "get_config", "arguments": {}, "expect": "styled-system"}, "notes": "Reads the Panda project of its working directory, which in the cage is the image's /app: it is given --cwd and the project's folder."},
+    {"name": "supabase", "package": "@supabase/mcp-server-supabase", "args": ["--read-only"], "env": {"SUPABASE_ACCESS_TOKEN": "dummy-not-a-real-token"}, "expected": "needs network", "notes": "Refuses to start without a token, so it is given a dummy one, and fetches from Supabase's API to answer tools/list."},
+    {"name": "github", "package": "@modelcontextprotocol/server-github", "args": [], "notes": "Archived reference server. Starts without a token."},
+    {"name": "mongodb", "package": "mongodb-mcp-server", "args": ["--readOnly"], "notes": "Starts without a connection string."},
+    {"name": "slack", "package": "@modelcontextprotocol/server-slack", "args": [], "env": {"SLACK_BOT_TOKEN": "dummy-not-a-real-token", "SLACK_TEAM_ID": "T00000000"}, "notes": "Archived reference server. Refuses to start without a token and a team id, so it is given dummy ones."},
+    {"name": "sequential-thinking", "package": "@modelcontextprotocol/server-sequential-thinking", "args": [], "call": {"tool": "sequentialthinking", "arguments": {"thought": "Is the cage on?", "nextThoughtNeeded": false, "thoughtNumber": 1, "totalThoughts": 1}}, "notes": ""},
+    {"name": "azure", "package": "@azure/mcp", "args": ["server", "start"], "env": {"DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1"}, "notes": "A .NET program that needs ICU, which the cage's image does not have: DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 lets it run without."},
+    {"name": "figma", "package": "figma-developer-mcp", "args": ["--stdio"], "env": {"FIGMA_API_KEY": "dummy-not-a-real-key"}, "notes": "Refuses to start without a key, so it is given a dummy one."},
+    {"name": "next-devtools", "package": "next-devtools-mcp", "args": [], "notes": ""},
+    {"name": "postgres", "package": "@modelcontextprotocol/server-postgres", "args": ["postgresql://localhost/mydb"], "notes": "Archived reference server. Starts with a database it cannot reach, and connects only to answer a query."},
+    {"name": "firecrawl", "package": "firecrawl-mcp", "args": [], "notes": "Starts without a key."}
+  ]
+}
