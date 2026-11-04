@@ -1721,6 +1721,42 @@ describe("a configuration that is not a regular file", () => {
   });
 });
 
+describe("an env variable named __proto__", () => {
+  // JSON.parse makes "__proto__" an own key like any other. Assigned on `{}`, it set the prototype
+  // instead: wrap wrote the entry without its value and with its `--env __proto__`. Compared as JSON
+  // text, because a `__proto__` key in an object literal of this test would not be one either.
+  const parsed = (text: string) => JSON.parse(text) as ServerEntry;
+
+  it("keeps its value in env through wrap and through --fix's move", () => {
+    const wrapped = wrapEntry(parsed('{"command":"npx","args":["-y","demo"],"env":{"__proto__":"server-setting-0123456789","API_KEY":"x"}}'), { command: "mcpcage" });
+    if (!("entry" in wrapped)) throw new Error(wrapped.skip);
+    expect(JSON.stringify(wrapped.entry)).toBe(
+      '{"command":"mcpcage","args":["run","--env","__proto__","--env","API_KEY","--","npx","-y","demo"],"env":{"__proto__":"server-setting-0123456789","API_KEY":"x"}}',
+    );
+    const moved = moveHostEnv(parsed('{"command":"mcpcage","args":["run","--env","__proto__","--env","NODE_OPTIONS","--","npx","demo"],"env":{"__proto__":"server-setting","NODE_OPTIONS":"--x"}}'));
+    expect(moved !== undefined && "entry" in moved ? JSON.stringify(moved.entry) : moved).toBe(
+      '{"command":"mcpcage","args":["run","--env","NODE_OPTIONS=--x","--env","__proto__","--","npx","demo"],"env":{"__proto__":"server-setting"}}',
+    );
+  });
+
+  it("is in the file wrap writes and in the one unwrap writes back", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-proto-env-"));
+    const file = join(dir, "mcp.json");
+    const original = '{\n  "mcpServers": {\n    "demo": {\n      "command": "npx",\n      "args": ["-y", "demo"],\n      "env": { "__proto__": "server-setting-0123456789", "NODE_OPTIONS": "--x" }\n    }\n  }\n}\n';
+    writeText(file, original);
+    const env = fakeUserEnv(join(dir, "home"), join(dir, "cage"));
+
+    const wrap = mcpcageWithEnv(env, "wrap", file, "--no-build");
+    expect(wrap.code, wrap.stderr).toBe(0);
+    expect(JSON.stringify(JSON.parse(readFileSync(file, "utf8")).mcpServers.demo)).toBe(
+      '{"command":"mcpcage","args":["run","--env","__proto__","--env","NODE_OPTIONS=--x","--","npx","-y","demo"],"env":{"__proto__":"server-setting-0123456789"}}',
+    );
+    const unwrap = mcpcageWithEnv(env, "unwrap", file);
+    expect(unwrap.code, unwrap.stderr).toBe(0);
+    expect(JSON.stringify(JSON.parse(readFileSync(file, "utf8")).mcpServers.demo)).toBe(JSON.stringify(JSON.parse(original).mcpServers.demo));
+  });
+});
+
 describe("backups", () => {
   it("--fix never replaces an earlier backup: it takes the next free name", async () => {
     // The clock stands still, so the name with the time is taken too, and a random suffix is added.

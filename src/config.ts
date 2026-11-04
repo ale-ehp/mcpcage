@@ -171,12 +171,15 @@ export function wrapEntry(entry: ServerEntry, options: { command: string }): { e
     if (reason !== undefined) return { skip: `needs ${path}, which mcpcage will not mount: ${reason}` };
   }
   const envFlags: string[] = [];
-  const env: Record<string, unknown> = {};
+  // Collected, then made into an object at once: assigned one by one on `{}`, a variable named
+  // __proto__ set the object's prototype instead, and the server lost its value while its
+  // `--env __proto__` stayed.
+  const env: Array<[string, unknown]> = [];
   for (const [name, value] of Object.entries(isJsonObject(entry.env) ? entry.env : {})) {
     const host = hostVariable(name, value);
     if (host === undefined) {
       envFlags.push("--env", name);
-      env[name] = value;
+      env.push([name, value]);
     } else if (host.to === "container") {
       if (typeof value !== "string") return { skip: notAString(name) };
       envFlags.push("--env", `${name}=${value}`);
@@ -185,7 +188,7 @@ export function wrapEntry(entry: ServerEntry, options: { command: string }): { e
   const mountFlags = [...new Set(paths.filter((path): path is string => path !== undefined))].flatMap((path) => ["--mount", `${path}:rw`]);
   const server = serverArgs.map((arg, index) => paths[index] ?? arg);
   const wrapped: ServerEntry = { ...entry, command: options.command, args: ["run", ...envFlags, ...mountFlags, "--", entry.command, ...npxPart, ...server] };
-  if (isJsonObject(entry.env)) wrapped.env = env as Record<string, string>;
+  if (isJsonObject(entry.env)) wrapped.env = Object.fromEntries(env) as Record<string, string>;
   return { entry: wrapped };
 }
 
