@@ -6,7 +6,7 @@ import { dockerAvailable } from "../src/sandbox.js";
 import { fakePrograms, standardDocker } from "./fake-programs.js";
 import { connect, freshHome, mcpcage, mcpcageWithEnv, root } from "./helpers.js";
 
-const probePackage = join(root, "demo", "probe-server");
+const probePackage = join(root, "test", "fixtures", "probe-server");
 const docker = dockerAvailable();
 const home = freshHome();
 const server = ["npx", "-y", probePackage, "--greeting", "hello"];

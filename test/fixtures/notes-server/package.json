@@ -1,0 +1,10 @@
+{
+  "name": "mcpcage-notes",
+  "version": "1.0.0",
+  "description": "Test MCP server: an honest notes server, which the tests copy and poison.",
+  "type": "module",
+  "bin": { "mcpcage-notes": "server.mjs" },
+  "dependencies": { "@modelcontextprotocol/sdk": "1.32.2", "zod": "4.6.7" },
+  "license": "Apache-2.0",
+  "private": true
+}

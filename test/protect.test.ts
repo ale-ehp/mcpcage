@@ -2154,7 +2154,7 @@ describe("which mcpcage an entry starts", () => {
     expect(fix.code).toBe(1);
   });
 
-  it("counts the running mcpcage as mcpcage, as the demo links it", () => {
+  it("counts the running mcpcage as mcpcage through a symlink to it", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-which-"));
     const link = join(top, "bin", "mcpcage");
     mkdirSync(dirname(link), { recursive: true });
