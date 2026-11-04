@@ -84,7 +84,8 @@ export function auditFiles(serverId?: string): string[] {
   if (!existsSync(root)) return [];
   const servers = serverId ? [serverId] : readdirSync(root);
   return servers.flatMap((server) => {
-    const dir = join(root, server);
+    // Through auditDir, which refuses a directory outside the store: `audit show ..` read the store's root.
+    const dir = auditDir(server);
     if (!existsSync(dir)) return [];
     return readdirSync(dir)
       .filter((name) => name.endsWith(".jsonl"))

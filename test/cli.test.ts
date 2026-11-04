@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { auditDir, checkServerId, serverDir } from "../src/paths.js";
 import { connectFake, fakeUserEnv, freshHome, mcpcage, mcpcageWithEnv, root } from "./helpers.js";
 
 describe("cli", () => {
@@ -107,5 +108,73 @@ describe("cli", () => {
     const result = mcpcage(home, "run", "--", "python3", "server.py");
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("is not an npx command");
+  });
+});
+
+describe("server ids", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /** A fresh machine: mcpcage's store two levels down, and the commands run with no Docker on the PATH. */
+  function machine() {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-ids-"));
+    const home = join(top, "home");
+    mkdirSync(home);
+    const cage = join(top, "cage", "store");
+    // No docker on the PATH: a run that got past the check would stop there, after the audit log.
+    const env = fakeUserEnv(home, cage, { PATH: join(top, "no-docker-here") });
+    return { top, cage, env };
+  }
+
+  it("refuses an id that is not one plain name before anything is written, in every command that takes one", () => {
+    const { top, cage, env } = machine();
+    const server = ["--", "npx", "-y", "something"];
+    const refused: Array<[string[], string]> = [
+      [["run", "--id", "../../x", ...server], '--id: "../../x"'],
+      [["run", "--id", "a/b", ...server], '--id: "a/b"'],
+      [["prepare", "--id", "../x", ...server], '--id: "../x"'],
+      [["diff", "../x"], '"../x"'],
+      [["approve", "../x", "--yes"], '"../x"'],
+      [["audit", "show", ".."], '".."'],
+      [["audit", "verify", "../x"], '"../x"'],
+    ];
+    for (const [args, shown] of refused) {
+      const result = mcpcageWithEnv(env, ...args);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toBe(`mcpcage: ${shown} is not a valid server id: use letters, digits, dots, dashes and underscores\n`);
+    }
+    // Nothing appeared, in the store or next to it: run --id ../../x wrote its audit log in top/cage/x.
+    expect(readdirSync(top).sort()).toEqual(["home"]);
+    expect(readdirSync(join(top, "home"))).toEqual([]);
+    expect(existsSync(cage)).toBe(false);
+  });
+
+  it("accepts letters, digits, dots, dashes and underscores", () => {
+    const { cage, env } = machine();
+    for (const id of ["notes", "my.server_1-2"]) {
+      const result = mcpcageWithEnv(env, "run", "--id", id, "--", "npx", "-y", "something");
+      expect(result.stderr).not.toContain("is not a valid server id");
+      expect(result.stderr).toContain("Docker is required"); // past the check, stopped where Docker is needed
+      expect(existsSync(join(cage, "audit", id))).toBe(true);
+    }
+    for (const id of ["0", "a".repeat(100), "A.b-C_9"]) expect(checkServerId(id)).toBe(id);
+    for (const id of ["", ".", "..", ".hidden", "-x", "_x", "a".repeat(101), "a b", "a\\b", "a\nb", "notes\n", "é"]) {
+      expect(() => checkServerId(id)).toThrow("is not a valid server id");
+    }
+  });
+
+  it("never gives a directory outside the store, whatever id reaches it", () => {
+    const store = join(mkdtempSync(join(tmpdir(), "mcpcage-ids-")), "store");
+    vi.stubEnv("MCPCAGE_HOME", store);
+    expect(serverDir("notes")).toBe(join(store, "servers", "notes"));
+    expect(auditDir("notes")).toBe(join(store, "audit", "notes"));
+    for (const id of ["../../escaped", "..", "", ".", "notes/../../x"]) {
+      expect(() => serverDir(id)).toThrow("leads outside mcpcage's store");
+      expect(() => auditDir(id)).toThrow("leads outside mcpcage's store");
+    }
+    // Each area is a store of its own: pins never land among the audit logs, nor logs among the pins.
+    expect(() => serverDir("../audit/notes")).toThrow("leads outside mcpcage's store");
+    expect(() => auditDir("../servers/notes")).toThrow("leads outside mcpcage's store");
   });
 });

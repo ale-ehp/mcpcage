@@ -13,7 +13,7 @@ import { unwrapConfig, wrapConfig, type ServerEntry, type WrapOutcome } from "./
 import { listTools } from "./inspect.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
-import { cageHome, serverDir } from "./paths.js";
+import { cageHome, checkServerId, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, type Pending } from "./pinstore.js";
 import { fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
@@ -131,8 +131,10 @@ function parseRun(argv: string[]) {
   if (sensitive[0] !== undefined && !values["allow-sensitive-mount"]) {
     throw new Error(`--mount ${sensitive[0].path}: ${sensitive[0].reason}. Pass --allow-sensitive-mount if you really want this.`);
   }
+  // The id names directories of the store, so one given here must stay a plain name (see paths.ts).
+  const id = values.id === undefined ? undefined : checkServerId(values.id, "--id");
   const spec = parseLaunch(server, values.image);
-  return { values, server, spec, serverId: values.id ?? serverIdFor(spec), sensitive };
+  return { values, server, spec, serverId: id ?? serverIdFor(spec), sensitive };
 }
 
 /** Builds and pins the sandbox image without starting the server (wrap does this for every server). */
@@ -354,6 +356,7 @@ function report(outcome: WrapOutcome, command: string, dryRun: boolean): void {
 function diff(argv: string[]): number {
   const [serverId] = argv;
   if (!serverId) throw new Error("usage: mcpcage diff <server-id>");
+  checkServerId(serverId);
   const pending = loadPending(serverId);
   if (!pending) {
     console.log(`${serverId}: no tool changes waiting for approval.`);
@@ -369,6 +372,7 @@ async function approve(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { yes: { type: "boolean", default: false } } });
   const [serverId] = positionals;
   if (!serverId) throw new Error("usage: mcpcage approve <server-id> [--yes]");
+  checkServerId(serverId);
   const pending = loadPending(serverId);
   if (!pending) {
     console.log(`${serverId}: nothing to approve.`);
@@ -431,7 +435,7 @@ function list(): number {
 function audit(argv: string[]): number {
   const [action, ...rest] = argv;
   if (action === "verify") {
-    const files = auditFiles(rest[0]);
+    const files = auditFiles(rest[0] === undefined ? undefined : checkServerId(rest[0]));
     let broken = 0;
     for (const file of files) {
       const result = verifyAuditFile(file);
@@ -447,6 +451,7 @@ function audit(argv: string[]): number {
     const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { lines: { type: "string", default: "20" } } });
     const [serverId] = positionals;
     if (!serverId) throw new Error("usage: mcpcage audit show <server-id>");
+    checkServerId(serverId);
     const entries = auditFiles(serverId)
       .flatMap((file) => readFileSync(file, "utf8").split("\n").filter(Boolean))
       .map((line) => JSON.parse(line) as AuditEntry)
