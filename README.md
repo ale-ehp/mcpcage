@@ -82,7 +82,7 @@ The full transcript is in [docs/demo-output.txt](docs/demo-output.txt).
 ## Quick start
 
 Requirements: Node.js 22 or later and a running Docker engine (Docker Desktop, Colima, OrbStack or
-Docker on Linux).
+Docker on Linux; on Windows, Docker Desktop with Linux containers, see [Windows](#windows)).
 
 ```bash
 git clone https://github.com/ale-ehp/mcpcage && cd mcpcage
@@ -99,9 +99,13 @@ mcpcage protect --fix        # shows the plan, asks, writes a backup next to eac
 ```
 
 `protect --fix` writes the absolute path of `mcpcage` into the files, because desktop apps start
-with a minimal `PATH`. Two files are never rewritten: `~/.claude.json` while Claude Code is running
-(Claude Code rewrites it while it runs, so close it first) and VS Code's `mcp.json` when it has
-comments. For both, mcpcage prints the exact command to put in the file.
+with a minimal `PATH` (on Windows, `node.exe` with mcpcage's `cli.js`: see [Windows](#windows)). It
+must be an installed mcpcage: run from npm's npx cache (`npx mcpcage protect --fix`), `--fix` and
+`wrap` refuse to write the cache's copy, which `npm cache npx rm` deletes and a later npx replaces,
+and say to install mcpcage (`npm install -g mcpcage`) or to name one with `--command`. Two files
+are never rewritten: `~/.claude.json` while Claude Code is running (Claude Code rewrites it while it
+runs, so close it first) and VS Code's `mcp.json` when it has comments. For both, mcpcage prints the
+exact command to put in the file.
 
 You can also wrap one file (a backup is written next to it, and `mcpcage unwrap` restores it):
 
@@ -157,20 +161,20 @@ come from the entry's `PATH`. So `protect` names each directory of an entry's `P
 yours (compared as they resolve, without case on macOS and Windows), and each relative or empty
 one, and does not count the entry as caged; `wrap` and `--fix` leave such an entry as it is, for
 you to check or remove that `PATH`.
-A `PATH` made of your own directories, such as the `/opt/homebrew/bin:/usr/bin:/bin` of many
-Claude Desktop configurations, is fine. The same goes for `COPILOT_HOME`, `XDG_CONFIG_HOME` and
-`APPDATA` set to another place than yours: `mcpcage run` looks for the clients' configurations,
-which it refuses to mount, where they say. VS Code also adds the variables of the file an entry's
-`envFile` names to that environment: `protect` reads it as it reads `env` (a regular file, up to
-1 MiB), names what in it would act on your machine (`envFile NODE_OPTIONS: ...`), and does not
-count the entry as caged when something does, or when the file cannot be read (`${workspaceFolder}`
-is known only in a project's own `.vscode/mcp.json` or `.cursor/mcp.json`). `wrap` and `--fix` keep
-the `envFile`, which VS Code loads as it is, and say that its variables reach mcpcage: the server
-gets only those named with `--env`. Before they write an entry, `wrap` and `--fix` check it as
-`protect` will: one that would still not count as caged, because of a `PATH`, a client place or an
-`envFile` that only you can change, or a `PATH` that makes the client start another program than
-the mcpcage they write, is left as it is, with the reason and what to do, instead of being written
-and called caged.
+A `PATH` made of your own directories, such as the `/opt/homebrew/bin:/usr/bin:/bin` of many Claude
+Desktop configurations, is fine. The same goes for `COPILOT_HOME`, `XDG_CONFIG_HOME`, `APPDATA` and,
+on Windows, `LOCALAPPDATA` set to another place than yours: `mcpcage run` looks for the clients'
+configurations, which it refuses to mount, where they say. VS Code also adds the variables of the
+file an entry's `envFile` names to that environment: `protect` reads it as it reads `env` (a regular
+file, up to 1 MiB), names what in it would act on your machine (`envFile NODE_OPTIONS: ...`), and
+does not count the entry as caged when something does, or when the file cannot be read
+(`${workspaceFolder}` is known only in a project's own `.vscode/mcp.json` or `.cursor/mcp.json`).
+`wrap` and `--fix` keep the `envFile`, which VS Code loads as it is, and say that its variables
+reach mcpcage: the server gets only those named with `--env`. Before they write an entry, `wrap` and
+`--fix` check it as `protect` will: one that would still not count as caged, because of a `PATH`, a
+client place or an `envFile` that only you can change, or a `PATH` that makes the client start
+another program than the mcpcage they write, is left as it is, with the reason and what to do,
+instead of being written and called caged.
 
 **Writable mounts are your choice.** A server that can write in a directory can change what your
 machine later runs from it: the code you run and build, and the files that git, editors and build
@@ -190,9 +194,29 @@ as between two filesystems. On macOS, where `.GIT` and `.git` name the same file
 on a file cannot stop the server from writing it under another case of its name, so `mcpcage run`
 refuses a writable mount that holds a setting that is a file (the `.git` file of a worktree or a
 submodule, `.mcp.json`): mount it read-only, or a narrower directory. On Windows the same holds for
-a directory (see below), so there a writable mount that holds any of these settings is refused.
+a directory (see [Windows](#windows)), so there a writable mount that holds any of these settings is
+refused.
 
-**On Windows** the cage is a Linux container, where a folder has another path: the drive letter in
+## Windows
+
+mcpcage needs Docker Desktop with Linux containers (its default): the cage is a Linux container.
+Tested on Windows 10 with Docker Desktop 4.49 and Node 24.
+
+**What `--fix` and `wrap` write.** The node that runs mcpcage (`node.exe`) as the command, and
+mcpcage's own `cli.js` as its first argument, both by their full paths. npm's `mcpcage.cmd` starts
+only through `cmd.exe`: since the fix of CVE-2024-27980, Node refuses a plain spawn of a `.cmd`
+(`EINVAL`), so a client that starts servers that way could not start it. A bare `mcpcage` is never
+written, nor counted as caged, because Windows looks for a bare name in the client's current
+directory first. An entry that mcpcage 0.5.0 caged with `mcpcage.cmd` is reported as one that some
+clients cannot start, and `--fix` gives it `node.exe` with `cli.js`, its options kept.
+
+**`cmd /c npx`.** An entry that starts `cmd /c npx ...`, as many Windows setups do, counts as npx
+and is caged. `cmd /c` is kept after `--`, so `unwrap` gives the entry back as it was, but mcpcage
+never starts `cmd` for it: `run` reads the npx command line out of it. A `cmd /c` line that holds
+more than npx and its arguments (`&`, `|`, `%`, quotes, another switch...) is reported as not a
+plain npx command line and left as it is.
+
+**Folders in the cage.** A folder has another path in a Linux container: the drive letter in
 lowercase, then the names with `/`. `C:\Users\me\notes` is mounted at `/c/Users/me/notes`, spelled
 as Windows keeps it on disk (each name in its case, long names for 8.3 short ones such as
 `C:\PROGRA~1`), and the server is given that path for each of its arguments that names a mounted
@@ -202,13 +226,15 @@ tool calls are not translated: a filesystem server lists `/c/Users/me/notes`
 `C:\Users\me\notes\todo.md` names nothing in the cage (server-filesystem answers "Windows-style
 path received on a POSIX host"). Network shares and device paths (`\\server\share`, `\\?\...`,
 `\\.\...`) have no place there: `run` refuses them, `wrap` and `protect --fix` leave a server given
-one as it is, and `protect --inspect` inspects it without that path. Docker Desktop lets a server in
-a writable folder reach a read-only one inside it under another case of its name: in a test on
-Windows 10, a server wrote `.GIT/config` around a read-only `.git` and changed the repository's
-`.git\config` on the host. So on Windows mcpcage puts no read-only mount inside a writable one: a
-writable mount that holds any of git's or the editors' settings (a repository's `.git` included)
-refuses to start, and so does a read-only folder you mount inside a writable one. Mount a narrower
-folder that holds no git or editor settings, or mount the folder read-only.
+one as it is, and `protect --inspect` inspects it without that path.
+
+**Writable folders.** Docker Desktop lets a server in a writable folder reach a read-only one inside
+it under another case of its name: in a test on Windows 10, a server wrote `.GIT/config` around a
+read-only `.git` and changed the repository's `.git\config` on the host. So on Windows mcpcage puts
+no read-only mount inside a writable one: a writable mount that holds any of git's or the editors'
+settings (a repository's `.git` included) refuses to start, and so does a read-only folder you mount
+inside a writable one. Mount a narrower folder that holds no git or editor settings, or mount the
+folder read-only.
 
 ## How it works
 
