@@ -53,6 +53,12 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
     const send = (message: Record<string, unknown>) => {
       if (!done && child.stdin.writable) child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
     };
+    // mcpcage answers the server's own requests. A server that sends them without reading its stdin
+    // would pile the answers up in mcpcage's memory (pings with ids of 1 MiB queued over 32 MiB before
+    // the timeout), so while a line's worth is still waiting, none is added: answerServer in proxy.ts.
+    const answer = (message: Record<string, unknown>) => {
+      if (child.stdin.writableLength < MAX_LINE_BYTES) send(message);
+    };
     const request = (method: string, params: Record<string, unknown>) => {
       const id = nextId++;
       waiting.set(id, method);
@@ -85,7 +91,7 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
         // A request from the server (ping, roots/list...): answer it, so the server does not wait for us.
         // Only an id JSON-RPC allows is echoed back: a nested one would be serialized again.
         if (typeof message.id === "string" || typeof message.id === "number") {
-          send(message.method === "ping" ? { id: message.id, result: {} } : { id: message.id, error: { code: -32601, message: "Method not found" } });
+          answer(message.method === "ping" ? { id: message.id, result: {} } : { id: message.id, error: { code: -32601, message: "Method not found" } });
         }
         return;
       }

@@ -42,6 +42,8 @@
 //                at the end of its input, prints "hostile-server got <n> answers" on stderr.
 //   notify-flood reads nothing: sends 8192 log notifications of exactly 1 KiB, as fast as the reader
 //                takes them, and exits when they are all written.
+//   ping-flood   reads nothing: sends 64 pings with ids of 1 MiB, as fast as the reader takes them,
+//                then prints "hostile-server sent 64 pings" on stderr and waits.
 import { createInterface } from "node:readline";
 
 const mode = process.argv[2];
@@ -197,6 +199,14 @@ async function notifyFlood() {
   }
 }
 
+/** Pings to answer while nothing reads the answers: mcpcage must not keep them all in memory meanwhile. */
+async function pingFlood() {
+  setInterval(() => {}, 1000);
+  for (let n = 0; n < 64; n++) await new Promise((resolve) => send({ id: String(n).padEnd(1024 * 1024, "x"), method: "ping" }, resolve));
+  process.stderr.write("hostile-server sent 64 pings\n");
+}
+
 if (mode === "flood") flood();
 else if (mode === "notify-flood") notifyFlood();
+else if (mode === "ping-flood") pingFlood();
 else serve();
