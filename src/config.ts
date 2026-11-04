@@ -307,11 +307,11 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
     if (name.includes("=")) return { skip: `its env names a variable ${terminalSafe(name)}, and the cage reads what follows "=" in a name as its value: rename it or remove it` };
     const host = hostVariable(name, value);
     if (host === undefined) {
-      envFlags.push("--env", name);
+      envFlags.push(...envFlag(name));
       env.push([name, value]);
     } else if (host.to === "container") {
       if (typeof value !== "string") return { skip: notAString(name) };
-      envFlags.push("--env", `${name}=${value}`);
+      envFlags.push(...envFlag(`${name}=${value}`));
     }
   }
   // `run` reads a final :rw or :ro as the mode: a path that ends so itself gets an explicit :ro, or
@@ -323,6 +323,15 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
   const wrapped: ServerEntry = { ...entry, command: launcher.command, args: [...launcher.args, "run", ...envFlags, ...mountFlags, "--", entry.command, ...npxPart, ...server] };
   if (isJsonObject(entry.env)) wrapped.env = Object.fromEntries(env) as Record<string, string>;
   return { entry: wrapped };
+}
+
+/**
+ * The arguments that give the cage `variable` (NAME or NAME=value). One that starts with a dash is
+ * written `--env=-x`: `run --env --` stopped at every start ("argument missing"), `--env -y` too
+ * ("ambiguous"), and unwrap took that "--" for the end of mcpcage's options.
+ */
+function envFlag(variable: string): string[] {
+  return variable.startsWith("-") ? [`--env=${variable}`] : ["--env", variable];
 }
 
 /** The command and first arguments that start mcpcage as `command` says: on Windows node.exe and its cli.js (see nodeScript). */

@@ -5,9 +5,10 @@ import { homedir, tmpdir } from "node:os";
 import { join, parse, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
+import { parseArgs } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalJson } from "../src/canonical.js";
-import { isWrapped, moveHostEnv, unwrapConfig, unwrapEntry, wrapConfig, type ServerEntry } from "../src/config.js";
+import { isWrapped, moveHostEnv, RUN_OPTIONS, unwrapConfig, unwrapEntry, wrapConfig, type ServerEntry } from "../src/config.js";
 import { isLocalPath, parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
 import { checkTools, jsonChanges, pinTools, toolFingerprint, tooDeep, type Pin, type ToolDefinition } from "../src/manifest.js";
@@ -940,6 +941,22 @@ describe("client configuration", () => {
     expect(outcome.changed).toEqual([]);
     expect(outcome.skipped).toEqual([{ name: "odd", reason: 'its env names a variable A=B, and the cage reads what follows "=" in a name as its value: rename it or remove it' }]);
     expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.odd).toEqual(original);
+  });
+
+  it("names a variable that starts with a dash so that run and unwrap still read it as a name", () => {
+    // Found by the property-based test of wrap and unwrap: `--env --` made run stop at every start
+    // ("argument missing"), `--env -y` too ("ambiguous"), and unwrap took that "--" for the end of
+    // mcpcage's options and gave back "--" as the command.
+    const original = { command: "npx", args: ["-y", "pkg"], env: { "--": "x", "-y": "z", API_KEY: "k" } };
+    const file = write({ mcpServers: { dashes: original } });
+    wrapConfig(file, { dryRun: false, command });
+    const wrapped = JSON.parse(readFileSync(file, "utf8")).mcpServers.dashes as { args: string[] };
+    expect(wrapped.args).toEqual(["run", "--env=--", "--env=-y", "--env", "API_KEY", "--", "npx", "-y", "pkg"]);
+    // As run reads its options: those before the first "--".
+    const own = wrapped.args.slice(1, wrapped.args.indexOf("--"));
+    expect(parseArgs({ args: own, options: RUN_OPTIONS, strict: true }).values.env).toEqual(["--", "-y", "API_KEY"]);
+    unwrapConfig(file, { dryRun: false });
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.dashes).toEqual(original);
   });
 
   it("never replaces a backup: the next one is named after the time, then given a random suffix", () => {
