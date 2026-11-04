@@ -627,6 +627,106 @@ describe("an entry's env that makes OpenSSL or glibc load code", () => {
   });
 });
 
+describe("an entry's env that makes a shell run code", () => {
+  // What starts mcpcage, or the node that runs it, is often a shell script: pnpm's bin shim runs
+  // /bin/sh, the node shims of asdf and nodenv run bash. A pnpm shim given SHELLOPTS=xtrace and a PS4
+  // of `$(...)` ran it on the host, an asdf-style shim ran BASH_ENV, and protect called both caged.
+  const env = {
+    BASH_ENV: "/tmp/never-printed/bash_env",
+    SHELLOPTS: "xtrace",
+    BASHOPTS: "extdebug",
+    PS4: "$(touch /tmp/never-printed/ps4)",
+    ZDOTDIR: "/tmp/never-printed/zdotdir",
+    "BASH_FUNC_dirname%%": "() { touch /tmp/never-printed/dirname; }",
+    // Variables of the server like any other: ENV, which shells read only when interactive, never in a
+    // shim, and is often an application's own setting, as NODE_ENV is; and those only spelled alike.
+    ENV: "production",
+    ENVIRONMENT: "production",
+    MY_BASH_ENV: "server-setting",
+  };
+  const moved = ["BASH_ENV", "SHELLOPTS", "BASHOPTS", "PS4", "ZDOTDIR", "BASH_FUNC_dirname%%"] as const;
+
+  it("moves BASH_ENV, SHELLOPTS, BASHOPTS, PS4, ZDOTDIR and every BASH_FUNC_* into the cage as NAME=value, out of env, and keeps ENV", () => {
+    expect(wrapEntry({ command: "npx", args: ["-y", "pkg"], env }, { command: "mcpcage" })).toEqual({
+      entry: {
+        command: "mcpcage",
+        args: ["run", ...moved.flatMap((name) => ["--env", `${name}=${env[name]}`]), "--env", "ENV", "--env", "ENVIRONMENT", "--env", "MY_BASH_ENV", "--", "npx", "-y", "pkg"],
+        env: { ENV: "production", ENVIRONMENT: "production", MY_BASH_ENV: "server-setting" },
+      },
+    });
+    // An entry wrapped before mcpcage knew them gets the same move.
+    const caged = { command: "mcpcage", args: ["run", "--env", "SHELLOPTS", "--env", "PS4", "--env", "API_KEY", "--", "npx", "-y", "pkg"], env: { SHELLOPTS: env.SHELLOPTS, PS4: env.PS4, API_KEY: "x" } };
+    expect(moveHostEnv(caged)).toEqual({
+      entry: { command: "mcpcage", args: ["run", "--env", `SHELLOPTS=${env.SHELLOPTS}`, "--env", `PS4=${env.PS4}`, "--env", "API_KEY", "--", "npx", "-y", "pkg"], env: { API_KEY: "x" } },
+    });
+  });
+
+  it.skipIf(process.platform === "win32")("never lets them run code on the host when a bash script starts mcpcage", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-shell-env-"));
+    const marker = (name: string) => join(dir, `ran-${name}`);
+    // As asdf's and nodenv's shims and pnpm's bin shim do: bash, which runs dirname before node.
+    const shim = join(dir, "mcpcage");
+    writeText(shim, `#!/bin/bash\nbasedir=$(dirname "$0")\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(cli)} "$@"\n`);
+    chmodSync(shim, 0o755);
+    writeText(join(dir, "bash_env"), `touch '${marker("bash-env")}'\n`);
+    const entry = {
+      command: "npx",
+      args: ["-y", "pkg"],
+      env: { BASH_ENV: join(dir, "bash_env"), SHELLOPTS: "xtrace", PS4: `$(touch '${marker("ps4")}')`, "BASH_FUNC_dirname%%": `() { touch '${marker("function")}'; }` },
+    };
+    const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
+    // What a client does: start the entry's command with the entry's env added to its own.
+    const start = (added: Record<string, string> | undefined) => spawnSync(shim, ["--version"], { encoding: "utf8", env: { ...process.env, ...added } });
+    const markers = () => ["bash-env", "ps4", "function"].filter((name) => existsSync(marker(name)));
+
+    // The control: with the env as it was, each one runs on the host, before mcpcage reads anything.
+    const before = start(entry.env);
+    expect(before.stdout.trim(), before.stderr).toBe(version);
+    expect(markers()).toEqual(["bash-env", "ps4", "function"]);
+    for (const name of markers()) rmSync(marker(name));
+
+    const wrapped = wrapEntry(entry, { command: shim });
+    if (!("entry" in wrapped)) throw new Error(wrapped.skip);
+    const after = start(wrapped.entry.env);
+    expect(after.status, after.stderr).toBe(0);
+    expect(after.stdout.trim()).toBe(version);
+    expect(markers()).toEqual([]);
+  });
+
+  it("does not count as caged an entry that sets them, and names each in the report", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-shell-env-"));
+    const file = join(dir, "mcp.json");
+    const own = join(dir, "bin", "mcpcage");
+    writeText(own, "#!/bin/sh\n");
+    chmodSync(own, 0o755);
+    writeJsonFile(file, {
+      mcpServers: {
+        shell: { command: own, args: ["run", ...moved.flatMap((name) => ["--env", name]), "--", "npx", "-y", "@acme/shell-mcp"], env: Object.fromEntries(moved.map((name) => [name, env[name]])) },
+        plain: { command: own, args: ["run", "--env", "ENV", "--env", "ENVIRONMENT", "--", "npx", "-y", "@acme/plain-mcp"], env: { ENV: "production", ENVIRONMENT: "production" } },
+      },
+    });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, ownCommand: own });
+    const text = renderReport(report, { home: dir });
+    const indent = " ".repeat(16);
+    expect(text).not.toContain("never-printed");
+    expect(text).toMatch(/^ {2}shell .* {2}caged, but its env runs on your machine$/m);
+    expect(text).toContain(
+      [
+        `${indent}env BASH_ENV: can make a shell script that starts mcpcage or node run code on your machine before the cage starts`,
+        `${indent}env SHELLOPTS: can make a shell script that starts mcpcage or node run code on your machine before the cage starts`,
+        `${indent}env BASHOPTS: can make a shell script that starts mcpcage or node run code on your machine before the cage starts`,
+        `${indent}env PS4: can make a shell script that starts mcpcage or node run code on your machine before the cage starts`,
+        `${indent}env ZDOTDIR: can make a shell script that starts mcpcage or node run code on your machine before the cage starts`,
+        `${indent}env BASH_FUNC_dirname%%: defines a shell function that bash runs on your machine in place of a command, before the cage starts`,
+      ].join("\n"),
+    );
+    expect(text).toMatch(/^ {2}plain .* {2}caged$/m);
+    expect(text).toContain("  1 runs on your machine with your permissions and no cage.");
+    expect(text).toContain("  1 already runs through mcpcage.");
+  });
+});
+
 describe("addresses in options", () => {
   it("masks the credentials of an address given as the value of any option or variable, in wrapped entries too", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mcpcage-secrets-"));

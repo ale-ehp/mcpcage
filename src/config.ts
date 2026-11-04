@@ -105,6 +105,20 @@ export const HOST_ENV: ReadonlyArray<{ name: RegExp; to: "container" | "drop"; w
   // glibc loads the character set converters of iconv from GCONV_PATH, as shared libraries, in any
   // program on the host that converts text with it.
   { name: /^GCONV_PATH$/i, to: "container", what: () => "can load code into mcpcage on your machine before the cage starts" },
+  // Shells read them as they start, and what starts mcpcage, or the node that runs it, is often a
+  // shell script: pnpm's bin shim runs /bin/sh, the node shims of asdf and nodenv run bash. BASH_ENV
+  // names a file bash runs first; SHELLOPTS and BASHOPTS turn options on, xtrace among them, which
+  // expands PS4, command substitutions included, before each command; zsh runs ZDOTDIR's .zshenv in
+  // every shell; and each BASH_FUNC_name%% defines a function that bash runs in place of the command
+  // `name`. A pnpm shim given SHELLOPTS=xtrace and a PS4 of `$(...)` ran it. ENV is not one of them:
+  // sh, dash and bash read it in interactive shells only, never in a shim, and ENV=production is an
+  // application's own setting, as NODE_ENV is.
+  {
+    name: /^(BASH_ENV|SHELLOPTS|BASHOPTS|PS4|ZDOTDIR)$/i,
+    to: "container",
+    what: () => "can make a shell script that starts mcpcage or node run code on your machine before the cage starts",
+  },
+  { name: /^BASH_FUNC_/i, to: "container", what: () => "defines a shell function that bash runs on your machine in place of a command, before the cage starts" },
   // The docker command mcpcage runs reads them: DOCKER_HOST and DOCKER_CONTEXT send the build and the
   // run, with the value of every --env, to another daemon; DOCKER_CONFIG chooses its plugins and
   // credential helpers. A DOCKER_HOST of unix:// or npipe:// only names a local socket (see hostVariable).
