@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuditLog } from "../src/audit.js";
 import { pinTools } from "../src/manifest.js";
@@ -345,6 +345,70 @@ describe("names of a million characters in diff and approve", () => {
       expect(lines).toContain(`~ tool "c${spelled(24)}... (1000000 chars)" changed since it was approved`);
       expect(lines).toContain(`    ${pathShown}: (absent) -> {"type":"string"}`);
     }
+  });
+});
+
+describe("what wrap and unwrap print", () => {
+  it("spells out the control and format characters of server names, commands and skip reasons", () => {
+    const home = freshHome();
+    const file = join(home, "mcp.json");
+    writeFileSync(file, JSON.stringify({ mcpServers: { [`notes${HOSTILE}`]: { command: "npx", args: ["-y", "pkg-a", `x${HOSTILE}`] }, [`time${HOSTILE}`]: { command: `uvx${HOSTILE}` } } }));
+    const wrapped = mcpcage(home, "wrap", file, "--dry-run");
+    expect(wrapped.code).toBe(0);
+    expect(wrapped.stdout).not.toMatch(RAW_CONTROL);
+    expect(wrapped.stdout).toContain(`  caged notes${SPELLED}: mcpcage run -- npx -y pkg-a x${SPELLED}\n`);
+    expect(wrapped.stdout).toContain(`  skipped time${SPELLED}: uvx${SPELLED}: only npx servers can be caged in this version\n`);
+
+    writeFileSync(file, JSON.stringify({ mcpServers: { [`back${HOSTILE}`]: { command: "mcpcage", args: ["run", "--", "npx", "-y", `pkg${HOSTILE}`] }, [`odd${HOSTILE}`]: { command: "mcpcage", args: ["run"] } } }));
+    const unwrapped = mcpcage(home, "unwrap", file, "--dry-run");
+    expect(unwrapped.code).toBe(0);
+    expect(unwrapped.stdout).not.toMatch(RAW_CONTROL);
+    expect(unwrapped.stdout).toContain(`  restored back${SPELLED}: npx -y pkg${SPELLED}\n  skipped odd${SPELLED}: unexpected mcpcage arguments\n`);
+  });
+
+  it("spells them out in the lines about building the images", () => {
+    const home = freshHome();
+    const file = join(home, "mcp.json");
+    writeFileSync(file, JSON.stringify({ mcpServers: { [`notes${HOSTILE}`]: { command: "npx", args: ["-y", "pkg-a"] } } }));
+    // No docker on this PATH: the build fails, and says so with the server's name.
+    const result = mcpcageWithEnv({ ...process.env, MCPCAGE_HOME: home, PATH: join(home, "no-docker-here") }, "wrap", file);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain(`  caged notes${SPELLED}: mcpcage run -- npx -y pkg-a\n`);
+    expect(result.stderr).not.toMatch(RAW_CONTROL);
+    expect(result.stderr).toContain(`  could not build notes${SPELLED}: Docker is required to cage a server`);
+  });
+});
+
+describe("what run prints from an entry's arguments", () => {
+  // A client starts `mcpcage run` with an entry's arguments, and shows or logs what it writes to stderr.
+  it("spells out control and format characters in error messages and unknown commands", () => {
+    const home = freshHome();
+    const refused = mcpcage(home, "run", "--", `server${HOSTILE}`);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).not.toMatch(RAW_CONTROL);
+    expect(refused.stderr).toContain(`mcpcage: "server${SPELLED}" is not an npx command.`);
+    const unknown = mcpcage(home, `wrap${HOSTILE}`);
+    expect(unknown.code).toBe(2);
+    expect(unknown.stderr).not.toMatch(RAW_CONTROL);
+    expect(unknown.stderr).toContain(`mcpcage: unknown command "wrap${SPELLED}"\n`);
+  });
+
+  it("spells them out in the warning about a sensitive mount", () => {
+    const home = freshHome();
+    const fakeHome = join(home, "home");
+    const key = join(fakeHome, ".ssh", `key${HOSTILE}`);
+    mkdirSync(join(fakeHome, ".ssh"), { recursive: true });
+    writeFileSync(key, "");
+    // A docker that knows the image and starts a server that ends at once: run gets as far as its warnings.
+    const bin = join(home, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "docker"), '#!/bin/sh\ncase "$1" in\n  version) echo 29.0.0 ;;\n  image) echo sha256:0123456789ab ;;\nesac\nexit 0\n');
+    chmodSync(join(bin, "docker"), 0o755);
+    const env = fakeUserEnv(fakeHome, join(home, "cage"), { PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` });
+    const result = mcpcageWithEnv(env, "run", "--image", "example/server", "--allow-sensitive-mount", "--mount", key, "--", "serve");
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toMatch(RAW_CONTROL);
+    expect(result.stderr).toContain(`mcpcage: WARNING --mount ${key.replace(HOSTILE, SPELLED)} gives example-server-`);
   });
 });
 

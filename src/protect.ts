@@ -395,7 +395,7 @@ export function renderReport(report: ProtectReport, options: { home: string }): 
       continue;
     }
     if (file.error !== undefined) {
-      lines.push(header, `  could not read this file: ${printable(file.error)}`);
+      lines.push(header, `  could not read this file: ${terminalSafe(file.error)}`);
       continue;
     }
     const servers = report.servers.filter((server) => server.file === file.file);
@@ -407,7 +407,7 @@ export function renderReport(report: ProtectReport, options: { home: string }): 
       const inSection = servers.filter((server) => server.label === section.project);
       // A real ~/.claude.json lists dozens of projects, most of them without servers of their own.
       if (section.project !== undefined && inSection.length === 0) continue;
-      block(`${header} (${printable(section.label)})`, inSection);
+      block(`${header} (${terminalSafe(section.label)})`, inSection);
     }
   }
   // Most clients are not installed on a given machine: their paths would bury the files that matter.
@@ -425,24 +425,24 @@ export function renderReport(report: ProtectReport, options: { home: string }): 
  */
 function serverLines(server: ServerReport, home: string): string[] {
   const indent = " ".repeat(NAME_WIDTH + 4);
-  const details: string[] = server.problems.map(printable);
-  if (server.error !== undefined) details.push(`could not describe this entry: ${printable(server.error)}`);
-  for (const path of server.broadAccess) details.push(`access: ${printable(path)}: ${broadAccessKind(path, home) ?? "a broad path"}`);
-  if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(printable).join(", ")}`);
+  const details: string[] = server.problems.map(terminalSafe);
+  if (server.error !== undefined) details.push(`could not describe this entry: ${terminalSafe(server.error)}`);
+  for (const path of server.broadAccess) details.push(`access: ${terminalSafe(path)}: ${broadAccessKind(path, home) ?? "a broad path"}`);
+  if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(terminalSafe).join(", ")}`);
   if (server.installScripts) details.push(installLine(server.installScripts));
   // Before what --inspect found, whose signs belong under its own line.
-  for (const variable of server.hostEnv) details.push(`env ${printable(variable.name)}: ${variable.what}`);
+  for (const variable of server.hostEnv) details.push(`env ${terminalSafe(variable.name)}: ${variable.what}`);
   details.push(...server.opened);
-  for (const skipped of server.inspection?.skipped ?? []) details.push(`inspected without ${printable(tilde(skipped.path, home))}: ${printable(skipped.reason)}`);
+  for (const skipped of server.inspection?.skipped ?? []) details.push(`inspected without ${terminalSafe(tilde(skipped.path, home))}: ${terminalSafe(skipped.reason)}`);
   const findings: string[] = [];
   if (server.inspection?.error !== undefined) {
-    details.push(`could not inspect: ${printable(server.inspection.error)}`);
+    details.push(`could not inspect: ${terminalSafe(server.inspection.error)}`);
   } else if (server.inspection) {
     details.push(`tools: ${server.inspection.tools}, ${signs(server.inspection.findings)}`);
     // describeFindings indents by four spaces: these lines line up with the details above them.
     findings.push(...describeFindings(server.inspection.findings).map((line) => `${indent.slice(4)}${line}`));
   }
-  const nameAndCommand = `${printable(server.name).padEnd(NAME_WIDTH)}  ${printable(server.command)}`;
+  const nameAndCommand = `${terminalSafe(server.name).padEnd(NAME_WIDTH)}  ${terminalSafe(server.command)}`;
   return [
     `  ${nameAndCommand.padEnd(NAME_WIDTH + 2 + COMMAND_WIDTH)}  ${status(server)}`,
     ...details.map((detail) => `${indent}${detail}`),
@@ -472,15 +472,15 @@ function status(server: ServerReport): string {
     case "uvx":
       return "uvx, not supported yet";
     default:
-      return server.command === NO_COMMAND ? "no command: nothing to start" : `${printable(programOf(server.command))}, not npx: cannot be caged yet`;
+      return server.command === NO_COMMAND ? "no command: nothing to start" : `${terminalSafe(programOf(server.command))}, not npx: cannot be caged yet`;
   }
 }
 
 function installLine(lookup: InstallScripts): string {
   if (lookup.status === "found") {
-    return `install scripts: ${lookup.scripts.join(", ")} (they run with your permissions when npx installs the package${lookup.detail ? `; ${printable(lookup.detail)}` : ""})`;
+    return `install scripts: ${lookup.scripts.join(", ")} (they run with your permissions when npx installs the package${lookup.detail ? `; ${terminalSafe(lookup.detail)}` : ""})`;
   }
-  return `install scripts: ${lookup.status}${lookup.detail ? ` (${printable(lookup.detail)})` : ""}`;
+  return `install scripts: ${lookup.status}${lookup.detail ? ` (${terminalSafe(lookup.detail)})` : ""}`;
 }
 
 function signs(findings: Finding[]): string {
@@ -578,7 +578,7 @@ export function fixConfigs(options: FixOptions): FixOutcome {
     } catch (error) {
       // One file that cannot be rewritten leaves the others to be.
       const fixed: FixedFile = { file: file.file, changed: [], skipped: [], refused: messageOf(error) };
-      options.log(`  not changed: ${shownFile(file, home)}: ${printable(fixed.refused!)}`);
+      options.log(`  not changed: ${shownFile(file, home)}: ${terminalSafe(fixed.refused!)}`);
       files.push(fixed);
     }
   }
@@ -588,7 +588,7 @@ export function fixConfigs(options: FixOptions): FixOutcome {
 function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerReport[], options: FixOptions, home: string): FixedFile {
   const fixed: FixedFile = { file: file.file, changed: [], skipped: [] };
   const shown = shownFile(file, home);
-  const where = (label: string | undefined) => (label === undefined ? shown : `${shown} (project ${printable(label)})`);
+  const where = (label: string | undefined) => (label === undefined ? shown : `${shown} (project ${terminalSafe(label)})`);
 
   let bytes: Buffer;
   let config: Record<string, unknown>;
@@ -597,7 +597,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
     config = parseConfig(bytes.toString("utf8"));
   } catch (error) {
     fixed.refused = `could not read it again: ${(error as Error).message}`;
-    options.log(`  not changed: ${shown}: ${printable(fixed.refused)}`);
+    options.log(`  not changed: ${shown}: ${terminalSafe(fixed.refused)}`);
     return fixed;
   }
   const text = bytes.toString("utf8");
@@ -620,14 +620,14 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const server of onHost) {
     fixed.skipped.push({ name: server.name, label: server.label, reason: "it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand" });
   }
-  for (const skipped of fixed.skipped) options.log(`  not changed: ${printable(skipped.name)} in ${where(skipped.label)}: ${printable(skipped.reason)}`);
+  for (const skipped of fixed.skipped) options.log(`  not changed: ${terminalSafe(skipped.name)} in ${where(skipped.label)}: ${terminalSafe(skipped.reason)}`);
   if (fixed.changed.length === 0) return fixed;
 
   // When the file cannot be rewritten, the exact command each server should run instead.
   const byHand = fixed.changed.flatMap((change) => {
-    const line = `    ${printable(change.name)}${change.label === undefined ? "" : ` (project ${printable(change.label)})`}: ${printable(shownCommand(change.after, "mcpcage").line)}`;
+    const line = `    ${terminalSafe(change.name)}${change.label === undefined ? "" : ` (project ${terminalSafe(change.label)})`}: ${terminalSafe(shownCommand(change.after, "mcpcage").line)}`;
     const names = removed.get(change.after) ?? [];
-    return names.length === 0 ? [line] : [line, `      and remove from its "env": ${names.map(printable).join(", ")}`];
+    return names.length === 0 ? [line] : [line, `      and remove from its "env": ${names.map(terminalSafe).join(", ")}`];
   });
   if (byHand.some((line) => line.includes(MASK))) byHand.push(`    (${MASK} stands for the value already in the file, which is not shown)`);
   if (hasComments(text)) {
@@ -656,8 +656,8 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
     return fixed;
   }
   if (!options.dryRun) fixed.backup = replaceFile(file.file, bytes, serialize(config, text));
-  for (const change of fixed.changed) options.log(`  ${options.dryRun ? "cage" : "caged"} ${printable(change.name)} in ${where(change.label)}`);
-  if (fixed.backup) options.log(`  backup: ${printable(file.scope === "user" ? tilde(fixed.backup, home) : fixed.backup)}`);
+  for (const change of fixed.changed) options.log(`  ${options.dryRun ? "cage" : "caged"} ${terminalSafe(change.name)} in ${where(change.label)}`);
+  if (fixed.backup) options.log(`  backup: ${terminalSafe(file.scope === "user" ? tilde(fixed.backup, home) : fixed.backup)}`);
   return fixed;
 }
 
@@ -1156,7 +1156,7 @@ function programOf(line: string): string {
 }
 
 function shownFile(file: ScannedFile, home: string): string {
-  return printable(file.scope === "user" ? tilde(file.file, home) : file.file);
+  return terminalSafe(file.scope === "user" ? tilde(file.file, home) : file.file);
 }
 
 /** A path under the home directory, written from ~. */
@@ -1165,9 +1165,4 @@ function tilde(path: string, home: string): string {
   if (root === "" || !path.startsWith(root)) return path;
   const rest = path.slice(root.length);
   return rest === "" || rest.startsWith("/") || rest.startsWith("\\") ? `~${rest}` : path;
-}
-
-/** Configuration files and servers do not get to drive the terminal: control and format characters are spelled out. */
-function printable(text: string): string {
-  return text.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, (char) => `[U+${char.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}]`);
 }

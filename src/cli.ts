@@ -98,7 +98,8 @@ async function main(argv: string[]): Promise<number> {
       console.log(HELP);
       return 0;
     default:
-      console.error(`mcpcage: unknown command "${command}"\n\n${HELP}`);
+      // A client starts mcpcage with an entry's arguments, which anyone may have written.
+      console.error(`mcpcage: unknown command "${terminalSafe(command)}"\n\n${HELP}`);
       return 2;
   }
 }
@@ -177,7 +178,8 @@ async function run(argv: string[]): Promise<number> {
     command = prepared.command;
     args = prepared.args;
     if (values["allow-net"]) log(`mcpcage: WARNING ${serverId} has network access (--allow-net).`);
-    for (const mount of sensitive) log(`mcpcage: WARNING --mount ${mount.path} gives ${serverId} ${mount.reason} (--allow-sensitive-mount).`);
+    // The path is the entry's argument; the server id is a plain name (checkServerId, serverIdFor).
+    for (const mount of sensitive) log(terminalSafe(`mcpcage: WARNING --mount ${mount.path} gives ${serverId} ${mount.reason} (--allow-sensitive-mount).`));
     auditLog.write("sandbox", {
       mode: "docker",
       image: prepared.record.image,
@@ -240,10 +242,12 @@ function buildImages(changes: Array<{ name: string; after: ServerEntry }>): numb
         serverId: serverIdFor(spec), spec, mounts: [], env: [], allowNet: false, memory: "512m", cpus: "1",
         keepImageUser: false, rebuild: false, log: (message) => console.error(message),
       });
-      console.log(`  built ${change.name}: ${terminalSafe(`${prepared.record.packageName}@${prepared.record.version}`)} -> ${prepared.record.image}`);
+      // The name is the configuration's, the package name and version its author's metadata.
+      console.log(terminalSafe(`  built ${change.name}: ${prepared.record.packageName}@${prepared.record.version} -> ${prepared.record.image}`));
     } catch (error) {
       status = 1;
-      console.error(`  could not build ${change.name}: ${(error as Error).message}`);
+      // The message can quote the entry's command line and npm's or docker's output.
+      console.error(terminalSafe(`  could not build ${change.name}: ${(error as Error).message}`));
     }
   }
   return status;
@@ -339,15 +343,21 @@ function claudeCodeIsRunning(): boolean {
   return listed.status === 0 && listed.stdout.split("\n").some((line) => basename(line.trim()) === "claude");
 }
 
+/**
+ * What wrap and unwrap did. Server names, commands and the reasons that quote them come from the
+ * configuration file, which anyone may have written: a server named with ESC and CR cleared the
+ * screen and printed a success line of its own. Every line goes through terminalSafe.
+ */
 function report(outcome: WrapOutcome, command: string, dryRun: boolean): void {
-  console.log(`${outcome.file} (${outcome.key})${dryRun ? " [dry run]" : ""}`);
+  const print = (line: string) => console.log(terminalSafe(line));
+  print(`${outcome.file} (${outcome.key})${dryRun ? " [dry run]" : ""}`);
   for (const change of outcome.changed) {
     // The values wrap moved from the env into mcpcage's arguments are not printed, as no env value is.
     const args = change.after.args ?? [];
-    console.log(`  ${command === "wrap" ? "caged" : "restored"} ${change.name}: ${[change.after.command, ...(command === "wrap" ? withoutEnvValues(args) : args)].join(" ")}`);
+    print(`  ${command === "wrap" ? "caged" : "restored"} ${change.name}: ${[change.after.command, ...(command === "wrap" ? withoutEnvValues(args) : args)].join(" ")}`);
   }
-  for (const skipped of outcome.skipped) console.log(`  skipped ${skipped.name}: ${skipped.reason}`);
-  if (outcome.backup) console.log(`  backup: ${outcome.backup}`);
+  for (const skipped of outcome.skipped) print(`  skipped ${skipped.name}: ${skipped.reason}`);
+  if (outcome.backup) print(`  backup: ${outcome.backup}`);
 }
 
 function diff(argv: string[]): number {
@@ -493,7 +503,9 @@ main(process.argv.slice(2)).then(
     process.exitCode = code;
   },
   (error: unknown) => {
-    process.stderr.write(`mcpcage: ${(error as Error).message}\n`);
+    // Many messages quote the arguments, and a client starts mcpcage with an entry's arguments, which
+    // anyone may have written: their control characters reached whatever shows mcpcage's stderr.
+    process.stderr.write(`mcpcage: ${terminalSafe((error as Error).message)}\n`);
     process.exitCode = 1;
   },
 );

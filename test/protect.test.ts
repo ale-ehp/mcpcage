@@ -2117,6 +2117,25 @@ describe("an env variable named __proto__", () => {
   });
 });
 
+describe("characters the report spells out", () => {
+  it("spells out what terminal.ts spells out: variation selectors, unpaired surrogates and unassigned code points too", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-spelled-"));
+    const file = join(dir, "mcp.json");
+    const hidden = "\u{FE0F}\u{E0100}\uD800\u{10FFFF}\u{E01F0}\u2028";
+    writeJsonFile(file, { mcpServers: { [`notes${hidden}`]: { command: "npx", args: ["-y", "notes-mcp", `--label=${hidden}`] } } });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const inspect = async (): Promise<never> => {
+      throw new Error("listening\u{FE00}\u{FE01} on \u{10FFFF}\u{E01F0} \uD800");
+    };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, inspect });
+    const text = renderReport(report, { home: dir });
+    expect(text).not.toMatch(/[\p{Cs}\p{Cn}\p{Zl}\p{Zp}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]/u);
+    const spelled = "[U+FE0F][U+E0100][U+D800][U+10FFFF][U+E01F0][U+2028]";
+    expect(text).toContain(`  notes${spelled}  npx -y notes-mcp "--label=${spelled}"  NOT CAGED\n`);
+    expect(text).toContain("                could not inspect: listening[U+FE00][U+FE01] on [U+10FFFF][U+E01F0] [U+D800]\n");
+  });
+});
+
 describe("backups", () => {
   it("--fix never replaces an earlier backup: it takes the next free name", async () => {
     // The clock stands still, so the name with the time is taken too, and a random suffix is added.
