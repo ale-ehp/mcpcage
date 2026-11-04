@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -2343,67 +2343,120 @@ describe("a configuration that is not a regular file", () => {
 });
 
 describe("what a wrapped entry's PATH picks", () => {
-  /** Where `which` finds `program` on `path`, or undefined. */
-  const which = (program: string, path: string) => {
-    const found = spawnSync("which", [program], { encoding: "utf8", env: { PATH: path } });
-    return found.status === 0 ? found.stdout.trim() : undefined;
-  };
-
-  it("does not count as caged an entry whose PATH picks another node or docker, and --fix leaves that PATH to the user", () => {
+  /** A fake home and project with one Cursor configuration holding `servers`, and protect's PATH: `installed` first, then this process's. */
+  function setup(servers: Record<string, unknown>, installed: { path: string }, extra: Record<string, string> = {}) {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-path-"));
     const home = join(top, "home");
     const project = join(top, "work");
     const cage = join(top, "cage");
     for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
-    const installed = fakeMcpcage();
-    // A node and a docker of the entry's choice, first on its PATH.
-    const fake = join(top, "fake");
-    for (const program of ["node", "docker"]) {
-      writeText(join(fake, program), "#!/bin/sh\nexit 0\n");
-      chmodSync(join(fake, program), 0o755);
-    }
-    // Links to the node and docker that the PATH of protect finds: the same programs, in another directory.
-    const same = join(top, "same");
-    mkdirSync(same);
-    for (const program of ["node", "docker"]) {
-      const found = which(program, installed.path);
-      if (found !== undefined) symlinkSync(found, join(same, program));
-    }
-    const run = ["run", "--", "npx", "-y", "@acme/notes-mcp"];
-    const servers = {
-      picked: { command: installed.command, args: run, env: { PATH: `${fake}${delimiter}${installed.path}` } },
-      relative: { command: installed.command, args: run, env: { PATH: `.${delimiter}${installed.path}` } },
-      same: { command: installed.command, args: run, env: { PATH: same } },
-      plain: { command: installed.command, args: run },
-    };
     const cursor = locationsFor(home, project)("cursor", "user");
     writeJsonFile(cursor, { mcpServers: servers });
-    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path });
-    const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
-    const indent = " ".repeat(16);
+    return { project, cursor, env: fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path, ...extra }), where: tilde(cursor, home) };
+  }
+  const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+  const indent = " ".repeat(16);
+  const why = "it decides which programs start mcpcage and which mcpcage starts";
+  const run = ["run", "--", "npx", "-y", "@acme/notes-mcp"];
+
+  it("accepts only a PATH made of the user's own directories, names each other one, and --fix leaves that PATH to the user", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-path-"));
+    const installed = fakeMcpcage();
+    const own = dirname(installed.command);
+    // A uname of the entry's choice, which the pnpm shim of mcpcage runs: its node and docker are the user's.
+    const fake = join(top, "fake");
+    writeText(join(fake, "uname"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(fake, "uname"), 0o755);
+    // A link to a directory of the user's PATH is that directory.
+    const link = join(top, "link");
+    symlinkSync(own, link);
+    // Directories of the user's PATH, in another order: the minimal PATH of a Claude Desktop configuration.
+    const yours = (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir)).slice(-2).reverse();
+    const many = Array.from({ length: 5 }, (_, index) => join(top, `extra-${index}`));
+    const servers = {
+      picked: { command: installed.command, args: run, env: { PATH: `${fake}${delimiter}${own}` } },
+      relative: { command: installed.command, args: run, env: { PATH: `.${delimiter}${own}` } },
+      empty: { command: installed.command, args: run, env: { PATH: `${own}${delimiter}` } },
+      many: { command: installed.command, args: run, env: { PATH: [...many, own].join(delimiter) } },
+      // The client's spawn converts the value into a directory name nobody chose.
+      odd: { command: installed.command, args: run, env: { PATH: 1 } },
+      subset: { command: installed.command, args: run, env: { PATH: [own, ...yours].join(delimiter) } },
+      linked: { command: installed.command, args: run, env: { PATH: link } },
+      // Without case where the file system ignores it, as macOS and Windows do by default.
+      upper: { command: installed.command, args: run, env: { PATH: realpathSync(own).toUpperCase() } },
+      plain: { command: installed.command, args: run },
+    };
+    const { project, cursor, env, where } = setup(servers, installed);
+    const folded = process.platform === "darwin" || process.platform === "win32";
 
     const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
-    expect(scan.stdout).toContain(
-      `  caged, but its PATH picks other programs\n${indent}env PATH: makes the client start ${join(fake, "node")}, not the node on your PATH\n` +
-        `${indent}env PATH: makes mcpcage start ${join(fake, "docker")}, not the docker on your PATH\n  relative `,
-    );
-    expect(scan.stdout).toContain(
-      `  caged, but its PATH picks other programs\n${indent}env PATH: which node the client starts depends on the directory the client starts the entry from\n` +
-        `${indent}env PATH: which docker mcpcage starts depends on the directory the client starts the entry from\n  same `,
-    );
-    expect(lineOf(scan.stdout, "picked")).toMatch(/ {2}caged, but its PATH picks other programs$/);
-    expect(lineOf(scan.stdout, "same")).toMatch(/ {2}caged$/);
-    expect(lineOf(scan.stdout, "plain")).toMatch(/ {2}caged$/);
-    expect(scan.stdout).toContain("  2 run on your machine with your permissions and no cage.");
-    expect(scan.stdout).toContain("  2 already run through mcpcage.");
+    const caged = ["subset", "linked", "plain", ...(folded ? ["upper"] : [])];
+    const picked = ["picked", "relative", "empty", "many", "odd", ...(folded ? [] : ["upper"])];
+    for (const name of caged) expect(lineOf(scan.stdout, name)).toMatch(/ {2}caged$/);
+    for (const name of picked) expect(lineOf(scan.stdout, name)).toMatch(/ {2}caged, but its PATH picks other programs$/);
+    const details = (name: string, lines: string[]) => expect(scan.stdout).toContain(`${lineOf(scan.stdout, name)}\n${lines.map((line) => `${indent}${line}\n`).join("")}  `);
+    details("picked", [`env PATH: ${fake} is not on your PATH; ${why}`]);
+    details("relative", [`env PATH: . is not on your PATH; ${why}`]);
+    details("empty", [`env PATH: "" is not on your PATH; ${why}`]);
+    details("many", [...many.slice(0, 3).map((dir) => `env PATH: ${dir} is not on your PATH; ${why}`), "env PATH: and 2 more directories that are not on your PATH"]);
+    details("odd", [`env PATH: its value is not a string, so the directories it names are not known; ${why}`]);
+    expect(scan.stdout).toContain(`  ${picked.length} run on your machine with your permissions and no cage.`);
+    expect(scan.stdout).toContain(`  ${caged.length} already run through mcpcage.`);
     expect(scan.code).toBe(1);
 
     // Which PATH was meant, --fix cannot know: it says what to do by hand and changes nothing.
     const original = readFileSync(cursor);
     const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build");
+    const byHand = `its env sets a PATH that picks other programs than yours: check that PATH, or remove it from its "env" by hand`;
+    expect(fix.stdout).toContain(`\nPlan\n${picked.map((name) => `  not changed: ${name} in ${where}: ${byHand}\n`).join("")}  nothing that mcpcage can change by itself.\n`);
+    expect(fix.code).toBe(1);
+    expect(readFileSync(cursor)).toEqual(original);
+  });
+});
+
+describe("an entry's env that moves the client configurations run refuses to mount", () => {
+  // `run` looks for the clients' configurations with its own environment, which the client gives the
+  // entry's env: with COPILOT_HOME pointed elsewhere, it mounted the user's real Copilot directory,
+  // and the caged server added a server of its own there, which Copilot started uncaged.
+  it("does not count as caged an entry whose env moves them away from yours, and --fix leaves that variable to the user", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-places-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const installed = fakeMcpcage();
+    const copilotHome = join(top, "copilot-home");
+    const wrapped = (env: Record<string, unknown>) => ({ command: installed.command, args: ["run", ...Object.keys(env).flatMap((name) => ["--env", name]), "--", "npx", "-y", "@acme/notes-mcp"], env });
+    const servers = {
+      moved: wrapped({ COPILOT_HOME: join(top, "never-printed") }),
+      odd: wrapped({ COPILOT_HOME: 1 }),
+      // Where the user's own environment puts it: the same places.
+      same: wrapped({ COPILOT_HOME: copilotHome }),
+      // VS Code reads it on Linux only.
+      xdg: wrapped({ XDG_CONFIG_HOME: join(top, "never-printed") }),
+    };
+    const cursor = locationsFor(home, project)("cursor", "user");
+    writeJsonFile(cursor, { mcpServers: servers });
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", PATH: installed.path, COPILOT_HOME: copilotHome });
+    const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+    const line = (name: string) => `${" ".repeat(16)}env ${name}: differs from yours, so mcpcage run would look for the clients' configurations elsewhere, and its mount check would miss the real place`;
+    const moves = ["moved", "odd", ...(process.platform === "linux" ? ["xdg"] : [])];
+
+    const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline");
+    expect(`${scan.stdout}${scan.stderr}`).not.toContain("never-printed");
+    for (const name of moves) expect(lineOf(scan.stdout, name)).toMatch(/ {2}caged, but its env moves what run refuses to mount$/);
+    expect(scan.stdout).toContain(`${lineOf(scan.stdout, "moved")}\n${line("COPILOT_HOME")}\n  odd `);
+    expect(scan.stdout).toContain(`${lineOf(scan.stdout, "odd")}\n${line("COPILOT_HOME")}\n  same `);
+    expect(lineOf(scan.stdout, "same")).toMatch(/ {2}caged$/);
+    if (process.platform !== "linux") expect(lineOf(scan.stdout, "xdg")).toMatch(/ {2}caged$/);
+    expect(scan.stdout).toContain(`  ${moves.length} run on your machine with your permissions and no cage.`);
+    expect(scan.code).toBe(1);
+
+    const original = readFileSync(cursor);
+    const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build");
     const where = tilde(cursor, home);
-    const byHand = `its env sets a PATH that picks another node and docker than yours: check that PATH, or remove it from its "env" by hand`;
-    expect(fix.stdout).toContain(`\nPlan\n  not changed: picked in ${where}: ${byHand}\n  not changed: relative in ${where}: ${byHand}\n  nothing that mcpcage can change by itself.\n`);
+    expect(fix.stdout).toContain(`\nPlan\n  not changed: moved in ${where}: its env sets COPILOT_HOME to another value than yours: check it, or remove it from its "env" by hand\n`);
+    expect(`${fix.stdout}${fix.stderr}`).not.toContain("never-printed");
     expect(fix.code).toBe(1);
     expect(readFileSync(cursor)).toEqual(original);
   });

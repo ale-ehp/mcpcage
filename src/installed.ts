@@ -1,13 +1,16 @@
 import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
-import { delimiter, isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { isJsonObject } from "./jsonc.js";
+import { clientPlaces } from "./sensitive.js";
 
 /*
  * Whether a wrapped entry starts mcpcage, or another program that only has its name. Anyone who can
  * write a file can name it mcpcage, and put a package.json that says "mcpcage" next to it: a
  * look-alike with one was reported caged, and left alone by --fix, while it ran on the host. Only two
  * files are known to be mcpcage: the command `wrap` and `protect --fix` write into configurations,
- * and the mcpcage that is running now.
+ * and the mcpcage that is running now. And what else the entry's own `env` decides on the host for
+ * the mcpcage it starts: the programs its PATH picks, and the places `run` refuses to mount.
  */
 
 /** An mcpcage known to this one, another program (or one that cannot be told apart), or nothing that can be found. */
@@ -36,30 +39,73 @@ export function mcpcageAt(entry: { command: string; env?: unknown }, own?: strin
   return known.includes(real) ? "installed" : "other program";
 }
 
-/** A program that a wrapped entry's PATH makes the client or mcpcage start in place of the one on the user's PATH. */
-export interface PathPick {
-  program: "node" | "docker";
-  /** Where the entry's PATH finds it; undefined when that depends on the directory the client starts the entry from. */
-  file?: string;
+/** The part of an entry's PATH that is not the user's (see foreignPath). */
+export interface ForeignPath {
+  /** Its directories that are not on this process's PATH, as written, each once: "" for an empty element. */
+  dirs: string[];
+  /** A value that is not a string, which the client's spawn converts into a directory name nobody chose. */
+  notString?: boolean;
 }
 
 /**
- * The programs an entry's own PATH picks on the host: `node`, which the `#!/usr/bin/env node` of
- * mcpcage's script finds first in that PATH, and `docker`, which mcpcage starts with it. A client
- * starts the entry with its `env`, so a PATH that led to a node of someone's choice ran it on the
- * host before any cage, and the entry was reported caged. Each is compared, symlinks followed, with
- * what this process's PATH finds: the same file says nothing, and so does a PATH that finds none,
- * which starts nothing.
+ * The directories of the PATH an entry's `env` sets that are not on the PATH of this process, or
+ * undefined when it sets none, or only directories of the user's. A client starts the entry with
+ * that PATH, and every program started from there inherits it: the node that the
+ * `#!/usr/bin/env node` of mcpcage's script finds, the dirname, sed and uname that a pnpm shim runs,
+ * the docker that mcpcage runs and the credential helper that docker runs. Comparing node and docker
+ * with the user's missed the others: a uname of the entry's choice ran on the host, from the pnpm
+ * shim of mcpcage, and the entry was reported caged. A directory of the user's PATH holds only what
+ * the user's own shell may start, so a PATH made of them alone (the minimal PATH of many Claude
+ * Desktop configurations) is accepted; a relative directory, or an empty element, depends on the
+ * directory the client starts the entry from, and is never one. Directories are compared as they
+ * resolve, symlinks followed, without case on macOS and Windows, whose file systems ignore it.
  */
-export function pathPicks(entry: { env?: unknown }): PathPick[] {
-  const path = pathOf(entry.env);
-  if (path === undefined) return [];
-  return (["node", "docker"] as const).flatMap((program): PathPick[] => {
-    const theirs = onPath(program, path, true);
-    if (theirs === undefined) return [];
-    if (theirs === UNKNOWN) return [{ program }];
-    const real = realFile(theirs);
-    return real !== undefined && real === realCommand(program) ? [] : [{ program, file: theirs }];
+export function foreignPath(env: unknown): ForeignPath | undefined {
+  const path = pathOf(env);
+  if (path === undefined) return undefined;
+  if (path === UNKNOWN) return { dirs: [], notString: true };
+  const yours = new Set((process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir)).map(dirKey));
+  const dirs = [...new Set(path.split(delimiter))].filter((dir) => !isAbsolute(dir) || !yours.has(dirKey(dir)));
+  return dirs.length === 0 ? undefined : { dirs };
+}
+
+/** A directory as it resolves, symlinks followed, without case on macOS and Windows. */
+function dirKey(dir: string): string {
+  let real: string;
+  try {
+    real = realpathSync(dir);
+  } catch {
+    // Not there, or not yet: compared as written, `..` and a final separator resolved.
+    real = resolve(dir);
+  }
+  return process.platform === "darwin" || process.platform === "win32" ? real.toLowerCase() : real;
+}
+
+/** The variables that say where clients keep their configurations (see userConfigs in clients.ts). */
+const PLACE_VARIABLES = ["COPILOT_HOME", "XDG_CONFIG_HOME", "APPDATA"];
+
+/**
+ * The variables of an entry's `env` that move, for the mcpcage it starts, the client
+ * configurations `run` refuses to mount (see clientPlaces in sensitive.ts): `run` looks for them
+ * with its own environment, which the client gives the entry's `env`. With COPILOT_HOME pointed
+ * elsewhere in the entry, `run` mounted the user's real Copilot directory, the caged server added a
+ * server of its own there, which Copilot then started uncaged, and protect called the entry caged.
+ * A variable counts when the places it gives differ from those of this process's environment (an
+ * XDG_CONFIG_HOME moves nothing on macOS), and so does a value that is not a string, which the
+ * client's spawn converts into a path nobody chose.
+ */
+export function movedPlaces(env: unknown): string[] {
+  if (!isJsonObject(env)) return [];
+  const windows = process.platform === "win32";
+  const places = (variables: NodeJS.ProcessEnv) =>
+    clientPlaces({ platform: process.platform, home: homedir(), env: variables })
+      .map((place) => place.path)
+      .join("\n");
+  const yours = places(process.env);
+  return Object.entries(env).flatMap(([name, value]) => {
+    const variable = PLACE_VARIABLES.find((known) => known === (windows ? name.toUpperCase() : name));
+    if (variable === undefined) return [];
+    return typeof value !== "string" || places({ ...process.env, [variable]: value }) !== yours ? [name] : [];
   });
 }
 

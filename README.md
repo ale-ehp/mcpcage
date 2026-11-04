@@ -154,7 +154,15 @@ node is often a shell script, such as pnpm's shim or the asdf and nodenv shims, 
 shell run code; `ENV` stays, since shells read it only when interactive) and `npm_config_*`.
 `HOME`, `USERPROFILE` and `MCPCAGE_HOME` are dropped: the cage has its
 own `HOME`, and where mcpcage keeps its pins is your choice, not a server's. `PATH` stays, because it
-is often what lets the client find `node`.
+is often what lets the client find `node`, but it must stay within your own `PATH`: mcpcage runs
+`docker` from its usual install places, while `node`, and the programs a shim such as pnpm's runs,
+come from the entry's `PATH`. So `protect` names each directory of an entry's `PATH` that is not on
+yours (compared as they resolve, without case on macOS and Windows), and each relative or empty
+one, and does not count the entry as caged; `--fix` leaves that `PATH` for you to check or remove.
+A `PATH` made of your own directories, such as the `/opt/homebrew/bin:/usr/bin:/bin` of many
+Claude Desktop configurations, is fine. The same goes for `COPILOT_HOME`, `XDG_CONFIG_HOME` and
+`APPDATA` set to another place than yours: `mcpcage run` looks for the clients' configurations,
+which it refuses to mount, where they say.
 
 **Writable mounts are your choice.** A server that can write in a directory can change what your
 machine later runs from it: the code you run and build, and the files that git, editors and build
