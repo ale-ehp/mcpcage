@@ -185,7 +185,7 @@ async function describeServer(
     if (options.inspect && launch) server.inspection = await inspectServer(options.inspect, launch, entry, shown.hidden);
   } catch (error) {
     // The values of the entry's env and headers stay out of the report, whatever the error says.
-    server.error = hideValues(oneLine(messageOf(error)), [...Object.values(stringValues(entry.env)), ...Object.values(stringValues(entry.headers))]);
+    server.error = redactor([...Object.values(stringValues(entry.env)), ...Object.values(stringValues(entry.headers))])(oneLine(messageOf(error)));
   }
   return server;
 }
@@ -200,6 +200,7 @@ async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEn
   const left = skipped.length > 0 ? { skipped } : {};
   // The server may repeat a value it was given, in its error output or in its tools: no value reaches the report.
   const values = [...Object.values(env), ...hidden];
+  const redact = redactor(values);
   try {
     const tools = await inspect({ argv, env });
     // The proxy refuses such a listing whole, so the report does not read it either.
@@ -209,19 +210,21 @@ async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEn
     // and a rule can match part of a value (a ghp_ token is a base64 blob without its prefix), so
     // masking the snippets afterwards would still print what the cut or the match left of it. A
     // server that copied an environment value into a description had it printed in its snippet.
-    const shown = values.some((value) => value.length >= 4) ? tools.map((tool) => withoutValues(tool, values)) : tools;
-    return { tools: tools.length, findings: findingsIn(shown), ...left };
+    const shown = values.some((value) => value.length >= 4) ? tools.map((tool) => withoutValues(tool, redact)) : tools;
+    // A sign can quote what it decodes, and tag characters can spell a value out: hidden there too.
+    const findings = findingsIn(shown).map((finding) => ({ ...finding, snippet: redact(finding.snippet) }));
+    return { tools: tools.length, findings, ...left };
   } catch (error) {
-    return { tools: 0, findings: [], error: hideValues(oneLine((error as Error).message), values), ...left };
+    return { tools: 0, findings: [], error: redact(oneLine((error as Error).message)), ...left };
   }
 }
 
-/** A definition with `values` hidden in every string and key; it is no deeper than MAX_DEPTH, so recursion is safe. */
-function withoutValues<T>(value: T, values: string[]): T {
-  if (typeof value === "string") return hideValues(value, values) as T;
-  if (Array.isArray(value)) return value.map((item: unknown) => withoutValues(item, values)) as T;
+/** A definition with what `redact` hides hidden in every string and key; it is no deeper than MAX_DEPTH, so recursion is safe. */
+function withoutValues<T>(value: T, redact: (text: string) => string): T {
+  if (typeof value === "string") return redact(value) as T;
+  if (Array.isArray(value)) return value.map((item: unknown) => withoutValues(item, redact)) as T;
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [hideValues(key, values), withoutValues(inner, values)])) as T;
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [redact(key), withoutValues(inner, redact)])) as T;
   }
   return value;
 }
@@ -1040,13 +1043,151 @@ function stringValues(record: unknown): Record<string, string> {
   return Object.fromEntries(Object.entries(record).filter((pair): pair is [string, string] => typeof pair[1] === "string"));
 }
 
-/** Longest values first, so one that contains another is hidden whole; very short values would hide ordinary words. */
-function hideValues(text: string, values: string[]): string {
-  let result = text;
-  for (const value of [...new Set(values)].filter((value) => value.length >= 4).sort((left, right) => right.length - left.length)) {
-    result = result.split(value).join(MASK);
+/** Runs of this many characters of a credential are hidden wherever they appear: see redactor. */
+const RUN = 8;
+/** The characters of credentials whose runs are looked for; past them, a value is hidden whole only. */
+const MAX_RUN_CHARS = 256 * 1024;
+// What shows nothing, or nothing of its own: controls, format and unassigned characters, line
+// separators, variation selectors and the other default-ignorable characters.
+const UNSEEN = /[\p{Cc}\p{Cf}\p{Cs}\p{Cn}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]+/gu;
+const HAS_UNSEEN = new RegExp(UNSEEN.source, "u");
+// Of those, the ones the signs of hidden text are made of: invisible-chars, unicode-tags,
+// bidi-control and variation-selectors in suspicious.ts.
+const SIGN_CHARS = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+// The rolling hash of a run of RUN characters, modulo 2^32: BASE, and BASE to the power RUN.
+const BASE = 0x01000193;
+const BASE_TO_RUN = Array.from({ length: RUN }).reduce<number>((power) => Math.imul(power, BASE), 1);
+/** The bits of a hash its first look reads (see redactor): 2^HASH_BITS bits, 128 KiB. */
+const HASH_BITS = 20;
+
+/**
+ * Hides `values` in a text a server wrote, for a report meant to be shared. Each value is hidden
+ * whole, from 4 characters (shorter ones would hide ordinary words), and so is every run of RUN
+ * characters of a credential (see credentialParts). With whole values only, a server given
+ * GITHUB_TOKEN that wrote it with U+200B in the middle, or its first half in one address and the
+ * second in another, had it printed: a reader deletes the [U+200B] or joins the halves. Both are
+ * looked for in the text without the characters that show nothing, and those a sign is made of
+ * (U+200B is one) are put back after the mask, so that hiding a value never hides a sign from the
+ * scan. Linear in the text: a rolling hash finds the places where a run may start, and only those
+ * are compared.
+ */
+function redactor(values: string[]): (text: string) => string {
+  const whole = new Set<string>();
+  const runs = new Set<string>();
+  let budget = MAX_RUN_CHARS;
+  for (const value of values) {
+    const seen = value.replace(UNSEEN, "");
+    let covered = false;
+    for (const part of credentialParts(value)) {
+      const text = part.replace(UNSEEN, "");
+      if (text.length < RUN || text.length > budget) {
+        // The password of an address, say: hidden whole, as the address is.
+        if (text.length >= 4) whole.add(text);
+        continue;
+      }
+      budget -= text.length;
+      for (let at = 0; at + RUN <= text.length; at++) runs.add(text.slice(at, at + RUN));
+      // Wherever the value is, its runs are: no need to look for it whole.
+      if (text === seen) covered = true;
+    }
+    if (seen.length >= 4 && !covered) whole.add(seen);
   }
-  return result;
+  const hashes = new Set([...runs].map(hashOf));
+  // A first look before the set, one bit per hash prefix: most places in a text match no run.
+  const likely = new Int32Array(1 << (HASH_BITS - 5));
+  for (const hash of hashes) likely[hash >>> (32 - HASH_BITS + 5)]! |= 1 << ((hash >>> (32 - HASH_BITS)) & 31);
+  // Not Math.min(...whole): an entry with a few hundred thousand variables would overflow the stack.
+  let shortest = runs.size > 0 ? RUN : Infinity;
+  for (const value of whole) shortest = Math.min(shortest, value.length);
+  return (text) => {
+    if (text.length < shortest) return text;
+    // The text as it reads, and where each of its pieces starts there and in `text`.
+    const pieces: Array<[number, number]> = [[0, 0]];
+    let seen = text;
+    if (HAS_UNSEEN.test(text)) {
+      pieces.length = 0;
+      seen = "";
+      let last = 0;
+      for (const match of text.matchAll(UNSEEN)) {
+        if (match.index > last) pieces.push([seen.length, last]);
+        seen += text.slice(last, match.index);
+        last = match.index + match[0].length;
+      }
+      if (last < text.length) pieces.push([seen.length, last]);
+      seen += text.slice(last);
+    }
+    // reach[at]: where the longest stretch to hide that starts at `at` ends, 0 for none.
+    let reach: Int32Array | undefined;
+    const hide = (start: number, end: number) => {
+      reach ??= new Int32Array(seen.length);
+      if (end > reach[start]!) reach[start] = end;
+    };
+    for (const value of whole) for (let at = seen.indexOf(value); at !== -1; at = seen.indexOf(value, at + 1)) hide(at, at + value.length);
+    if (runs.size > 0) {
+      let hash = 0;
+      for (let at = 0; at < seen.length; at++) {
+        hash = (Math.imul(hash, BASE) + seen.charCodeAt(at)) | 0;
+        if (at >= RUN) hash = (hash - Math.imul(seen.charCodeAt(at - RUN), BASE_TO_RUN)) | 0;
+        if (at < RUN - 1 || !((likely[hash >>> (32 - HASH_BITS + 5)]! >>> ((hash >>> (32 - HASH_BITS)) & 31)) & 1)) continue;
+        if (hashes.has(hash) && runs.has(seen.slice(at + 1 - RUN, at + 1))) hide(at + 1 - RUN, at + 1);
+      }
+    }
+    if (reach === undefined) return text;
+    const marks = reach;
+    // Each stretch, with those it overlaps, replaced in `text` by the mask and the sign characters in it.
+    let piece = 0;
+    const inText = (at: number) => {
+      while (piece + 1 < pieces.length && pieces[piece + 1]![0] <= at) piece++;
+      return pieces[piece]![1] + at - pieces[piece]![0];
+    };
+    let shown = "";
+    let done = 0;
+    for (let at = 0; at < seen.length; ) {
+      let end = marks[at]!;
+      if (end === 0) {
+        at++;
+        continue;
+      }
+      for (let next = at + 1; next < end; next++) end = Math.max(end, marks[next]!);
+      let start = inText(at);
+      let stop = inText(end - 1) + 1;
+      // The two halves of a surrogate pair are one character: hidden together.
+      if (start > done && isLowSurrogate(text, start) && isHighSurrogate(text, start - 1)) start--;
+      if (isLowSurrogate(text, stop) && isHighSurrogate(text, stop - 1)) stop++;
+      shown += `${text.slice(done, start)}${MASK}${text.slice(start, stop).match(SIGN_CHARS)?.join("") ?? ""}`;
+      done = stop;
+      at = end;
+    }
+    return shown + text.slice(done);
+  };
+}
+
+/**
+ * The parts of a value whose runs are hidden (see redactor): the value when it looks like a
+ * credential, the credentials in an address. A path, a number, a plain address or a placeholder is
+ * hidden whole only: its runs ("https://", "/.ssh/id_") are the very text the scan looks for, and a
+ * server given SSH_KEY_PATH would have had "~/.ssh/id_rsa" hidden from the scan in its tools.
+ */
+function credentialParts(value: string): string[] {
+  const text = value.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return maskUrl(text).hidden;
+  return looksLikeSecret(text) ? [text] : [];
+}
+
+function hashOf(run: string): number {
+  let hash = 0;
+  for (let at = 0; at < run.length; at++) hash = (Math.imul(hash, BASE) + run.charCodeAt(at)) | 0;
+  return hash;
+}
+
+function isHighSurrogate(text: string, at: number): boolean {
+  const code = text.charCodeAt(at);
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(text: string, at: number): boolean {
+  const code = text.charCodeAt(at);
+  return code >= 0xdc00 && code <= 0xdfff;
 }
 
 function oneLine(text: string): string {
