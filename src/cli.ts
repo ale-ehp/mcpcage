@@ -4,13 +4,14 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
 import { discoverConfigs } from "./clients.js";
 import { RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
+import { commandOnPath } from "./installed.js";
 import { parseLaunch, serverIdFor } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, checkServerId, serverDir } from "./paths.js";
@@ -336,13 +337,15 @@ const inspectInCage: Inspector = async (launch) => {
   return listTools(prepared.command, prepared.args, prepared.env, 30_000, launch.redact);
 };
 
-/** Desktop apps start servers with a minimal PATH, so configurations get mcpcage's full path when it is found. */
+/**
+ * Desktop apps start servers with a minimal PATH, so configurations get mcpcage's full path when it is
+ * found: in the absolute directories of the PATH, as the report looks up an entry's command. On
+ * Windows `where` looked in the current directory first, and spawning `where` by name ran a where.exe
+ * found there: run in a repository that held a mcpcage.cmd, --fix wrote it into the user's
+ * configurations, and the clients started it on the host.
+ */
 function installedCommand(): string {
-  const windows = process.platform === "win32";
-  const found = spawnSync(windows ? "where" : "which", ["mcpcage"], { encoding: "utf8" });
-  const paths = found.status === 0 ? found.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : [];
-  const path = (windows ? paths.find((candidate) => /\.(cmd|exe)$/i.test(candidate)) : undefined) ?? paths[0];
-  return path !== undefined && isAbsolute(path) ? path : "mcpcage";
+  return commandOnPath("mcpcage") ?? "mcpcage";
 }
 
 /** Claude Code rewrites ~/.claude.json while it runs, so a change made meanwhile could be lost or lose its state. */

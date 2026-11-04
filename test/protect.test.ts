@@ -2187,6 +2187,17 @@ describe("which mcpcage an entry starts", () => {
     expect(fix.code).toBe(1);
   });
 
+  it("writes the mcpcage the PATH finds, never one in the directory protect runs from", () => {
+    // A repository can hold a program named mcpcage, and protect looks at the project it is run in.
+    const installed = fakeMcpcage();
+    const { project, cursor, env } = setup({ notes: { command: "npx", args: ["-y", "@acme/notes-mcp"] } });
+    const planted = idleProgram(project, "mcpcage");
+    const fix = spawnSync(process.execPath, [cli, "protect", "--offline", "--fix", "--yes", "--no-build"], { cwd: project, env: { ...env, PATH: installed.path }, encoding: "utf8" });
+    expect(fix.status, fix.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(cursor, "utf8")).mcpServers.notes.command).toBe(installed.command);
+    expect(fix.stdout).not.toContain(planted);
+  });
+
   it("counts the running mcpcage as mcpcage through a symlink to it", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-which-"));
     const link = join(top, "bin", "mcpcage");

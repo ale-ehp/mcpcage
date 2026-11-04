@@ -209,6 +209,15 @@ function envValue(raw: string): string {
   return /^(['"`])(.*?)\1\s*(?:#.*)?$/.exec(value)?.[2] ?? value;
 }
 
+/**
+ * The file a bare name finds in this process's PATH, as an entry's command is looked up (see onPath):
+ * in its absolute directories only, never in the current directory. Undefined when none has it.
+ */
+export function commandOnPath(name: string): string | undefined {
+  const found = onPath(name, process.env.PATH ?? "", false);
+  return found === UNKNOWN ? undefined : found;
+}
+
 /** The file a command names here, symlinks followed, looked up in this process's PATH; undefined when there is none. */
 function realCommand(command: string): string | undefined {
   const found = onPath(command, process.env.PATH ?? "", false);
@@ -259,7 +268,8 @@ function onPath(command: string, path: string | typeof UNKNOWN, strict: boolean)
       continue;
     }
     for (const extension of extensions) {
-      const file = join(dir, `${command}${extension}`);
+      // PATHEXT spells the extensions in capitals, npm and pnpm write mcpcage.cmd: --fix writes this name.
+      const file = join(dir, `${command}${extension.toLowerCase()}`);
       try {
         if (!statSync(file).isFile()) continue;
         if (!windows) accessSync(file, constants.X_OK);
