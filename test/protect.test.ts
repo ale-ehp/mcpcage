@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { delimiter, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
@@ -17,6 +17,7 @@ import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs } from "../src/protect.js";
 import { parseMount, runArgs } from "../src/sandbox.js";
+import { idleProgram } from "./fake-programs.js";
 import { cli, fakeServer, fakeUserEnv, hostileServer, mcpcageWithEnv, root, stubHome } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
@@ -51,7 +52,8 @@ function claudeJsonFiller(): Record<string, unknown> {
 
 /**
  * mcpcage installed as `npm install -g` installs it: a package named mcpcage, and bin/mcpcage linking
- * to its dist/cli.js. `command` is the absolute path, `path` a PATH on which `mcpcage` finds it first.
+ * to its dist/cli.js; on Windows bin/mcpcage.cmd, which npm writes there to start node with it.
+ * `command` is the absolute path, `path` a PATH on which `mcpcage` finds it first.
  */
 function fakeMcpcage(): { command: string; path: string } {
   const prefix = mkdtempSync(join(tmpdir(), "mcpcage-installed-"));
@@ -60,8 +62,10 @@ function fakeMcpcage(): { command: string; path: string } {
   writeText(join(pkg, "dist", "cli.js"), "#!/usr/bin/env node\n");
   chmodSync(join(pkg, "dist", "cli.js"), 0o755);
   mkdirSync(join(prefix, "bin"));
-  symlinkSync(join(pkg, "dist", "cli.js"), join(prefix, "bin", "mcpcage"));
-  return { command: join(prefix, "bin", "mcpcage"), path: `${join(prefix, "bin")}${delimiter}${process.env.PATH ?? ""}` };
+  const command = join(prefix, "bin", process.platform === "win32" ? "mcpcage.cmd" : "mcpcage");
+  if (process.platform === "win32") writeText(command, `@node "${join(pkg, "dist", "cli.js")}" %*\r\n`);
+  else symlinkSync(join(pkg, "dist", "cli.js"), command);
+  return { command, path: `${join(prefix, "bin")}${delimiter}${process.env.PATH ?? ""}` };
 }
 
 /** Where this platform's clients keep their files, for a fake home and project. */
@@ -1872,13 +1876,9 @@ describe("mcpcage protect", () => {
     for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
     const installed = fakeMcpcage();
     // A program that only has the name, and one in a package with another name.
-    const evil = join(top, "evil", "mcpcage");
-    writeText(evil, '#!/bin/sh\nexec "$@"\n');
-    chmodSync(evil, 0o755);
-    const other = join(top, "other", "bin", "mcpcage");
+    const evil = idleProgram(join(top, "evil"), "mcpcage");
+    const other = idleProgram(join(top, "other", "bin"), "mcpcage");
     writeJsonFile(join(top, "other", "package.json"), { name: "not-mcpcage" });
-    writeText(other, "#!/bin/sh\n");
-    chmodSync(other, 0o755);
     const gone = join(top, "gone", "mcpcage");
 
     const cursor = locationsFor(home, project)("cursor", "user");
@@ -1937,10 +1937,13 @@ describe("mcpcage protect", () => {
     const project = join(top, "work");
     const cage = join(top, "cage");
     for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
-    // As pnpm installs a global package: a shell script that starts it, not a link into it.
+    // As pnpm installs a global package: a shell script that starts it, not a link into it (a .cmd
+    // file on Windows).
     const shimDir = join(top, "pnpm");
-    const shim = join(shimDir, "mcpcage");
-    writeText(shim, '#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$basedir/global/5/node_modules/mcpcage/dist/cli.js" "$@"\n');
+    const windows = process.platform === "win32";
+    const shim = join(shimDir, windows ? "mcpcage.cmd" : "mcpcage");
+    if (windows) writeText(shim, '@node "%~dp0\\global\\5\\node_modules\\mcpcage\\dist\\cli.js" %*\r\n');
+    else writeText(shim, '#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$basedir/global/5/node_modules/mcpcage/dist/cli.js" "$@"\n');
     chmodSync(shim, 0o755);
     const cursor = locationsFor(home, project)("cursor", "user");
     writeJsonFile(cursor, { mcpServers: { notes: { command: "npx", args: ["-y", "@acme/notes-mcp"] } } });
@@ -1974,7 +1977,7 @@ describe("mcpcage protect", () => {
     expect(fix(installed.command).stdout).toContain(`\nPlan\n  cage notes in ${where}\n`);
     expect(JSON.parse(readFileSync(cursor, "utf8")).mcpServers.notes.command).toBe(installed.command);
     // Symlinks are followed on both sides.
-    const link = join(top, "link", "mcpcage");
+    const link = join(top, "link", basename(shim));
     mkdirSync(dirname(link));
     symlinkSync(shim, link);
     expect([mcpcageAt({ command: shim }), mcpcageAt({ command: shim }, shim), mcpcageAt({ command: link }, shim), mcpcageAt({ command: shim }, link)]).toEqual([
@@ -2100,9 +2103,7 @@ describe("which mcpcage an entry starts", () => {
   }
   /** A program named mcpcage that only exits, with `manifest` as the package.json of its directory. */
   function lookAlike(dir: string, manifest?: unknown): string {
-    const command = join(dir, "mcpcage");
-    writeText(command, "#!/bin/sh\nexit 0\n");
-    chmodSync(command, 0o755);
+    const command = idleProgram(dir, "mcpcage");
     if (manifest !== undefined) writeJsonFile(join(dir, "package.json"), manifest);
     return command;
   }
@@ -2450,8 +2451,7 @@ describe("what a wrapped entry's PATH picks", () => {
     const own = dirname(installed.command);
     // A uname of the entry's choice, which the pnpm shim of mcpcage runs: its node and docker are the user's.
     const fake = join(top, "fake");
-    writeText(join(fake, "uname"), "#!/bin/sh\nexit 0\n");
-    chmodSync(join(fake, "uname"), 0o755);
+    idleProgram(fake, "uname");
     // A link to a directory of the user's PATH is that directory.
     const link = join(top, "link");
     symlinkSync(own, link);
@@ -2634,10 +2634,7 @@ describe("what wrap and --fix write", () => {
     const evilDir = join(top, "evil");
     const theirsToo = join(top, "theirs-too");
     const fake = join(top, "fake");
-    for (const program of [join(evilDir, "mcpcage"), join(theirsToo, "mcpcage"), join(fake, "node")]) {
-      writeText(program, "#!/bin/sh\nexit 0\n");
-      chmodSync(program, 0o755);
-    }
+    for (const [dir, name] of [[evilDir, "mcpcage"], [theirsToo, "mcpcage"], [fake, "node"]] as const) idleProgram(dir, name);
     const run = ["run", "--", "npx", "-y", "rogue"];
     const yours = (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir)).slice(-2);
     const file = join(top, "mcp.json");
@@ -2704,8 +2701,7 @@ describe("what wrap and --fix write", () => {
     const installed = fakeMcpcage();
     // What the #!/usr/bin/env node of mcpcage's script would find first.
     const fake = join(top, "fake");
-    writeText(join(fake, "node"), "#!/bin/sh\nexit 0\n");
-    chmodSync(join(fake, "node"), 0o755);
+    idleProgram(fake, "node");
     const yours = (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir)).slice(-2);
     const files = { command: "npx", args: ["-y", "@acme/files-mcp"], env: { PATH: [fake, ...yours].join(delimiter) } };
     const cursor = locationsFor(home, project)("cursor", "user");

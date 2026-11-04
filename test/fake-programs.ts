@@ -48,6 +48,20 @@ export function fakePrograms(): { dir: string; path: string; ran: () => string }
 }
 
 /**
+ * A program named `name` in `dir` that only exits, in the form this system starts by name: a shell
+ * script on macOS and Linux, a .cmd file on Windows, where a bare name finds a file only with one of
+ * the extensions of PATHEXT, as a client's spawn looks it up there. Returns its path.
+ */
+export function idleProgram(dir: string, name: string): string {
+  const windows = process.platform === "win32";
+  const file = join(dir, windows ? `${name}.cmd` : name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(file, windows ? "@exit /b 0\r\n" : "#!/bin/sh\nexit 0\n");
+  chmodSync(file, 0o755);
+  return file;
+}
+
+/**
  * Variables under which mcpcage reaches no Docker: no docker on the PATH, and for the docker it finds
  * in a standard place whatever the PATH says, a daemon socket that does not exist.
  */
