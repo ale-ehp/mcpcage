@@ -10,7 +10,7 @@ import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/s
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { dockerAvailable } from "../src/sandbox.js";
+import { cagePath, dockerAvailable } from "../src/sandbox.js";
 import { cli, connect, freshHome, mcpcage, root } from "./helpers.js";
 
 const abusePackage = join(root, "test", "fixtures", "abuse-server");
@@ -18,6 +18,10 @@ const docker = dockerAvailable();
 const home = freshHome();
 const server = ["npx", "-y", abusePackage];
 const MiB = 1024 * 1024;
+/** Where the server finds a path of this machine in its cage, which is what tool calls must name: /c/... on Windows. */
+const inCage = (path: string) => cagePath(path);
+/** `report` with each key, a path of this machine, as the server names it in its cage. */
+const keysInCage = <T>(report: Record<string, T>) => Object.fromEntries(Object.entries(report).map(([path, value]) => [inCage(path), value]));
 /** A capability set with nothing in it, as /proc/self/status shows it. */
 const NO_CAPABILITIES = "0000000000000000";
 
@@ -189,7 +193,7 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
     chmodSync(writable, 0o777);
     try {
       const report = await call<WriteReport>("write_outside", {
-        args: { paths: [readOnly, writable] },
+        args: { paths: [readOnly, writable].map(inCage) },
         runArgs: ["--mount", readOnly, "--mount", `${writable}:rw`],
       });
       expect(report.ownCode).toBe("/app/node_modules/mcpcage-abuse");
@@ -203,8 +207,8 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
         "/app/node_modules/mcpcage-abuse": "EROFS",
         "/home/nonroot": "EROFS",
         "/tmp": true,
-        [readOnly]: "EROFS",
-        [writable]: true,
+        [inCage(readOnly)]: "EROFS",
+        [inCage(writable)]: true,
       });
       // The program runs from where Docker put it. Copied to /tmp and made executable, it is refused by
       // the kernel: /tmp is mounted noexec.
@@ -232,11 +236,11 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
     for (const file of [config, settings, notes]) chmodSync(file, 0o666);
     try {
       const report = await call<WriteReport>("write_outside", {
-        args: { paths: [hooks, project], files: [config, settings, notes] },
+        args: { paths: [hooks, project].map(inCage), files: [config, settings, notes].map(inCage) },
         runArgs: ["--mount", `${project}:rw`],
       });
-      expect(report.writes).toMatchObject({ [hooks]: "EROFS", [project]: true });
-      expect(report.appends).toEqual({ [config]: "EROFS", [settings]: "EROFS", [notes]: true });
+      expect(report.writes).toMatchObject(keysInCage({ [hooks]: "EROFS", [project]: true }));
+      expect(report.appends).toEqual(keysInCage({ [config]: "EROFS", [settings]: "EROFS", [notes]: true }));
       // The ordinary file changed on the host; the settings are as they were.
       expect(readFileSync(notes, "utf8")).toBe("# Notes\n# appended by mcpcage-abuse\n");
       expect(readFileSync(config, "utf8")).toBe("[core]\n\trepositoryformatversion = 0\n");
@@ -261,11 +265,11 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
     for (const dir of [project, org, app, git, join(git, "hooks")]) chmodSync(dir, 0o777);
     chmodSync(config, 0o666);
     try {
-      const report = await call<MoveReport>("move_aside", { args: { paths: [org, app, git], files: [config, notes] }, runArgs: ["--mount", `${project}:rw`] });
+      const report = await call<MoveReport>("move_aside", { args: { paths: [org, app, git].map(inCage), files: [config, notes].map(inCage) }, runArgs: ["--mount", `${project}:rw`] });
       // Each directory on the way to .git is a mount point of its own, and the kernel refuses to rename one.
-      expect(report.renames).toEqual({ [org]: "EBUSY", [app]: "EBUSY", [git]: "EBUSY" });
+      expect(report.renames).toEqual(keysInCage({ [org]: "EBUSY", [app]: "EBUSY", [git]: "EBUSY" }));
       // The configuration stays read-only where it is, and the directory that holds it stays writable.
-      expect(report.creates).toEqual({ [config]: "EROFS", [notes]: true });
+      expect(report.creates).toEqual(keysInCage({ [config]: "EROFS", [notes]: true }));
       // On the host: nothing moved, no new repository, the user's configuration as it was.
       expect(readdirSync(project)).toEqual(["org"]);
       expect(readdirSync(org)).toEqual(["app"]);
