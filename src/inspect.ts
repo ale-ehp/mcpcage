@@ -13,7 +13,8 @@ const VERSION = packageVersion();
  * A minimal MCP client over stdio: initialize, then every page of tools/list. It reads the tools a
  * server offers without approving or pinning anything, for `mcpcage protect --inspect`, and reads
  * the server with the proxy's limits: a line over MAX_LINE_BYTES is dropped as it streams in, and
- * a listing of more than MAX_TOOLS tools is refused.
+ * a listing of more than MAX_TOOLS tools is refused, as is one whose pages together take more than
+ * MAX_LINE_BYTES.
  */
 export function listTools(command: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<ToolDefinition[]> {
   return new Promise((resolve, reject) => {
@@ -26,6 +27,10 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
     // Lines over MAX_LINE_BYTES, thrown away unread: the answer may have been one of them.
     let dropped = 0;
     let longest = 0;
+    // The bytes of the pages that brought tools. Each page is a line, held to MAX_LINE_BYTES, and the
+    // listing is held to the same over all its pages: a server that sent page after page of one tool
+    // with a description of 15 MiB grew mcpcage's memory by as much each time, to 4 GB in seconds.
+    let listed = 0;
 
     /** Why an answer may be missing: the lines too long to read, and the end of the server's stderr. */
     const tail = () => {
@@ -50,19 +55,26 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
       if (error) reject(error);
       else resolve(tools);
     };
-    const send = (message: Record<string, unknown>) => {
-      if (!done && child.stdin.writable) child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+    // A server that writes without reading its stdin would pile what mcpcage sends it up in mcpcage's
+    // memory, so while a line's worth is still waiting, nothing is added. Pings with ids of 1 MiB
+    // queued over 32 MiB of answers before the timeout; once the answers were held back, pages with
+    // cursors of 1 MiB, the next page asked for after each, queued 64 MiB of requests. An answer to
+    // the server is dropped, as answerServer in proxy.ts drops it; a message the listing needs ends
+    // the inspection instead, since the listing cannot go on without it.
+    const send = (message: Record<string, unknown>, needed: boolean) => {
+      if (done || !child.stdin.writable) return;
+      if (child.stdin.writableLength >= MAX_LINE_BYTES) {
+        if (needed) finish(new Error(`the server does not read what mcpcage sends it: over ${MAX_LINE_BYTES / 1024 / 1024} MiB are waiting${tail()}`));
+        return;
+      }
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
     };
-    // mcpcage answers the server's own requests. A server that sends them without reading its stdin
-    // would pile the answers up in mcpcage's memory (pings with ids of 1 MiB queued over 32 MiB before
-    // the timeout), so while a line's worth is still waiting, none is added: answerServer in proxy.ts.
-    const answer = (message: Record<string, unknown>) => {
-      if (child.stdin.writableLength < MAX_LINE_BYTES) send(message);
-    };
+    // mcpcage answers the server's own requests.
+    const answer = (message: Record<string, unknown>) => send(message, false);
     const request = (method: string, params: Record<string, unknown>) => {
       const id = nextId++;
       waiting.set(id, method);
-      send({ id, method, params });
+      send({ id, method, params }, true);
     };
     const timer = setTimeout(() => finish(new Error(`the server did not answer within ${timeoutMs / 1000} s${tail()}`)), timeoutMs);
 
@@ -110,7 +122,7 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
         return;
       }
       if (method === "initialize") {
-        send({ method: "notifications/initialized" });
+        send({ method: "notifications/initialized" }, true);
         request("tools/list", {});
         return;
       }
@@ -121,6 +133,12 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
       }
       if (tools.length + result.tools.length > MAX_TOOLS) {
         finish(new Error(`the server lists more than ${MAX_TOOLS.toLocaleString("en-US")} tools, which mcpcage refuses`));
+        return;
+      }
+      // A page without tools keeps nothing: only the cursor, which goes out with the next request.
+      if (result.tools.length > 0) listed += Buffer.byteLength(line);
+      if (listed > MAX_LINE_BYTES) {
+        finish(new Error(`the server's tools take more than ${MAX_LINE_BYTES / 1024 / 1024} MiB over all its pages, which mcpcage refuses`));
         return;
       }
       for (const tool of result.tools) tools.push(tool);
