@@ -451,7 +451,14 @@ In short:
 npm ci
 npm test               # unit and integration tests, no Docker needed
 npm run test:docker    # the cage and `protect --inspect` against a real Docker daemon
+MCPCAGE_FUZZ_RUNS=20000 npx vitest run test/*.fuzz.test.ts   # the property-based tests, longer
 ```
+
+The property-based tests (`test/*.fuzz.test.ts`, with fast-check) throw generated input at what
+reads untrusted data or decides what is safe: the proxy, pins, the rules, command lines and
+configuration files. `npm test` runs each a few hundred times from a fixed seed; a failure
+prints the seed and the smallest failing case, and `MCPCAGE_FUZZ_SEED=<seed>` runs the same cases
+again.
 
 mcpcage has no runtime dependencies. Releases are published to npm with provenance, with a
 CycloneDX SBOM and a GitHub build attestation attached ([release workflow](.github/workflows/release.yml)).
