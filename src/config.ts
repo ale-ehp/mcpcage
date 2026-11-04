@@ -81,6 +81,22 @@ export const HOST_ENV: ReadonlyArray<{ name: RegExp; to: "container" | "drop"; w
   // docker included: LD_PRELOAD and DYLD_INSERT_LIBRARIES load a library of their choice into each.
   { name: /^LD_/i, to: "container", what: () => "can load code into mcpcage on your machine before the cage starts" },
   { name: /^DYLD_/i, to: "container", what: () => "can load code into mcpcage on your machine before the cage starts" },
+  // OpenSSL reads them in every program that loads it, Node included, which does so as it starts
+  // mcpcage: OPENSSL_CONF can name a provider or an engine to load, a shared library whose code runs
+  // on the host before mcpcage has read its first argument, and OPENSSL_MODULES and OPENSSL_ENGINES
+  // choose the directory it is loaded from. The others only tune OpenSSL; they move too, because on
+  // the host they would tune mcpcage's, which they were not written for.
+  {
+    name: /^OPENSSL_/i,
+    to: "container",
+    what: (name) =>
+      /^OPENSSL_(CONF|CONF_INCLUDE|MODULES|ENGINES)$/i.test(name)
+        ? "can make OpenSSL load code into mcpcage on your machine before the cage starts"
+        : "configures OpenSSL in mcpcage on your machine",
+  },
+  // glibc loads the character set converters of iconv from GCONV_PATH, as shared libraries, in any
+  // program on the host that converts text with it.
+  { name: /^GCONV_PATH$/i, to: "container", what: () => "can load code into mcpcage on your machine before the cage starts" },
   // The docker command mcpcage runs reads them: DOCKER_HOST and DOCKER_CONTEXT send the build and the
   // run, with the value of every --env, to another daemon; DOCKER_CONFIG chooses its plugins and
   // credential helpers. A DOCKER_HOST of unix:// or npipe:// only names a local socket (see hostVariable).

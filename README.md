@@ -147,7 +147,8 @@ that `env` to mcpcage itself, on your machine. So a variable that would configur
 there moves into the cage as `--env NAME=value` and leaves `env`: `NODE_*` (`NODE_OPTIONS` can make
 Node run code before mcpcage starts), `LD_*` and `DYLD_*`, `DOCKER_*` (another Docker daemon would
 build and run the cage; a `unix://` or `npipe://` `DOCKER_HOST` only names the local socket and
-stays) and `npm_config_*`. `HOME`, `USERPROFILE` and `MCPCAGE_HOME` are dropped: the cage has its
+stays), `OPENSSL_*` and `GCONV_PATH` (they can load a library into Node or the C library) and
+`npm_config_*`. `HOME`, `USERPROFILE` and `MCPCAGE_HOME` are dropped: the cage has its
 own `HOME`, and where mcpcage keeps its pins is your choice, not a server's. `PATH` stays, because it
 is often what lets the client find `node`.
 

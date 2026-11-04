@@ -496,6 +496,109 @@ describe("wrapping one entry", () => {
   });
 });
 
+describe("an entry's env that makes OpenSSL or glibc load code", () => {
+  // Node loads OpenSSL as it starts mcpcage, and OPENSSL_CONF can make OpenSSL load a provider, a
+  // shared library of its choice, on the host and before any cage: wrap kept it in "env" with an
+  // `--env OPENSSL_CONF`, and protect called the entry caged. glibc loads iconv's converters from
+  // GCONV_PATH the same way.
+  const env = {
+    OPENSSL_CONF: "/tmp/never-printed/openssl.cnf",
+    API_KEY: "sk-live-0123456789abcdef",
+    OPENSSL_MODULES: "/tmp/never-printed/ossl-modules",
+    openssl_engines: "/tmp/never-printed/engines",
+    OPENSSL_CONF_INCLUDE: "/tmp/never-printed/conf.d",
+    OPENSSL_ia32cap: "~0x200000200000000",
+    GCONV_PATH: "/tmp/never-printed/gconv",
+    // Only spelled alike: variables of the server like any other.
+    MY_OPENSSL_CONF: "server-setting",
+    GCONV_PATHS: "server-setting",
+  };
+
+  it("moves every OPENSSL_* variable and GCONV_PATH into the cage as NAME=value, out of env", () => {
+    expect(wrapEntry({ command: "npx", args: ["-y", "pkg"], env }, { command: "mcpcage" })).toEqual({
+      entry: {
+        command: "mcpcage",
+        args: [
+          "run",
+          "--env", `OPENSSL_CONF=${env.OPENSSL_CONF}`,
+          "--env", "API_KEY",
+          "--env", `OPENSSL_MODULES=${env.OPENSSL_MODULES}`,
+          "--env", `openssl_engines=${env.openssl_engines}`,
+          "--env", `OPENSSL_CONF_INCLUDE=${env.OPENSSL_CONF_INCLUDE}`,
+          "--env", `OPENSSL_ia32cap=${env.OPENSSL_ia32cap}`,
+          "--env", `GCONV_PATH=${env.GCONV_PATH}`,
+          "--env", "MY_OPENSSL_CONF",
+          "--env", "GCONV_PATHS",
+          "--", "npx", "-y", "pkg",
+        ],
+        env: { API_KEY: env.API_KEY, MY_OPENSSL_CONF: "server-setting", GCONV_PATHS: "server-setting" },
+      },
+    });
+    // An entry wrapped before mcpcage knew them gets the same move, in place of the --env that read them on the host.
+    const caged = { command: "mcpcage", args: ["run", "--env", "OPENSSL_CONF", "--env", "API_KEY", "--env", "GCONV_PATH", "--", "npx", "-y", "pkg"], env: { OPENSSL_CONF: env.OPENSSL_CONF, API_KEY: env.API_KEY, GCONV_PATH: env.GCONV_PATH } };
+    expect(moveHostEnv(caged)).toEqual({
+      entry: { command: "mcpcage", args: ["run", "--env", `OPENSSL_CONF=${env.OPENSSL_CONF}`, "--env", `GCONV_PATH=${env.GCONV_PATH}`, "--env", "API_KEY", "--", "npx", "-y", "pkg"], env: { API_KEY: env.API_KEY } },
+    });
+  });
+
+  it("does not count as caged an entry that sets them, names each in the report, and --fix moves them into the cage", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-openssl-env-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    const tuned = {
+      command: "mcpcage",
+      args: ["run", "--env", "OPENSSL_CONF", "--env", "API_KEY", "--", "npx", "-y", "@acme/tuned-mcp"],
+      env: { OPENSSL_CONF: env.OPENSSL_CONF, API_KEY: "${input:key}" },
+    };
+    const fresh = { command: "npx", args: ["-y", "@acme/fresh-mcp"], env: { OPENSSL_MODULES: env.OPENSSL_MODULES, GCONV_PATH: env.GCONV_PATH, OPENSSL_ia32cap: env.OPENSSL_ia32cap } };
+    writeJsonFile(cursor, { mcpServers: { tuned, fresh } });
+    const userEnv = fakeUserEnv(home, cage, { PATH: fakeMcpcage().path });
+    const indent = " ".repeat(16);
+    const values = [env.OPENSSL_CONF, env.OPENSSL_MODULES, env.GCONV_PATH, env.OPENSSL_ia32cap];
+
+    const scan = mcpcageWithEnv(userEnv, "protect", "--project", project, "--offline");
+    for (const value of values) expect(`${scan.stdout}${scan.stderr}`).not.toContain(value);
+    expect(scan.stdout).toMatch(/^ {2}tuned {9}mcpcage run --env OPENSSL_CONF --env API_KEY -- npx -y @acme\/tuned-mcp +caged, but its env runs on your machine$/m);
+    expect(scan.stdout).toContain(
+      [
+        "caged, but its env runs on your machine",
+        `${indent}env OPENSSL_CONF: can make OpenSSL load code into mcpcage on your machine before the cage starts`,
+        "  fresh ",
+      ].join("\n"),
+    );
+    expect(scan.stdout).toContain(
+      [
+        `${indent}env OPENSSL_MODULES: can make OpenSSL load code into mcpcage on your machine before the cage starts`,
+        `${indent}env GCONV_PATH: can load code into mcpcage on your machine before the cage starts`,
+        `${indent}env OPENSSL_ia32cap: configures OpenSSL in mcpcage on your machine`,
+      ].join("\n"),
+    );
+    expect(scan.stdout).toContain("  2 run on your machine with your permissions and no cage.");
+    expect(scan.code).toBe(1);
+
+    const fix = mcpcageWithEnv(userEnv, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", "mcpcage");
+    for (const value of values) expect(`${fix.stdout}${fix.stderr}`).not.toContain(value);
+    expect(fix.code, fix.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(cursor, "utf8")).mcpServers).toEqual({
+      tuned: { command: "mcpcage", args: ["run", "--env", `OPENSSL_CONF=${env.OPENSSL_CONF}`, "--env", "API_KEY", "--", "npx", "-y", "@acme/tuned-mcp"], env: { API_KEY: "${input:key}" } },
+      fresh: {
+        command: "mcpcage",
+        args: ["run", "--env", `OPENSSL_MODULES=${env.OPENSSL_MODULES}`, "--env", `GCONV_PATH=${env.GCONV_PATH}`, "--env", `OPENSSL_ia32cap=${env.OPENSSL_ia32cap}`, "--", "npx", "-y", "@acme/fresh-mcp"],
+        env: {},
+      },
+    });
+
+    const again = mcpcageWithEnv(userEnv, "protect", "--project", project, "--offline");
+    expect(again.stdout).toMatch(/^ {2}tuned {9}mcpcage run --env OPENSSL_CONF=\*\*\* --env API_KEY -- npx -y @acme\/tuned-mcp +caged$/m);
+    expect(again.stdout).not.toContain(`${indent}env `);
+    expect(again.stdout).toContain("  2 already run through mcpcage.");
+    expect(again.code).toBe(0);
+  });
+});
+
 describe("what a server can reach", () => {
   it("names the whole home directory, the whole disk and the directories with credentials, however they are written", () => {
     const home = "/Users/me";
