@@ -45,12 +45,14 @@
 // These five also send a log notification, and print the answer to their request on stderr as
 // "hostile-server got <the JSON line>".
 //   flood        reads nothing at first: sends 24 sampling requests with ids of 1 MiB, then a log line
-//                "flood done". It prints its pid on stderr; on SIGUSR2 it reads what it was sent and,
+//                "flood done". Once the file HOSTILE_READ names exists, it reads what it was sent and,
 //                at the end of its input, prints "hostile-server got <n> answers" on stderr.
 //   notify-flood reads nothing: sends 8192 log notifications of exactly 1 KiB, as fast as the reader
-//                takes them, and exits when they are all written.
+//                takes them, and exits when they are all written. With HOSTILE_PID set, it first prints
+//                its pid on stderr.
 //   ping-flood   reads nothing: sends 64 pings with ids of 1 MiB, as fast as the reader takes them,
 //                then prints "hostile-server sent 64 pings" on stderr and waits.
+import { existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const mode = process.argv[2];
@@ -202,7 +204,10 @@ function serve() {
 /** Requests that mcpcage refuses, sent while nothing is read: its answers wait in the pipe. */
 function flood() {
   const alive = setInterval(() => {}, 1000);
-  process.on("SIGUSR2", () => {
+  // Told to read by a file, not by a signal: Windows has no SIGUSR2.
+  const told = setInterval(() => {
+    if (!existsSync(process.env.HOSTILE_READ ?? "")) return;
+    clearInterval(told);
     let answers = 0;
     createInterface({ input: process.stdin })
       .on("line", () => answers++)
@@ -210,14 +215,14 @@ function flood() {
         process.stderr.write(`hostile-server got ${answers} answers\n`);
         clearInterval(alive);
       });
-  });
-  process.stderr.write(`hostile-server pid ${process.pid}\n`);
+  }, 20);
   for (let n = 0; n < 24; n++) send({ id: String(n).padEnd(1024 * 1024, "x"), ...requests.sampling });
   send({ method: "notifications/message", params: { level: "info", data: "flood done" } });
 }
 
 /** Notifications the client is slow to take: mcpcage must not keep them all in memory meanwhile. */
 async function notifyFlood() {
+  if (process.env.HOSTILE_PID) process.stderr.write(`hostile-server pid ${process.pid}\n`);
   const notification = (data) => JSON.stringify({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info", data } });
   const line = `${notification("x".repeat(1023 - notification("").length))}\n`;
   for (let n = 0; n < 8192; n++) {

@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -479,8 +479,8 @@ function capableClient() {
  * the hostile server in this mode behind it. With `readOutput: false` the client never reads what
  * mcpcage writes to it.
  */
-function rawSession(home: string, mode: string, { readOutput = true } = {}) {
-  return rawClient(home, ["--id", "hostile", "--", process.execPath, hostileServer, mode], {}, readOutput);
+function rawSession(home: string, mode: string, { readOutput = true, env = {} as Record<string, string> } = {}) {
+  return rawClient(home, ["--id", "hostile", "--", process.execPath, hostileServer, mode], env, readOutput);
 }
 
 /** `mcpcage run --no-sandbox <run>` with a bare JSON-RPC client on its stdio; `env` reaches the server. */
@@ -853,15 +853,13 @@ describe("requests from the server", () => {
 
   it("stops answering refused requests while the server leaves the answers unread", async () => {
     const home = freshHome();
-    const session = rawSession(home, "flood");
-    let pid = 0;
+    const read = join(home, "start-reading");
+    const session = rawSession(home, "flood", { env: { HOSTILE_READ: read } });
     await vi.waitFor(() => {
       expect(session.received()).toContainEqual(expect.objectContaining({ params: expect.objectContaining({ data: "flood done" }) }));
-      pid = Number(/hostile-server pid (\d+)/.exec(session.stderr())?.[1]);
-      expect(pid).toBeGreaterThan(0);
     }, { timeout: 10_000 });
     // Now the server reads what mcpcage queued for it while it was not reading.
-    process.kill(pid, "SIGUSR2");
+    writeFileSync(read, "");
     await session.close();
     // 24 answers of 1 MiB were due; mcpcage stops adding them once 16 MiB are waiting.
     const answers = Number(/hostile-server got (\d+) answers/.exec(session.stderr())?.[1]);
@@ -1001,10 +999,14 @@ describe("client failure", () => {
     const home = freshHome();
     // The client reads nothing, so mcpcage holds the flood back and the server is still writing when
     // the client goes away.
-    const session = rawSession(home, "notify-flood", { readOutput: false });
-    await vi.waitFor(() => expect(session.unread()).toBeGreaterThan(0), { timeout: 10_000 });
-    const server = Number(spawnSync("pgrep", ["-P", String(session.pid)], { encoding: "utf8" }).stdout.trim());
-    expect(server).toBeGreaterThan(0);
+    const session = rawSession(home, "notify-flood", { readOutput: false, env: { HOSTILE_PID: "1" } });
+    // The server says its pid: pgrep, which found it as mcpcage's child, is not on Windows.
+    let server = 0;
+    await vi.waitFor(() => {
+      expect(session.unread()).toBeGreaterThan(0);
+      server = Number(/hostile-server pid (\d+)/.exec(session.stderr())?.[1]);
+      expect(server).toBeGreaterThan(0);
+    }, { timeout: 10_000 });
     const closed = Date.now();
     session.closeOutput();
     await session.exited;
