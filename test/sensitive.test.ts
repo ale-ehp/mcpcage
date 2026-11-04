@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, posix, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { discoverConfigs } from "../src/clients.js";
 import { clientPlaces, sensitivePath, thisMachine } from "../src/sensitive.js";
@@ -281,12 +281,18 @@ describe("client configurations where the environment moves them", () => {
   });
 
   it("counts every user file discovery lists for the same environment, VS Code profiles included", () => {
-    const top = mkdtempSync(join(tmpdir(), "mcpcage-relocated-"));
+    // The places of macOS and Linux are POSIX paths, which name no directory of the test on Windows:
+    // there they are checked by name, without the profile that only a directory on disk can list.
+    const onDisk = process.platform !== "win32";
+    const { join } = posix;
+    const top = onDisk ? mkdtempSync(join(tmpdir(), "mcpcage-relocated-")) : "/mcpcage-test-relocated";
     const home = join(top, "home");
     const xdg = join(top, "xdg");
     const profile = join(xdg, "Code", "User", "profiles", "work", "mcp.json");
-    mkdirSync(join(profile, ".."), { recursive: true });
-    writeFileSync(profile, "{}\n");
+    if (onDisk) {
+      mkdirSync(join(profile, ".."), { recursive: true });
+      writeFileSync(profile, "{}\n");
+    }
     const machines = [
       { platform: "linux" as const, home, env: { XDG_CONFIG_HOME: xdg, COPILOT_HOME: join(top, "copilot") } },
       { platform: "darwin" as const, home, env: { COPILOT_HOME: join(top, "copilot") } },
@@ -294,7 +300,7 @@ describe("client configurations where the environment moves them", () => {
     ];
     for (const machine of machines) {
       const user = discoverConfigs({ ...machine, project: machine.platform === "win32" ? "C:\\work" : join(top, "work") }).filter((location) => location.scope === "user");
-      if (machine.platform === "linux") expect(user.map((location) => location.file)).toContain(profile);
+      if (machine.platform === "linux" && onDisk) expect(user.map((location) => location.file)).toContain(profile);
       const options = { home: machine.home, platform: machine.platform, clients: clientPlaces(machine) };
       for (const location of user) expect(sensitivePath(location.file, options), `${machine.platform} ${location.file}`).toBeDefined();
     }

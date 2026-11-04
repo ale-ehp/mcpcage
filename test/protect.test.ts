@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, posix, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
@@ -172,6 +172,8 @@ function tilde(path: string, home: string): string {
 }
 
 describe("configuration discovery", () => {
+  // Discovery joins the paths of macOS and Linux with /, on any machine: so do the tests of those systems.
+  const { join } = posix;
   const order = (locations: ReturnType<typeof discoverConfigs>) => locations.map(({ client, scope, file, key, jsonc }) => ({ client, scope, file, key, jsonc }));
 
   it("lists the documented files of every client on macOS, user files before project files", () => {
@@ -269,14 +271,20 @@ describe("VS Code under XDG_CONFIG_HOME and in profiles", () => {
   const vscodeUser = (locations: ReturnType<typeof discoverConfigs>) =>
     locations.filter((location) => location.client === "vscode" && location.scope === "user").map(({ file, exists, key, jsonc }) => ({ file, exists, key, jsonc }));
   const user = (file: string, exists: boolean) => ({ file, exists, key: "servers", jsonc: true });
+  // Discovery joins the paths of macOS and Linux with /, on any machine: so do the tests of those systems.
+  const { join } = posix;
+  // XDG_CONFIG_HOME counts only as an absolute POSIX path, which names no directory of the test on
+  // Windows: there it is one that does not exist, and discovery looks for files there all the same.
+  const onDisk = process.platform !== "win32";
+  const xdgIn = (home: string) => (onDisk ? join(home, "xdg") : "/mcpcage-test-xdg");
 
   it("follows an absolute XDG_CONFIG_HOME on Linux, and only on Linux", () => {
     const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
     const project = mkdtempSync(join(tmpdir(), "mcpcage-project-"));
-    const xdg = join(home, "xdg");
-    writeJsonFile(join(xdg, "Code", "User", "mcp.json"), { servers: {} });
+    const xdg = xdgIn(home);
+    if (onDisk) writeJsonFile(join(xdg, "Code", "User", "mcp.json"), { servers: {} });
     const linux = discoverConfigs({ platform: "linux", home, env: { XDG_CONFIG_HOME: xdg }, project });
-    expect(vscodeUser(linux)).toEqual([user(join(xdg, "Code", "User", "mcp.json"), true), user(join(xdg, "Code - Insiders", "User", "mcp.json"), false)]);
+    expect(vscodeUser(linux)).toEqual([user(join(xdg, "Code", "User", "mcp.json"), onDisk), user(join(xdg, "Code - Insiders", "User", "mcp.json"), false)]);
     // Only VS Code's files move: the other clients' documentation names ~/.config itself.
     expect(linux.find((location) => location.client === "devin" && location.scope === "user")!.file).toBe(join(home, ".config", "devin", "mcp_config.json"));
 
@@ -314,12 +322,12 @@ describe("VS Code under XDG_CONFIG_HOME and in profiles", () => {
   it("finds profiles under XDG_CONFIG_HOME too, and needs no profiles directory", () => {
     const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));
     const project = mkdtempSync(join(tmpdir(), "mcpcage-project-"));
-    const xdg = join(home, "xdg");
+    const xdg = xdgIn(home);
     const profile = join(xdg, "Code", "User", "profiles", "work", "mcp.json");
-    writeJsonFile(profile, { servers: {} });
+    if (onDisk) writeJsonFile(profile, { servers: {} });
     expect(vscodeUser(discoverConfigs({ platform: "linux", home, env: { XDG_CONFIG_HOME: xdg }, project })).map((location) => location.file)).toEqual([
       join(xdg, "Code", "User", "mcp.json"),
-      profile,
+      ...(onDisk ? [profile] : []),
       join(xdg, "Code - Insiders", "User", "mcp.json"),
     ]);
     // A home where VS Code never ran: the two default files, absent, as before.
