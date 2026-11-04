@@ -161,8 +161,10 @@ describe("run --no-sandbox on Windows", () => {
 
   it.runIf(process.platform === "win32")("starts npx, which a plain spawn could not find, and a cmd /c npx without cmd", async () => {
     const home = freshHome();
+    // npx installs the package in a cache of the run's own, not in the user's npm cache.
+    const env = { FAKE_VARIANT: "v1", npm_config_cache: join(home, "npm-cache") };
     for (const server of [["npx", "-y", notesPackage()], ["cmd", "/c", "npx", "-y", notesPackage()]]) {
-      const session = await connect({ home, runArgs: ["--no-sandbox", "--id", "notes"], server, env: { FAKE_VARIANT: "v1" } });
+      const session = await connect({ home, runArgs: ["--no-sandbox", "--id", "notes"], server, env });
       try {
         expect((await session.client.listTools()).tools.map((tool) => tool.name)).toEqual(["add_note", "list_notes"]);
       } finally {
