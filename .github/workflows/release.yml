@@ -27,13 +27,20 @@ jobs:
       - run: npm sbom --sbom-format cyclonedx --omit dev > mcpcage.cdx.json
       - run: npm pack
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: provenance
         with:
           subject-path: mcpcage-*.tgz
       - name: Publish to npm with provenance
         run: npm publish --provenance --access public mcpcage-*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: GitHub release with the package and its SBOM
-        run: gh release create "$GITHUB_REF_NAME" mcpcage-*.tgz mcpcage.cdx.json --generate-notes
+      # GitHub keeps the provenance among the repository's attestations. Attached to the release as
+      # <package>.sigstore.json it also travels with the package for `gh attestation verify --bundle`,
+      # and it is where Scorecard's Signed-Releases check looks for a signature.
+      - name: GitHub release with the package, its SBOM and its signed provenance
+        run: |
+          for package in mcpcage-*.tgz; do cp "$PROVENANCE" "$package.sigstore.json"; done
+          gh release create "$GITHUB_REF_NAME" mcpcage-*.tgz mcpcage-*.tgz.sigstore.json mcpcage.cdx.json --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
+          PROVENANCE: ${{ steps.provenance.outputs.bundle-path }}
