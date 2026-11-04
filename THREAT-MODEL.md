@@ -15,11 +15,11 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 | Adversary | Example | What mcpcage does |
 |---|---|---|
 | A malicious package from the start | a lookalike of a popular server | It runs in a container with no network, no home directory, a read-only filesystem, no capabilities and a nonroot user. Install scripts never run. |
-| A trusted package that turns malicious in an update (rug pull) | postmark-mcp after fifteen clean releases | The lockfile keeps the approved version until `--rebuild`. When the update arrives, changed tool definitions block the session until a human approves them. |
+| A trusted package that turns malicious in an update (rug pull) | postmark-mcp after fifteen clean releases | The lockfile keeps the approved version until `--rebuild`, or until the package or its version range in the configuration changes. When the update arrives, changed tool definitions block the session until a human approves them. |
 | Tool poisoning through descriptions | hidden instructions in a tool description | Every description and schema is fingerprinted; a change is shown by `mcpcage diff` and blocked until approved. Fixed rules point at the signs of hidden instructions (privileged tags, "ignore previous instructions", "do not tell the user", secret files, invisible characters, orders about other tools) so the reviewer does not have to find them alone. The first listing is trusted unless `--strict` is used: its first page and the pages the client asks for with the cursor each page returned. Every later page is compared with the pin, and no page, of the first listing or after it, can replace a definition approved before it. |
 | Instructions hidden in invisible characters | zero-width text, Unicode Tags, bidi controls, variation selectors in a description | The same rules report them as high-severity signs, decode Unicode Tags to the text they spell, and show every invisible character as `[U+XXXX]`, so what the reviewer reads is what the model reads. |
 | Instructions hidden in a tool result | a note, a web page or an issue comment returned by a tool that tells the model to read `~/.ssh/id_rsa` and pass it to the next call | The rules that make sense on free text read every result: the signs are recorded in the audit log and the high-severity ones printed on stderr, so the user can see them in the client's log. The result passes unchanged, because blocking or editing data would break legitimate content: the model may still follow the instructions, and the cage limits what it can reach through that server. |
-| A server that pollutes stdout | logs, binary output or JSON that is not JSON-RPC on the channel | Anything that is not JSON-RPC is dropped and recorded. |
+| A server that pollutes stdout | logs, binary output or JSON that is not JSON-RPC on the channel | Anything that is not JSON-RPC by its shape is dropped and recorded. |
 | A server that tries to exhaust the proxy's memory | one line of gigabytes without a newline; requests whose answers it never reads; notifications faster than the client reads them | A line over 16 MiB is counted and thrown away as it streams in, never held whole, and recorded with its size; the proxy goes on serving. mcpcage stops answering refused requests while 16 MiB wait unread in the server's input, and stops reading the server while the client is behind. |
 | A server whose definitions or messages are built to crash or stall mcpcage | a schema nested 10,000 levels deep; one line listing 200,000 tools; an enum of millions of one-letter values; a description of 16 MiB of invisible characters; a result or an id nested 10,000 levels deep | A page of more than 10,000 tools, or with a definition nested more than 256 levels deep, is refused whole before anything walks it: the client gets an error, nothing is pinned or saved, and the session is locked; `diff` and `approve` refuse a pending definition nested that deep too. The limit of 10,000 tools holds for a whole listing and for what is pinned or pending for a server too, where pages and listings add up: a page that would take them past it is refused the same way. Nothing else a server sends nested more than 256 levels deep is serialized again or walked: a result passes unmeasured with a `scan-budget` sign, an unasked answer or a batch message like that is dropped, and a pin or pending entry like that is left out, so its tool needs a fresh approval. The rules read a long text a window at a time and stop after 20,000 strings or 32 Mi characters of one definition or result, with a `scan-budget` sign in place of the rest (high in a definition, medium in a result). |
 | A server that answers what nobody asked | a forged response to a request the client never sent, or a second response to one already answered | A response whose id the client is not waiting for is dropped and recorded. |
@@ -27,7 +27,7 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 | A server that asks to call tools outside its manifest | a call routed to a tool the user never saw | Calls to tools that are not approved never reach the server. |
 | A server written into a client configuration without the user's knowledge | SANDWORM_MODE adding entries to Claude Code, Cursor and Windsurf configs | `mcpcage protect` reads every configuration file the clients document and lists each server with how it starts, what it can reach and whether it is caged; `--fix` cages the npx ones. |
 | A server entry whose `env` configures mcpcage instead of the server | `NODE_OPTIONS=--import ./x.mjs`, `LD_PRELOAD`, a `DOCKER_HOST` on another machine, `HOME` pointed at an empty directory, `MCPCAGE_HOME` pointed at an empty store | A client starts the entry's command with its `env`, and after `wrap` that command is mcpcage, on the host. `wrap` and `protect --fix` move `NODE_*`, `LD_*`, `DYLD_*`, `DOCKER_*` (except a `unix://` or `npipe://` `DOCKER_HOST`) and `npm_config_*` into the cage as `--env NAME=value`, and drop `HOME`, `USERPROFILE` and `MCPCAGE_HOME`. `protect` names each such variable and counts a caged entry that still has one as running on the host. The home directory whose places are never mounted is the account's own, from the system's user database, as well as the one `HOME` names, and a relative `MCPCAGE_HOME` is made absolute, so it is never mounted either. |
-| Someone editing the audit trail after the fact | removing the record of a call | The hash chain makes edits, reordering and deletions inside a file detectable. |
+| Someone editing the audit trail after the fact | removing the record of a call | The hash chain makes edits, reordering and deletions inside a file detectable, except deletions at its end. |
 
 ## Trust boundaries
 
@@ -69,6 +69,12 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   project is open. The server can still change every other file there, code you later run
   included, and create such settings where none existed (a new nested repository, a project MCP
   configuration): a server that only needs to read should get a read-only mount.
+- **Two cages writing in one directory.** The git and editor settings of a writable mount are
+  found at start, then mounted read-only by Docker. Two cages of servers with write access to the
+  same directory, running at once, give one of them a moment to swap a setting for a symlink before
+  the other's mounts are made: that other cage then gets, read-only, the place the link names.
+- **Hard links.** The checks read paths. A hard link to a credential file, made elsewhere on the
+  disk before anything was caged, is another path to the same file, and does not count as the file.
 - **Sensitive paths during `protect --inspect`.** Inspection never mounts them, and mounts every
   other path argument read-only; the report names the paths a server was inspected without.
 - **Misuse of granted capabilities.** A filesystem server with a writable mount can still
@@ -88,13 +94,20 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   replace an approved definition. If the package was malicious from the start, the cage is the
   protection, not the pin. `--strict` requires an explicit review instead,
   and `protect --inspect` shows the signs in a server's tools before you approve anything.
-- **Deleting the audit log.** The chain proves that a file was not altered, not that it still
-  exists. Shipping entries to an external store is not implemented yet.
+- **Deleting the audit log.** The chain shows that the entries a file holds were written in that
+  order and not changed since. It cannot show that entries were cut from the end of a file, nor
+  that a whole file was deleted or replaced by another valid one, and whoever can write the file can
+  write a new chain, because the hashes are not keyed. A cage never gets mcpcage's own directory,
+  so this takes access to the machine itself. Shipping entries to an external store is not
+  implemented yet.
 - **The rate of log entries.** Every line dropped, request refused and unsolicited response writes
   one audit entry and one line on stderr, with ids recorded as the server sent them, up to 16 MiB
   each. A server can grow the audit log, and the client's log while the client reads it, as fast as
   it writes; there is no rate limit. When the client does not read, at most 1 MiB of lines waits in
   mcpcage's memory: the next ones are dropped and counted, and one line gives the count once it reads.
+- **What a client's parser refuses.** mcpcage passes on what is JSON-RPC by its shape. A client's
+  own parser can be stricter (the official SDK refuses a message with both a method and a result,
+  or a fractional id): such a message only leaves the client's request without an answer.
 - **Ids of another type.** An answer must carry the id of its request with the same type, as
   JSON-RPC requires. A server that answers the request with id `5` using the id `"5"` has its answer
   dropped as unsolicited, and the request goes unanswered.
