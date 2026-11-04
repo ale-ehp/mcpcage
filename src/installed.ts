@@ -272,9 +272,15 @@ function onPath(command: string, path: string | typeof UNKNOWN, strict: boolean)
   return undefined;
 }
 
+/**
+ * The file, symlinks followed, as the system spells it on disk. On Windows a bare name is found with
+ * an extension of PATHEXT, which Windows writes in capitals, and a PATH may hold 8.3 short names
+ * (C:\PROGRA~1): realpathSync kept those spellings, and the mcpcage.cmd that `where` names, which is
+ * the command --fix writes, was another file than the mcpcage.CMD a bare `mcpcage` found.
+ */
 function realFile(file: string): string | undefined {
   try {
-    return realpathSync(file);
+    return realpathSync.native(file);
   } catch {
     return undefined;
   }

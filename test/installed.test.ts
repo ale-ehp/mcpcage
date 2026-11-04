@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, symlinkSync, truncateSync, writeFileSync } from
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { envFileOf, foreignPath, MAX_ENV_FILE_BYTES, parseEnvFile } from "../src/installed.js";
+import { envFileOf, foreignPath, MAX_ENV_FILE_BYTES, mcpcageAt, parseEnvFile } from "../src/installed.js";
+import { idleProgram } from "./fake-programs.js";
 
 // What an entry's own env decides on the host for the mcpcage it starts. The report's lines and
 // --fix's plan for them are in protect.test.ts.
@@ -24,6 +25,24 @@ describe("the PATH an entry sets", () => {
       expect(foreignPath({ PATH: join(top, "other") })).toEqual({ dirs: [join(top, "other")] });
       expect(foreignPath({ PATH: ["x"] })).toEqual({ dirs: [], notString: true });
       expect([foreignPath({}), foreignPath(undefined), foreignPath({ Path: join(top, "other") })]).toEqual([undefined, undefined, process.platform === "win32" ? { dirs: [join(top, "other")] } : undefined]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("the mcpcage an entry starts", () => {
+  it("is the command --fix writes when a bare mcpcage finds that file, however its name is spelled there", () => {
+    // On Windows a bare name is found with an extension of PATHEXT, which Windows spells in capitals,
+    // while `where`, from which --fix takes its command, spells the file as it is on disk: mcpcage.cmd.
+    const bin = join(mkdtempSync(join(tmpdir(), "mcpcage-which-")), "bin");
+    const command = idleProgram(bin, "mcpcage");
+    vi.stubEnv("PATH", bin);
+    vi.stubEnv("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+    try {
+      expect(mcpcageAt({ command: "mcpcage" }, command)).toBe("installed");
+      expect(mcpcageAt({ command: "mcpcage", env: { PATH: bin } }, command)).toBe("installed");
+      expect(mcpcageAt({ command }, "mcpcage")).toBe("installed");
     } finally {
       vi.unstubAllEnvs();
     }
