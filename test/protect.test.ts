@@ -924,6 +924,75 @@ describe("inspection of a definition nested too deep", () => {
   });
 });
 
+describe("errors that repeat a value", () => {
+  // Lines shorter than eight characters: once they are joined by spaces, no run of the value is left to find.
+  const codes = "a1b2c\nd3e4f\ng5h6i\nj7k8l";
+
+  it("hides a value with line breaks that the server prints on stderr, before putting the message on one line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-inspection-"));
+    const file = join(dir, "mcp.json");
+    const key = "-----BEGIN PRIVATE KEY-----\nSYNTHETIC0123456789abcdef\n-----END PRIVATE KEY-----";
+    writeJsonFile(file, {
+      mcpServers: {
+        pem: { command: "npx", args: ["-y", "pem-mcp"], env: { PRIVATE_KEY: key } },
+        codes: { command: "npx", args: ["-y", "codes-mcp"], env: { RECOVERY_CODES: codes } },
+      },
+    });
+    // The real reader, on a server that prints the value it was given and exits.
+    const inspect = async (launch: { argv: string[]; env: Record<string, string>; redact: (text: string, from?: number) => string }) => {
+      const name = launch.argv.includes("pem-mcp") ? "PRIVATE_KEY" : "RECOVERY_CODES";
+      return listTools(process.execPath, ["-e", `process.stderr.write(process.env.${name}); process.exit(1)`], { ...process.env, ...launch.env }, 15_000, launch.redact);
+    };
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, inspect });
+    const text = renderReport(report, { home: dir });
+    expect(text.match(/could not inspect: .*/g)).toEqual([
+      "could not inspect: the server stopped before listing its tools (exit code 1): ***",
+      "could not inspect: the server stopped before listing its tools (exit code 1): ***",
+    ]);
+    for (const part of ["SYNTHETIC", "a1b2c", "d3e4f", "g5h6i", "j7k8l"]) expect(text).not.toContain(part);
+  });
+
+  it("hides a value in an entry's error before putting the message on one line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-malformed-"));
+    const file = join(dir, "mcp.json");
+    writeJsonFile(file, { mcpServers: { crashing: { command: "npx", args: ["-y", "crashing-mcp"], env: { RECOVERY_CODES: codes } } } });
+    const npmRunner = () => {
+      throw new Error(`npm crashed reading ${codes}`);
+    };
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: false, cacheDir: join(dir, "cache"), npmRunner });
+    expect(report.servers[0]!.error).toBe("npm crashed reading ***");
+  });
+
+  it("hides a value before cutting the end of stderr or an error message, so that no piece of it is left", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-inspection-"));
+    const file = join(dir, "mcp.json");
+    // Seven characters: hidden whole only. The last 500 characters of stderr start in its middle.
+    const password = "s3cr3t!";
+    // Hidden by its runs too, but the first 300 characters of the error keep only six of its characters.
+    const token = "ghp_R8x2kLmN4pQ7vW9zA1bC3dE5fG7hJ9kL2mN4";
+    writeJsonFile(file, {
+      mcpServers: {
+        tail: { command: "npx", args: ["-y", "tail-mcp"], env: { DB_PASSWORD: password } },
+        head: { command: "npx", args: ["-y", "head-mcp"], env: { GITHUB_TOKEN: token } },
+      },
+    });
+    const servers: Record<string, string> = {
+      "tail-mcp": `process.stderr.write("x".repeat(600) + process.env.DB_PASSWORD + "y".repeat(496)); process.exit(1)`,
+      "head-mcp": `process.stdin.once("data", () => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -1, message: "x".repeat(294) + process.env.GITHUB_TOKEN } }) + "\\n")); setInterval(() => {}, 1000)`,
+    };
+    const inspect = async (launch: { argv: string[]; env: Record<string, string>; redact: (text: string, from?: number) => string }) =>
+      listTools(process.execPath, ["-e", servers[launch.argv[2]!]!], { ...process.env, ...launch.env }, 15_000, launch.redact);
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, inspect });
+    expect(report.servers.map((server) => server.inspection?.error)).toEqual([
+      `the server stopped before listing its tools (exit code 1): ***${"y".repeat(496)}`,
+      `the server answered initialize with an error: ${"x".repeat(294)}***`,
+    ]);
+  });
+});
+
 describe("inspection sandbox", () => {
   it("mounts the server's existing paths read-only, as absolute paths, with the network closed", () => {
     const home = mkdtempSync(join(tmpdir(), "mcpcage-home-"));

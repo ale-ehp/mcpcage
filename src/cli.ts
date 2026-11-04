@@ -319,7 +319,7 @@ async function protect(argv: string[]): Promise<number> {
 /** `--inspect`: the server starts in its cage (no network, its paths read-only) only to list its tools. */
 const inspectInCage: Inspector = async (launch) => {
   const prepared = prepareSandbox({ ...inspectionSandbox(launch), log: (message) => console.error(message) });
-  return listTools(prepared.command, prepared.args, process.env, 30_000);
+  return listTools(prepared.command, prepared.args, process.env, 30_000, launch.redact);
 };
 
 /** Desktop apps start servers with a minimal PATH, so configurations get mcpcage's full path when it is found. */

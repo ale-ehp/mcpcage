@@ -9,6 +9,7 @@ import {
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
 import { parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
+import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
 import type { SandboxOptions } from "./sandbox.js";
@@ -78,8 +79,12 @@ export interface ProtectReport {
   servers: ServerReport[];
 }
 
-/** Starts one npx server in the cage and lists its tools: `argv` is its npx command line, `env` its environment. */
-export type Inspector = (launch: { argv: string[]; env: Record<string, string> }) => Promise<ToolDefinition[]>;
+/**
+ * Starts one npx server in the cage and lists its tools: `argv` is its npx command line, `env` its
+ * environment, and `redact` hides the values it was given in what an error quotes of it, before the
+ * error cuts it (listTools).
+ */
+export type Inspector = (launch: { argv: string[]; env: Record<string, string>; redact: Redact }) => Promise<ToolDefinition[]>;
 
 export interface ScanOptions {
   locations: ConfigLocation[];
@@ -185,7 +190,8 @@ async function describeServer(
     if (options.inspect && launch) server.inspection = await inspectServer(options.inspect, launch, entry, shown.hidden);
   } catch (error) {
     // The values of the entry's env and headers stay out of the report, whatever the error says.
-    server.error = redactor([...Object.values(stringValues(entry.env)), ...Object.values(stringValues(entry.headers))])(oneLine(messageOf(error)));
+    // Hidden before the message is put on one line: a value with line breaks would no longer be the same.
+    server.error = oneLine(redactor([...Object.values(stringValues(entry.env)), ...Object.values(stringValues(entry.headers))])(messageOf(error)));
   }
   return server;
 }
@@ -202,7 +208,7 @@ async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEn
   const values = [...Object.values(env), ...hidden];
   const redact = redactor(values);
   try {
-    const tools = await inspect({ argv, env });
+    const tools = await inspect({ argv, env, redact });
     // The proxy refuses such a listing whole, so the report does not read it either.
     const deep = tooDeep(tools);
     if (deep) throw new Error(`the definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep, which mcpcage refuses`);
@@ -215,7 +221,9 @@ async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEn
     const findings = findingsIn(shown).map((finding) => ({ ...finding, snippet: redact(finding.snippet) }));
     return { tools: tools.length, findings, ...left };
   } catch (error) {
-    return { tools: 0, findings: [], error: redact(oneLine((error as Error).message)), ...left };
+    // Hidden before the message is put on one line: a private key printed on stderr, its line breaks
+    // made spaces, was no longer the value, and was printed.
+    return { tools: 0, findings: [], error: oneLine(redact((error as Error).message)), ...left };
   }
 }
 
@@ -1069,9 +1077,9 @@ const HASH_BITS = 20;
  * looked for in the text without the characters that show nothing, and those a sign is made of
  * (U+200B is one) are put back after the mask, so that hiding a value never hides a sign from the
  * scan. Linear in the text: a rolling hash finds the places where a run may start, and only those
- * are compared.
+ * are compared. With `from`, only the text from there on is returned (see Redact in inspect.ts).
  */
-function redactor(values: string[]): (text: string) => string {
+function redactor(values: string[]): Redact {
   const whole = new Set<string>();
   const runs = new Set<string>();
   let budget = MAX_RUN_CHARS;
@@ -1099,8 +1107,8 @@ function redactor(values: string[]): (text: string) => string {
   // Not Math.min(...whole): an entry with a few hundred thousand variables would overflow the stack.
   let shortest = runs.size > 0 ? RUN : Infinity;
   for (const value of whole) shortest = Math.min(shortest, value.length);
-  return (text) => {
-    if (text.length < shortest) return text;
+  return (text, from = 0) => {
+    if (text.length < shortest) return text.slice(from);
     // The text as it reads, and where each of its pieces starts there and in `text`.
     const pieces: Array<[number, number]> = [[0, 0]];
     let seen = text;
@@ -1132,7 +1140,7 @@ function redactor(values: string[]): (text: string) => string {
         if (hashes.has(hash) && runs.has(seen.slice(at + 1 - RUN, at + 1))) hide(at + 1 - RUN, at + 1);
       }
     }
-    if (reach === undefined) return text;
+    if (reach === undefined) return text.slice(from);
     const marks = reach;
     // Each stretch, with those it overlaps, replaced in `text` by the mask and the sign characters in it.
     let piece = 0;
@@ -1141,7 +1149,7 @@ function redactor(values: string[]): (text: string) => string {
       return pieces[piece]![1] + at - pieces[piece]![0];
     };
     let shown = "";
-    let done = 0;
+    let done = from;
     for (let at = 0; at < seen.length; ) {
       let end = marks[at]!;
       if (end === 0) {
@@ -1154,9 +1162,11 @@ function redactor(values: string[]): (text: string) => string {
       // The two halves of a surrogate pair are one character: hidden together.
       if (start > done && isLowSurrogate(text, start) && isHighSurrogate(text, start - 1)) start--;
       if (isLowSurrogate(text, stop) && isHighSurrogate(text, stop - 1)) stop++;
-      shown += `${text.slice(done, start)}${MASK}${text.slice(start, stop).match(SIGN_CHARS)?.join("") ?? ""}`;
-      done = stop;
       at = end;
+      // Before `from`, nothing is shown; a stretch across it is shown as the mask.
+      if (stop <= from) continue;
+      shown += `${text.slice(done, Math.max(start, done))}${MASK}${text.slice(Math.max(start, from), stop).match(SIGN_CHARS)?.join("") ?? ""}`;
+      done = stop;
     }
     return shown + text.slice(done);
   };

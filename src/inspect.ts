@@ -8,15 +8,31 @@ import { isToolList, MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, type ToolDefinition
 
 const PROTOCOL_VERSION = "2025-06-18";
 const VERSION = packageVersion();
+/** How much of the end of the server's stderr an error shows, and how much of it is kept to show it. */
+const STDERR_SHOWN = 500;
+const STDERR_KEPT = 64 * 1024;
+
+/**
+ * Hides the values a server was given in a text it wrote (see redactor in protect.ts). With `from`,
+ * only the text from there on is returned: a value that starts before it is still found whole, and
+ * what is left of it after `from` hidden.
+ */
+export type Redact = (text: string, from?: number) => string;
 
 /**
  * A minimal MCP client over stdio: initialize, then every page of tools/list. It reads the tools a
  * server offers without approving or pinning anything, for `mcpcage protect --inspect`, and reads
  * the server with the proxy's limits: a line over MAX_LINE_BYTES is dropped as it streams in, and
  * a listing of more than MAX_TOOLS tools is refused, as is one whose pages together take more than
- * MAX_LINE_BYTES.
+ * MAX_LINE_BYTES. What its errors quote of the server goes through `redact` before it is cut.
  */
-export function listTools(command: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<ToolDefinition[]> {
+export function listTools(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+  redact: Redact = (text, from = 0) => text.slice(from),
+): Promise<ToolDefinition[]> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], env });
     const tools: ToolDefinition[] = [];
@@ -41,8 +57,10 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
           : dropped === 1
             ? `; dropped a line of ${longest} bytes from the server, ${limit}`
             : `; dropped ${dropped} lines from the server ${limit}, the longest of ${longest} bytes`;
-      const text = stderr.trim();
-      return `${note}${text ? `: ${text.slice(-500)}` : ""}`;
+      // Hidden before it is cut: cut first, a value the cut splits leaves a piece that is not the value.
+      const text = stderr.trimEnd();
+      const end = redact(text, Math.max(0, text.length - STDERR_SHOWN)).trimStart();
+      return `${note}${end ? `: ${end}` : ""}`;
     };
     const finish = (error?: Error) => {
       if (done) return;
@@ -79,8 +97,12 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
     const timer = setTimeout(() => finish(new Error(`the server did not answer within ${timeoutMs / 1000} s${tail()}`)), timeoutMs);
 
     child.stderr.setEncoding("utf8");
+    // More than is shown is kept, so that a value that starts before the part shown is whole where
+    // `redact` looks for it. Cut at twice the size only, so that a server writing a byte at a time
+    // does not make mcpcage copy the whole of it for each.
     child.stderr.on("data", (chunk: string) => {
-      stderr = (stderr + chunk).slice(-2000);
+      stderr += chunk;
+      if (stderr.length > 2 * STDERR_KEPT) stderr = stderr.slice(-STDERR_KEPT);
     });
     child.stdin.on("error", () => undefined); // the server may exit before reading what was sent
     child.on("error", (error) => finish(new Error(`could not start ${command}: ${error.message}`)));
@@ -118,7 +140,7 @@ export function listTools(command: string, args: string[], env: NodeJS.ProcessEn
             : nestedDeeperThan(message.error, MAX_DEPTH)
               ? "an error nested too deep to show"
               : JSON.stringify(message.error);
-        finish(new Error(`the server answered ${method} with an error: ${reason.slice(0, 300)}`));
+        finish(new Error(`the server answered ${method} with an error: ${redact(reason).slice(0, 300)}`));
         return;
       }
       if (method === "initialize") {
