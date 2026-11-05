@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join, posix, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
 import {

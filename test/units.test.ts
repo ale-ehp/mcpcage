@@ -305,7 +305,7 @@ describe("sandbox command", () => {
     const server = ["/Users/me/proj", "/Users/me/proj/src/../new.txt", "/USERS/ME/PROJ", "~/proj", "--root=/Users/me/proj", "C:\\Users\\me\\proj"];
     for (const platform of ["darwin", "linux"] as const) {
       const args = runArgs({ ...base, spec: { ...base.spec, args: server }, mounts }, "img", platform);
-      expect(args.filter((arg, index) => args[index - 1] === "--mount")).toEqual([
+      expect(args.filter((_, index) => args[index - 1] === "--mount")).toEqual([
         "type=bind,source=/Users/me/proj,target=/Users/me/proj",
         "type=bind,source=/Users/me/proj/.git,target=/Users/me/proj/.git,readonly",
         "type=bind,source=/Users/me/My Notes,target=/Users/me/My Notes,readonly",
@@ -322,7 +322,7 @@ describe("sandbox command", () => {
       { source: "D:\\My Notes", target: "D:\\My Notes", readOnly: true },
     ];
     const args = runArgs({ ...base, mounts }, "img", "win32");
-    expect(args.filter((arg, index) => args[index - 1] === "--mount")).toEqual([
+    expect(args.filter((_, index) => args[index - 1] === "--mount")).toEqual([
       "type=bind,source=C:\\Users\\me\\proj,target=/c/Users/me/proj",
       "type=bind,source=C:\\Users\\me\\proj\\.git,target=/c/Users/me/proj/.git,readonly",
       "type=bind,source=D:\\My Notes,target=/d/My Notes,readonly",
