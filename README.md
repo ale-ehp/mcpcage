@@ -198,6 +198,22 @@ client place or an `envFile` that only you can change, or a `PATH` that makes th
 another program than the mcpcage they write, is left as it is, with the reason and what to do,
 instead of being written and called caged.
 
+The docker and the npm that mcpcage runs on your machine get an environment made of names, not a
+copy of mcpcage's: docker hands its environment to the programs it starts, its credential helpers
+(often scripts), its plugins, the `ssh` of an `ssh://` `DOCKER_HOST` and podman behind a `docker`
+shim, and these read variables that choose what code they run, more than any list can name
+(`CLOUDSDK_PYTHON` for gcloud's helper, `PYTHONPATH`, an `AWS_CONFIG_FILE` with a
+`credential_process`, `SSH_ASKPASS`, `BUILDX_CONFIG`, `CONTAINERS_CONF`...). They get the `PATH` of
+their install places, the variables above that would act on your machine, which are yours, since an
+entry that sets one is not counted as caged (`DOCKER_HOST`, `DOCKER_CONFIG`, `HOME`, `npm_config_*`,
+`NODE_EXTRA_CA_CERTS`...), and `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`,
+`TMPDIR`, `SSH_AUTH_SOCK` and the proxy variables, whose values name no program. Only `docker run`
+also gets the variables named with `--env NAME`, because docker reads their values from its own
+environment; it starts the image by its ID and pulls nothing (`--pull never`), so no credential
+helper runs then. A credential helper that needs a variable left out does not get it, such as the
+secretservice helper of Linux desktops, which finds the session bus through
+`DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`.
+
 **Writable mounts are your choice.** A server that can write in a directory can change what your
 machine later runs from it: the code you run and build, and the files that git, editors and build
 tools read as settings and run commands from, such as git hooks wherever `core.hooksPath` points,
@@ -246,8 +262,9 @@ to its `mcpcage.cmd` in `node_modules\mcpcage\dist` (after `npm link`, the clone
 `ProgramData` and `ProgramFiles`, and with `ProgramData` not set, as the MCP SDK's clients leave it,
 in `Docker\cli-plugins` of the client's current directory, the project's. So mcpcage runs docker,
 and npm, with Windows' places taken from Windows, never from its own environment, which is the
-client's and the entry's: Windows' own directory, the account's home directory, the program folders
-from the registry, `APPDATA` and `LOCALAPPDATA` from your shell folders; and with
+client's and the entry's (of the rest of it they get only what is said above, names compared
+without case): Windows' own directory, the account's home directory, the program folders from the
+registry, `APPDATA` and `LOCALAPPDATA` from your shell folders; and with
 `NoDefaultCurrentDirectoryInExePath` set, so that what they start by name never comes from the
 current directory.
 

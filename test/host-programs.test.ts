@@ -26,7 +26,7 @@ const cwd = process.cwd();
 afterEach(() => {
   if (path === undefined) delete process.env.PATH;
   else process.env.PATH = path;
-  delete process.env.MCPCAGE_TEST_KEPT;
+  delete process.env.MCPCAGE_TEST_OTHER;
   process.chdir(cwd);
 });
 
@@ -34,13 +34,13 @@ describe("docker and npm on the host, whatever an entry's PATH puts first", () =
   it.skipIf(standardDocker === undefined)("finds docker in the standard places before the PATH, and runs it with a PATH of those places", () => {
     const fake = fakePrograms();
     process.env.PATH = fake.path;
-    process.env.MCPCAGE_TEST_KEPT = "kept";
+    process.env.MCPCAGE_TEST_OTHER = "other";
     const docker = dockerProgram()!;
     expect(docker.file).toBe(standardDocker);
     expect(docker.args).toEqual([]);
     expect(docker.env.PATH?.split(delimiter)).toEqual([...new Set([dirname(standardDocker!), ...STANDARD_PLACES])]);
-    // The rest of the environment is mcpcage's: DOCKER_HOST and the like are the user's own here.
-    expect(docker.env.MCPCAGE_TEST_KEPT).toBe("kept");
+    // The rest of mcpcage's environment only by name (see host-env.test.ts).
+    expect(docker.env.MCPCAGE_TEST_OTHER).toBeUndefined();
   });
 
   it.skipIf(standardDocker === undefined)("doctor does not start the docker or the credential helper that come first on the PATH", () => {
@@ -226,7 +226,7 @@ describe("on Windows, the places docker and npm are given", () => {
       vi.stubEnv("Path", chosen);
       vi.stubEnv("programfiles", chosen);
     }
-    vi.stubEnv("MCPCAGE_TEST_KEPT", "kept");
+    vi.stubEnv("MCPCAGE_TEST_OTHER", "other");
     try {
       for (const program of [onWindows(() => dockerProgram())!, onWindows(() => npmProgram(), join(npm, "node.exe"))!]) {
         const env = program.env;
@@ -243,8 +243,8 @@ describe("on Windows, the places docker and npm are given", () => {
         }
         expect(env.NoDefaultCurrentDirectoryInExePath).toBe("1");
         expect(env.PATHEXT).toBe(".COM;.EXE;.BAT;.CMD");
-        // The rest of the environment is mcpcage's.
-        expect(env.MCPCAGE_TEST_KEPT).toBe("kept");
+        // The rest of mcpcage's environment only by name (see host-env.test.ts).
+        expect(env.MCPCAGE_TEST_OTHER).toBeUndefined();
       }
     } finally {
       vi.unstubAllEnvs();

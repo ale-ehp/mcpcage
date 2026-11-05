@@ -5,6 +5,7 @@ import { homedir, userInfo } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256 } from "./canonical.js";
+import { hostEnvName } from "./config.js";
 import type { LaunchSpec } from "./launch.js";
 import { cageHome, serverDir } from "./paths.js";
 import { readJson, writeJson } from "./pinstore.js";
@@ -60,7 +61,7 @@ export interface Prepared {
   /** docker, where dockerProgram found it. */
   command: string;
   args: string[];
-  /** The environment to run it with (see dockerProgram). */
+  /** The environment to run it with: dockerProgram's, and the variables the server is given by name (see prepareSandbox). */
   env: NodeJS.ProcessEnv;
   record: ServerRecord;
 }
@@ -85,7 +86,11 @@ export function prepareSandbox(options: SandboxOptions): Prepared {
   writeJson(join(serverDir(options.serverId), "server.json"), record);
   // The paths come from the user's arguments or the entry's.
   for (const line of placesInCage(options.mounts)) options.log(terminalSafe(`mcpcage: ${line}`));
-  const program = foundDocker();
+  // docker takes the value of each `--env NAME` from its own environment (see runArgs), so `docker
+  // run`, and only it, is given those variables too. It starts a local image by its ID and pulls
+  // nothing (--pull never), so no credential helper runs with them; the docker commands that build
+  // or pull never have them (see trustedEnv).
+  const program = foundDocker(options.env.filter((variable) => !variable.includes("=")));
   return { command: program.file, args: runArgs(options, record.imageId), env: program.env, record };
 }
 
@@ -96,6 +101,10 @@ export function runArgs(
 ): string[] {
   const args = [
     "run", "--rm", "-i", "--init",
+    // The image is the one mcpcage built or pulled, by its ID. Nothing is pulled at run time, when
+    // docker has the server's variables in its environment, which a credential helper asked for a pull
+    // would get too.
+    "--pull", "never",
     "--name", `mcpcage-${options.serverId}-${randomBytes(3).toString("hex")}`,
     "--label", `mcpcage.server=${options.serverId}`,
     "--network", options.allowNet ? "bridge" : "none",
@@ -115,9 +124,10 @@ export function runArgs(
   ];
   if (!options.keepImageUser) args.push("--user", NONROOT);
   for (const variable of options.env) {
-    // docker takes the value of `-e NAME` from its own environment, whose PATH, and on Windows whose
-    // places, are not mcpcage's (see trustedEnv): the server is given mcpcage's value, as it is any
-    // other variable of mcpcage's, or keeps the image's own when mcpcage has none.
+    // docker takes the value of `-e NAME` from its own environment, which holds mcpcage's value of
+    // each variable named so (see prepareSandbox), except the PATH, and on Windows Windows' places,
+    // which are not mcpcage's (see trustedEnv): the server is given mcpcage's value of those here, as
+    // it is of the others there, or keeps the image's own when mcpcage has none.
     if (process.platform === "win32" ? [...WINDOWS_ENV, "PATH"].some((name) => name.toUpperCase() === variable.toUpperCase()) : variable === "PATH") {
       const value = /^path$/i.test(variable) ? process.env.PATH : process.env[variable];
       if (value !== undefined) args.push("-e", `${variable}=${value}`);
@@ -813,10 +823,9 @@ export interface HostProgram {
  * Linux distributions, OrbStack, Rancher Desktop and Nix install it, in this order, and in the PATH
  * only when none has it; npm likewise, next to the node running mcpcage first. Each runs with a PATH
  * of these places and the directory it was found in, so what it starts comes from there too. The
- * rest of the environment stays: DOCKER_HOST, DOCKER_CONFIG and npm_config_* are the user's own
- * here, because `wrap` moves an entry's into the cage (HOST_ENV in config.ts). The places are POSIX
- * ones: on Windows docker.exe comes from the PATH, and runs with only its own directory as its PATH,
- * and with Windows' places from Windows (see windowsEnv).
+ * rest of its environment is not mcpcage's either: only the variables trustedEnv names. The places
+ * are POSIX ones: on Windows docker.exe comes from the PATH, and runs with only its own directory as
+ * its PATH, and with Windows' places from Windows (see windowsEnv).
  */
 function trustedPlaces(): string[] {
   if (process.platform === "win32") return [];
@@ -843,19 +852,22 @@ function trustedPlaces(): string[] {
   ];
 }
 
-/** The docker mcpcage runs, and the environment it runs every docker command with (see trustedPlaces). */
-export function dockerProgram(): HostProgram | undefined {
+/**
+ * The docker mcpcage runs, and the environment it runs every docker command with (see trustedPlaces
+ * and trustedEnv); `byName`, for `docker run` alone, the variables it gives the server by name.
+ */
+export function dockerProgram(byName: readonly string[] = []): HostProgram | undefined {
   const name = process.platform === "win32" ? "docker.exe" : "docker";
   const file = findProgram(name, trustedPlaces()) ?? findProgram(name, searchPath());
-  return file === undefined ? foundNowhere(name) : { file, args: [], env: trustedEnv([dirname(file)]) };
+  return file === undefined ? foundNowhere(name, byName) : { file, args: [], env: trustedEnv([dirname(file)], byName) };
 }
 
 /** What dockerAvailable says on Windows when dockerProgram finds no docker.exe. */
 const DOCKER_NOT_FOUND = "docker.exe not found in the PATH";
 
 /** dockerProgram, after dockerAvailable has found it: gone since, Docker is as missing as it would have been then. */
-function foundDocker(): HostProgram {
-  const program = dockerProgram();
+function foundDocker(byName: readonly string[] = []): HostProgram {
+  const program = dockerProgram(byName);
   if (program === undefined) throw new Error(DOCKER_NOT_FOUND);
   return program;
 }
@@ -895,26 +907,92 @@ export function npxProgram(): { file: string; args: string[] } | undefined {
  * cloned repository keeps at its root ran on the host. There the program counts as not installed,
  * and nothing is started.
  */
-function foundNowhere(name: string): HostProgram | undefined {
-  return process.platform === "win32" ? undefined : { file: name, args: [], env: trustedEnv([]) };
+function foundNowhere(name: string, byName: readonly string[] = []): HostProgram | undefined {
+  return process.platform === "win32" ? undefined : { file: name, args: [], env: trustedEnv([], byName) };
 }
 
-/**
- * mcpcage's environment, with a PATH of `first` and the trusted places only, and on Windows with
- * Windows' places as Windows has them (see windowsEnv), in place of those mcpcage was given.
+/*
+ * What else of mcpcage's environment docker and npm are given, besides the variables HOST_ENV names
+ * (see trustedEnv): a few that they, or what they start, read for ordinary work, and whose values
+ * name no program, no library and no file of settings that could name one.
  */
-function trustedEnv(first: string[]): NodeJS.ProcessEnv {
-  const env = { ...process.env };
+const BASICS: readonly string[] = [
+  // The account's name, for a program that takes it from the environment rather than from the system
+  // (Python's getpass, in gcloud's credential helper). A name, never a path or a program.
+  "USER",
+  "LOGNAME",
+  // The language and character set of what the credential helpers and npm read and print. A
+  // locale's name, which the C library looks up among its locale data, never a program.
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LC_MESSAGES",
+  // The temporary directory, on macOS one of the user's own: without it docker and npm write in the
+  // shared /tmp. A directory they write in; nothing is looked for there to run.
+  "TMPDIR",
+  // The agent holding the user's keys, which ssh asks for an ssh:// DOCKER_HOST. A socket ssh
+  // connects to, never a program.
+  "SSH_AUTH_SOCK",
+  // The proxy through which npm reaches the registry (`npm view`), and docker a tcp:// daemon, on a
+  // network that has one; npm and Go read both spellings. A URL that traffic goes through.
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "ALL_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "all_proxy",
+];
+
+/**
+ * The environment docker and npm run with: a PATH of `first` and the trusted places only, and on
+ * Windows Windows' places as Windows has them (see windowsEnv), in place of those mcpcage was
+ * given; each variable of mcpcage's that HOST_ENV names on this system (see hostEnvName); the
+ * BASICS; and, for `docker run` alone, the variables in `byName`. Nothing else.
+ *
+ * mcpcage's environment is the client's plus the entry's `env`, and docker passes its own to every
+ * program it starts: its credential helpers, any program and often a script, its plugins (buildx),
+ * the ssh of an ssh:// DOCKER_HOST, and podman behind a `docker` that is its shim; npm passes its
+ * own to git and to node. These read variables that choose the code they run, and nobody can list
+ * them all: CLOUDSDK_PYTHON (gcloud's helper is a shell script that runs "$CLOUDSDK_PYTHON"),
+ * PYTHONPATH and PYTHONWARNINGS (Python started with -S still imports through them),
+ * AWS_CONFIG_FILE (a profile's credential_process, for the ECR helper), SSH_ASKPASS, BUILDX_CONFIG,
+ * CONTAINERS_CONF and XDG_CONFIG_HOME (podman's containers.conf names programs), GIT_SSH_COMMAND
+ * and GIT_CONFIG_*, SHELL (ssh runs a ProxyCommand with it), DBUS_SESSION_BUS_ADDRESS (an address
+ * can be a program to start). An entry whose env set CLOUDSDK_PYTHON, given to a docker configured
+ * for gcr.io through gcloud, as `gcloud auth configure-docker` leaves it, had its script run on the
+ * host at `docker build` while protect called the entry caged: the classic builder asks every
+ * credential helper at every build, BuildKit the one of each registry it pulls from. HOST_ENV lists
+ * what reads mcpcage's own process, and cannot list these: so the environment is built from names
+ * known to be safe instead of copied. A helper that needs one of the variables left out finds
+ * none: the secretservice helper of Linux desktops looks for the session bus through
+ * DBUS_SESSION_BUS_ADDRESS or XDG_RUNTIME_DIR.
+ *
+ * The variables HOST_ENV names are kept because they are the user's own here: an entry that sets
+ * one is reported by `protect` as acting on the host, and not counted as caged. They are what makes
+ * docker and npm work as the user has them: DOCKER_HOST, DOCKER_CONFIG, DOCKER_CONTEXT, HOME,
+ * npm_config_*, NODE_EXTRA_CA_CERTS. `byName` holds those docker is to take a value of for the
+ * server (see runArgs); the docker commands that build or pull are never given them.
+ */
+function trustedEnv(first: string[], byName: readonly string[] = []): NodeJS.ProcessEnv {
   const windows = process.platform === "win32";
+  // Windows compares names without case.
+  const same = (left: string, right: string) => (windows ? left.toUpperCase() === right.toUpperCase() : left === right);
+  const env = new Map<string, string>();
   const set = (name: string, value: string | undefined) => {
-    // Windows compares names without case: a `Path` left next to the new PATH could be the one used.
-    if (windows) for (const key of Object.keys(env)) if (key.toUpperCase() === name.toUpperCase()) delete env[key];
-    if (value === undefined) delete env[name];
-    else env[name] = value;
+    // A `Path` left next to the new PATH could be the one used: one spelling of each on Windows.
+    for (const key of [...env.keys()]) if (same(key, name)) env.delete(key);
+    if (value !== undefined) env.set(name, value);
   };
+  for (const [name, value] of Object.entries(process.env)) {
+    if (hostEnvName(name) || [...BASICS, ...byName].some((given) => same(given, name))) set(name, value);
+  }
   set("PATH", [...new Set([...first, ...trustedPlaces()])].join(delimiter));
   if (windows) for (const [name, value] of Object.entries(windowsPlaces())) set(name, value);
-  return env;
+  // Made at once: assigned one by one, a variable named __proto__ (`--env __proto__`) would set the
+  // object's prototype instead, and docker would not have it.
+  return Object.fromEntries(env);
 }
 
 let asked: Record<string, string | undefined> | undefined;

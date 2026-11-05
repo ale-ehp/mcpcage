@@ -289,6 +289,19 @@ export const HOST_ENV: ReadonlyArray<{ name: RegExp; to: "container" | "drop"; p
   { name: /^GODEBUG$/i, to: "container", platform: "win32", what: () => "can make docker on your machine start a program it finds in the current directory, the project's" },
 ];
 
+/**
+ * Whether HOST_ENV names `name` on this system, whatever its value. An entry whose `env` or
+ * `envFile` sets such a variable is reported by `protect` as acting on the host and not counted as
+ * caged (envEffects, and isUncaged in protect.ts), and `wrap` and `--fix` move it out of `env`; so
+ * in a caged entry it is the user's own, from the client's environment, and mcpcage gives it to the
+ * docker and the npm it runs (see trustedEnv in sandbox.ts). The two exceptions of hostVariable are
+ * given too, as they always were: a DOCKER_HOST that names a local socket, and NODE_ENV, which npm
+ * reads only to leave dev dependencies out of an install, which mcpcage never runs on the host.
+ */
+export function hostEnvName(name: string): boolean {
+  return HOST_ENV.some((rule) => (rule.platform === undefined || rule.platform === process.platform) && rule.name.test(name));
+}
+
 /** What a variable of an entry's `env` would do on the host once the entry starts mcpcage, or undefined for one meant only for the server. */
 export function hostVariable(name: string, value: unknown): { to: "container" | "drop"; what: string } | undefined {
   // A local socket, the usual way to reach Docker: it chooses no other daemon than the user's own.

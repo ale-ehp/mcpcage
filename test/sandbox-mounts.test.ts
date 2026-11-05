@@ -50,9 +50,10 @@ describe("the docker run command line", () => {
 
   it("is every option of the cage, in full", () => {
     const args = runArgs(base, "sha256:image", "linux");
-    expect(args[5]).toMatch(/^mcpcage-notes-1a2b3c4d-[0-9a-f]{6}$/);
-    expect(args.toSpliced(5, 1, "<name>")).toEqual([
+    expect(args[7]).toMatch(/^mcpcage-notes-1a2b3c4d-[0-9a-f]{6}$/);
+    expect(args.toSpliced(7, 1, "<name>")).toEqual([
       "run", "--rm", "-i", "--init",
+      "--pull", "never",
       "--name", "<name>",
       "--label", "mcpcage.server=notes-1a2b3c4d",
       "--network", "none",
@@ -76,14 +77,14 @@ describe("the docker run command line", () => {
 
   it.skipIf(windowsHost)("gives the server mcpcage's PATH, and every other variable by its name alone, on macOS and Linux", () => {
     vi.stubEnv("Path", "/elsewhere");
-    expect(runArgs({ ...base, env: ["PATH", "TEMP", "Path", "API_KEY"] }, "img", "linux").slice(33, -3)).toEqual(["-e", `PATH=${process.env.PATH}`, "-e", "TEMP", "-e", "Path", "-e", "API_KEY"]);
+    expect(runArgs({ ...base, env: ["PATH", "TEMP", "Path", "API_KEY"] }, "img", "linux").slice(35, -3)).toEqual(["-e", `PATH=${process.env.PATH}`, "-e", "TEMP", "-e", "Path", "-e", "API_KEY"]);
   });
 
   it("gives the server mcpcage's own value of PATH and of Windows' places on Windows, each from its own variable", () => {
     vi.stubEnv("HOMEPATH", "\\Users\\me");
     vi.stubEnv("PATHEXT", ".COM;.EXE");
     const args = onWindows(() => runArgs({ ...base, env: ["Path", "HOMEPATH", "PATHEXT", "API_KEY"] }, "img", "win32"));
-    expect(args.slice(33, -3)).toEqual(["-e", `Path=${process.env.PATH}`, "-e", "HOMEPATH=\\Users\\me", "-e", "PATHEXT=.COM;.EXE", "-e", "API_KEY"]);
+    expect(args.slice(35, -3)).toEqual(["-e", `Path=${process.env.PATH}`, "-e", "HOMEPATH=\\Users\\me", "-e", "PATHEXT=.COM;.EXE", "-e", "API_KEY"]);
   });
 
   it("gives a Windows server each argument in a mounted folder as its place in the cage: ~/, a path on the current drive, never a relative one", () => {
@@ -142,11 +143,17 @@ describe("a --mount", () => {
 });
 
 describe.skipIf(windowsHost)("the environment of docker and npm on macOS and Linux", () => {
-  it("is mcpcage's, with a PATH of the trusted places, and keeps variables Windows would read as its own", () => {
+  it("is made of the variables it names, with a PATH of the trusted places, each name with its case", () => {
     vi.stubEnv("Path", "/elsewhere");
+    vi.stubEnv("HTTPS_PROXY", "http://one.example:3128");
+    vi.stubEnv("https_proxy", "http://two.example:3128");
+    vi.stubEnv("Https_Proxy", "http://three.example:3128");
     const env = dockerProgram()!.env;
-    expect(env.Path).toBe("/elsewhere");
-    expect(env.TMP).toBe(process.env.TMP);
+    // Path is not PATH here, nor TMP the temporary directory: neither is given.
+    expect(env.Path).toBeUndefined();
+    expect(env.TMP).toBeUndefined();
+    expect(env.TMPDIR).toBe(process.env.TMPDIR);
+    expect([env.HTTPS_PROXY, env.https_proxy, env.Https_Proxy]).toEqual(["http://one.example:3128", "http://two.example:3128", undefined]);
     expect(env.PATH!.split(":")).toContain("/usr/bin");
   });
 });
