@@ -1,0 +1,43 @@
+name: mutation
+
+# Mutation testing (npm run mutation, see stryker.config.mjs): Stryker changes src/ in small ways, one
+# change at a time, and runs the tests that reach each change; a change no test notices survives. It
+# takes hours, so it runs weekly and by hand, not on every push. The score of each file is the job
+# summary; the HTML report, which shows every mutant that survived, is kept as an artifact.
+on:
+  schedule:
+    - cron: "23 2 * * 6" # Saturdays
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Mutate src/ and run the tests against each mutant
+        # The runner has 4 cores and nothing else to do. Lines appended, as a log has no terminal.
+        run: npm run mutation -- --concurrency 4 --reporters html,json,progress-append-only
+      - name: The score of each file as the job summary
+        if: ${{ always() && hashFiles('reports/mutation/mutation.json') != '' }}
+        run: |
+          {
+            echo "### Mutation score"
+            echo
+            node test/mutation-score.mjs
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && hashFiles('reports/mutation/mutation.json') != '' }}
+        with:
+          name: mutation
+          path: reports/mutation/
