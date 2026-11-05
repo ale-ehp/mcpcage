@@ -2,8 +2,9 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { dockerAvailable } from "../src/sandbox.js";
+import { builtImages } from "./docker-images.js";
 import { fakePrograms, standardDocker } from "./fake-programs.js";
 import { connect, freshHome, mcpcage, mcpcageWithEnv, root } from "./helpers.js";
 
@@ -11,6 +12,7 @@ const probePackage = join(root, "test", "fixtures", "probe-server");
 const docker = dockerAvailable();
 const home = freshHome();
 const server = ["npx", "-y", probePackage, "--greeting", "hello"];
+const images = builtImages();
 
 interface Probe {
   uid: number;
@@ -35,10 +37,13 @@ async function probe(runArgs: string[], env: Record<string, string> = {}): Promi
 
 describe.skipIf(!docker.ok)("caged npm server (real Docker)", () => {
   beforeAll(() => {
-    const prepared = mcpcage(home, "prepare", "--id", "probe", "--", ...server);
+    const prepared = images.track(mcpcage(home, "prepare", "--id", "probe", "--", ...server), home);
     expect(prepared.code, prepared.stderr).toBe(0);
     expect(prepared.stdout).toContain("mcpcage-probe@1.0.0");
   }, 600_000);
+
+  // The images built here are used by the tests below and removed once they are done, failed or not.
+  afterAll(() => images.remove(), 120_000);
 
   it("runs as nonroot, read-only, without network, host files or install scripts", async () => {
     const report = await probe(["--env", "PROBE_ALLOWED"], { PROBE_ALLOWED: "yes", SECRET_TOKEN: "must-not-leak" });
@@ -75,11 +80,11 @@ describe.skipIf(!docker.ok)("caged npm server (real Docker)", () => {
       expect(result.status, result.stderr).toBe(0);
       return JSON.parse(result.stdout) as string[];
     };
-    const fresh = mcpcage(home, "prepare", "--id", "probe-fresh", "--", ...server);
+    const fresh = images.track(mcpcage(home, "prepare", "--id", "probe-fresh", "--", ...server), home);
     expect(fresh.code, fresh.stderr).toBe(0);
     expect(layers("probe-fresh")).not.toEqual(layers("probe"));
     const before = layers("probe-fresh");
-    const rebuilt = mcpcage(home, "prepare", "--rebuild", "--id", "probe-fresh", "--", ...server);
+    const rebuilt = images.track(mcpcage(home, "prepare", "--rebuild", "--id", "probe-fresh", "--", ...server), home);
     expect(rebuilt.code, rebuilt.stderr).toBe(0);
     expect(layers("probe-fresh")).not.toEqual(before);
   }, 600_000);
@@ -112,7 +117,7 @@ describe.skipIf(!docker.ok)("caged npm server (real Docker)", () => {
   // A client starts mcpcage with the PATH a server entry sets: what it puts first must not run.
   it.skipIf(standardDocker === undefined)("packs and builds with the npm next to node and the docker of a standard place, whatever comes first on the PATH", () => {
     const fake = fakePrograms();
-    const prepared = mcpcageWithEnv({ ...process.env, MCPCAGE_HOME: home, PATH: fake.path }, "prepare", "--id", "probe-path", "--", ...server);
+    const prepared = images.track(mcpcageWithEnv({ ...process.env, MCPCAGE_HOME: home, PATH: fake.path }, "prepare", "--id", "probe-path", "--", ...server), home);
     expect(prepared.code, prepared.stderr).toBe(0);
     expect(prepared.stdout).toContain("mcpcage-probe@1.0.0");
     expect(fake.ran()).toBe("");

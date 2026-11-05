@@ -9,14 +9,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { cagePath, dockerAvailable } from "../src/sandbox.js";
+import { builtImages } from "./docker-images.js";
 import { cli, connect, freshHome, mcpcage, root } from "./helpers.js";
 
 const abusePackage = join(root, "test", "fixtures", "abuse-server");
 const docker = dockerAvailable();
 const home = freshHome();
 const server = ["npx", "-y", abusePackage];
+const images = builtImages();
 const MiB = 1024 * 1024;
 /** Where the server finds a path of this machine in its cage, which is what tool calls must name: /c/... on Windows. */
 const inCage = (path: string) => cagePath(path);
@@ -151,10 +153,13 @@ function dockerEvents(since: string, until: string): string[] {
 
 describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () => {
   beforeAll(() => {
-    const prepared = mcpcage(home, "prepare", "--id", "abuse", "--", ...server);
+    const prepared = images.track(mcpcage(home, "prepare", "--id", "abuse", "--", ...server), home);
     expect(prepared.code, prepared.stderr).toBe(0);
     expect(prepared.stdout).toContain("mcpcage-abuse@1.0.0");
   }, 600_000);
+
+  // The image every attack below starts from, removed once they are done, failed or not.
+  afterAll(() => images.remove(), 120_000);
 
   it("finds nothing to use in its environment: its own variables only, user 65532, no capabilities, no Docker socket", async () => {
     const report = await call<EnvironmentReport>("environment", {
