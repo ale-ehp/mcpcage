@@ -15,7 +15,9 @@ Vulnerabilities are the exception: report them privately, through the form that
 You need Node.js 22, the version CI runs, and a Docker engine for the cage tests.
 
 ```bash
+git clone https://github.com/ale-ehp/mcpcage && cd mcpcage
 npm ci                 # the development dependencies exactly as package-lock.json pins them
+npm run build && npm link   # `mcpcage` on your PATH is now this clone's
 npm run typecheck
 npm test               # unit and integration tests, no Docker needed
 npm run test:docker    # the cage and `protect --inspect` against a real Docker daemon

@@ -94,10 +94,11 @@ Requirements: Node.js 22 or later and a running Docker engine (Docker Desktop, C
 Docker on Linux; on Windows, Docker Desktop with Linux containers, see [Windows](#windows)).
 
 ```bash
-git clone https://github.com/ale-ehp/mcpcage && cd mcpcage
-npm ci && npm run build && npm link
-mcpcage doctor
+npm install -g mcpcage
+mcpcage doctor               # checks Node, Docker and the setup
 ```
+
+To build it from the source instead, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Then look at what is configured on your machine, and cage it:
 
