@@ -28,7 +28,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && vitest run --exclude 'test/**/*.docker.test.ts'",
     "test:docker": "npm run build && vitest run test/*.docker.test.ts",
-    "compat": "npm run build && node test/compat/run.mjs"
+    "compat": "npm run build && node test/compat/run.mjs",
+    "mutation": "npm run build && stryker run"
   },
   "keywords": [
     "mcp",
@@ -41,6 +42,8 @@
   ],
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
+    "@stryker-mutator/core": "10.1.1",
+    "@stryker-mutator/vitest-runner": "10.1.1",
     "@types/node": "22.20.5",
     "fast-check": "4.10.2",
     "typescript": "7.0.2",
