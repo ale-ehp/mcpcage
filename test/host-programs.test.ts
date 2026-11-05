@@ -323,9 +323,18 @@ describe("on Windows, the places docker and npm are given", () => {
     process.chdir(project);
     try {
       const docker = dockerProgram()!;
+      // What docker finds with this environment where there is no plugin of a project's: Docker
+      // Desktop's buildx, or none on a machine with docker.exe alone (GitHub's Windows runner).
+      const elsewhere = spawnSync(docker.file, ["buildx", "version"], { encoding: "utf8", env: docker.env, cwd: mkdtempSync(join(tmpdir(), "mcpcage-plugin-elsewhere-")) });
       const result = spawnSync(docker.file, ["buildx", "version"], { encoding: "utf8", env: docker.env, cwd: project });
       expect(existsSync(marker) ? readFileSync(marker, "utf8") : "").toBe("");
-      expect(result.stdout, result.stderr).toMatch(/buildx/);
+      // In the project docker finds the same: that buildx, or none at all.
+      if (elsewhere.status === 0) {
+        expect(elsewhere.stdout).toMatch(/buildx/);
+        expect(result.stdout, result.stderr).toBe(elsewhere.stdout);
+      } else {
+        expect(result.stderr).toMatch(/unknown command: docker buildx|'buildx' is not a docker command/);
+      }
     } finally {
       vi.unstubAllEnvs();
     }
