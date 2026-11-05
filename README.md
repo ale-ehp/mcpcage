@@ -477,6 +477,7 @@ npm ci
 npm test               # unit and integration tests, no Docker needed
 npm run test:docker    # the cage and `protect --inspect` against a real Docker daemon
 MCPCAGE_FUZZ_RUNS=20000 npx vitest run .fuzz.test.ts   # the property-based tests, longer
+npm run mutation       # mutation testing with Stryker, which takes hours (stryker.config.mjs)
 ```
 
 The property-based tests (`test/*.fuzz.test.ts`, with fast-check) throw generated input at what
@@ -485,6 +486,10 @@ configuration files and Windows paths. `npm test` runs each a few hundred times 
 prints the seed and the smallest failing case, and `MCPCAGE_FUZZ_SEED=<seed>` runs the same cases
 again. The [fuzz workflow](.github/workflows/fuzz.yml) runs them 20,000 times each, every week on
 Linux and Windows, from a new seed each time.
+
+Mutation testing changes the code one small change at a time and checks that a test fails: the tests
+notice 88% of the changes to the code that decides what is safe, and 73% in all of `src/`, whose CLI
+is tested only as a process, out of Stryker's reach ([weekly run](.github/workflows/mutation.yml)).
 
 mcpcage has no runtime dependencies. Releases are published to npm with provenance, with a
 CycloneDX SBOM and a GitHub build attestation attached ([release workflow](.github/workflows/release.yml)).

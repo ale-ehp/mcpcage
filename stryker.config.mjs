@@ -16,7 +16,9 @@ export default {
   // not see the HOME a test sets, and the tests of ~/ paths fail before any mutant.
   vitest: { configFile: "stryker.vitest.config.ts", pool: "forks" },
   // Each mutant runs only the tests that reached it; incremental mode reuses the results of mutants
-  // and tests that have not changed since the last run (reports/stryker-incremental.json).
+  // and tests that have not changed since the last run (reports/stryker-incremental.json). It also
+  // reuses the result of a static mutant (one that runs only as its module loads, such as a table of
+  // names) after tests were added that would kill it: --force measures everything again.
   coverageAnalysis: "perTest",
   incremental: true,
   // Other work runs on the machine (Docker, other tests): two test processes at a time by default,
