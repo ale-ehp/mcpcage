@@ -18,9 +18,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Trusted publishing needs npm 11.5.1 or later: every Node 24 from 24.5.0 bundles one, Node 22
-      # bundles npm 10. No registry-url: it only pointed npm at a token, and without it a failed OIDC
-      # exchange stops npm publish with ENEEDAUTH instead of sending "${NODE_AUTH_TOKEN}" as a token.
+      # npm stage needs npm 11.15.0 or later: every Node 24 from 24.18.0 bundles one, Node 22 bundles
+      # npm 10. No registry-url: it only pointed npm at a token, and without it a failed OIDC exchange
+      # stops npm stage publish with ENEEDAUTH instead of sending "${NODE_AUTH_TOKEN}" as a token.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -33,17 +33,38 @@ jobs:
         with:
           subject-path: mcpcage-*.tgz
       # No npm token: npm trades the job's OIDC token for a short-lived one, as the trusted publisher
-      # set on npmjs.com for this file allows. --provenance stays explicit: on its own npm adds
-      # provenance only when it finds the repository and the package public, else publishes without.
-      - name: Publish to npm with provenance
-        run: npm publish --provenance --access public mcpcage-*.tgz
+      # set on npmjs.com for this file allows. Staged, not published: npm serves the version, with its
+      # provenance, only once a maintainer approves it with two-factor authentication, which this job
+      # cannot do. --provenance stays explicit: on its own npm adds provenance only when it finds the
+      # repository and the package public, else stages without.
+      - name: Stage on npm with provenance, for the maintainer to approve
+        run: npm stage publish --provenance --access public --json mcpcage-*.tgz > staged.json
+      # npm's answer holds the stage id; `npm stage list mcpcage` shows it too.
+      - name: Tell the maintainer how to approve the staged version
+        run: |
+          package=$(jq -r '.[].id' staged.json)
+          stage_id=$(jq -r '.[].stageId // "<stage-id>"' staged.json)
+          {
+            echo "## $package is staged on npm, not published"
+            echo
+            echo "npm serves it only once a maintainer approves it with two-factor authentication."
+            echo
+            echo "1. Approve it on npmjs.com (account menu, **Staged Packages**, **Approve**)"
+            echo "   or with \`npm stage approve $stage_id\`."
+            echo "2. Check that \`npm view mcpcage dist-tags.latest\` prints ${package#*@}."
+            echo "3. Publish the draft release: \`gh release edit $GITHUB_REF_NAME --draft=false\`."
+            echo
+            echo "Not to be released: \`npm stage reject $stage_id\`, and delete the draft release."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       # GitHub keeps the provenance among the repository's attestations. Attached to the release as
       # <package>.sigstore.json it also travels with the package for `gh attestation verify --bundle`,
-      # and it is where Scorecard's Signed-Releases check looks for a signature.
-      - name: GitHub release with the package, its SBOM and its signed provenance
+      # and it is where Scorecard's Signed-Releases check looks for a signature. The release stays a
+      # draft until the maintainer has approved the version on npm: published, it would announce a
+      # version npm does not serve yet, or never will if it is rejected.
+      - name: Draft GitHub release with the package, its SBOM and its signed provenance
         run: |
           for package in mcpcage-*.tgz; do cp "$PROVENANCE" "$package.sigstore.json"; done
-          gh release create "$GITHUB_REF_NAME" mcpcage-*.tgz mcpcage-*.tgz.sigstore.json mcpcage.cdx.json --generate-notes
+          gh release create "$GITHUB_REF_NAME" mcpcage-*.tgz mcpcage-*.tgz.sigstore.json mcpcage.cdx.json --generate-notes --draft
         env:
           GH_TOKEN: ${{ github.token }}
           PROVENANCE: ${{ steps.provenance.outputs.bundle-path }}

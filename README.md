@@ -496,7 +496,9 @@ is tested only as a process, out of Stryker's reach ([weekly run](.github/workfl
 
 mcpcage has no runtime dependencies. Releases are published to npm with provenance by trusted
 publishing, from GitHub Actions with no npm token, with a CycloneDX SBOM and a GitHub build
-attestation attached ([release workflow](.github/workflows/release.yml)).
+attestation attached ([release workflow](.github/workflows/release.yml)). The workflow only stages
+each version: npm serves it once the maintainer has approved it with two-factor authentication,
+which the workflow cannot give.
 
 ## Feedback and contributing
 

@@ -48,3 +48,26 @@ them must pass. The maintainer reviews every pull request before it is merged.
   anything users will notice.
 
 Contributions are licensed under the [Apache License 2.0](LICENSE), like the rest of mcpcage.
+
+## Releasing
+
+For the maintainer. The [release workflow](.github/workflows/release.yml) runs on a `v*` tag: it
+tests and packs the package, stages it on npm with its provenance, and leaves a draft GitHub
+release with the package, its SBOM and its signed provenance. npm serves nothing until the staged
+version is approved with two-factor authentication, which the workflow cannot give.
+
+1. Commit the version in package.json and package-lock.json and its CHANGELOG.md entry on `main`,
+   as `mcpcage X.Y.Z`, and push.
+2. Tag that commit and push the tag: `git tag -a vX.Y.Z -m "mcpcage X.Y.Z"`, then
+   `git push origin vX.Y.Z`.
+3. Wait for the release workflow to finish. Its summary names the staged version and its stage id.
+4. Approve the staged version: on npmjs.com, signed in, open **Staged Packages** in the account
+   menu, check the version, click **Approve** and confirm with the security key. From a terminal
+   logged in to npm, `npm stage approve <stage-id>` does the same and asks for the second factor.
+5. Check that `npm view mcpcage dist-tags.latest` prints X.Y.Z.
+6. Publish the draft release: `gh release edit vX.Y.Z --draft=false`, or **Publish release** on
+   its page.
+
+A staged version that must not go out is removed with **Reject** on npmjs.com, or with
+`npm stage reject <stage-id>`, which also asks for the second factor; then delete the draft
+release. A rejected version number can be staged again.
