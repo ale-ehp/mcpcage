@@ -27,7 +27,7 @@ In a census of servers published to the official registry, 64% of packaged serve
 This is no longer theoretical:
 
 - **postmark-mcp** (September 2025), the first malicious MCP server found in the wild, quietly
-  blind-copied every email it sent to an attacker after fifteen clean releases ([Paubox](https://www.paubox.com/blog/malicious-mcp-server-found-in-fake-postmark-mcp-package)).
+  blind-copied every email it sent to an attacker from version 1.0.16, with one added line ([Paubox](https://www.paubox.com/blog/malicious-mcp-server-found-in-fake-postmark-mcp-package)).
 - **SANDWORM_MODE** (February 2026) wrote a rogue MCP server into the configs of Claude Code,
   Cursor and other clients, with tool descriptions telling the model to read SSH keys ([Socket](https://socket.dev/blog/sandworm-mode-npm-worm-ai-toolchain-poisoning)).
 - **Shai-Hulud** reached users through the official MCP registry in August 2026 ([OX Security](https://www.ox.security/blog/shai-hulud-outbreak-debrief-the-worm-evolves-into-mcp/)).
