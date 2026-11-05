@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -70,7 +70,12 @@ describe("paths mcpcage will not mount, in more detail", () => {
   it("keeps each system's places to that system", () => {
     // \etc is an ordinary folder on Windows; macOS has no /run.
     expect(sensitivePath("\\etc\\hosts", windows)).toBeUndefined();
-    expect(sensitivePath("/run/user/501/podman", { home: "/Users/me", platform: "darwin" })).toBeUndefined();
+    // Places are also looked up where their symlinks lead on the machine running the test. On Linux
+    // /var/run leads to /run, so there /var/run, a place on macOS too, holds /run/user; on a Mac it
+    // leads to /private/var/run. Either way the place /run must not count on macOS: it would be
+    // named first, as written.
+    const varRunIsRun = process.platform !== "win32" && existsSync("/var/run") && realpathSync.native("/var/run") === "/run";
+    expect(sensitivePath("/run/user/501/podman", { home: "/Users/me", platform: "darwin" })).toBe(varRunIsRun ? "the Docker socket in /var/run" : undefined);
     expect(sensitivePath("/run/user/1000/podman", linux)).toBe("the Docker and Podman sockets in /run");
   });
 
