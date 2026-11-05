@@ -12,6 +12,13 @@ export const cli = join(root, "dist", "cli.js");
 export const fakeServer = join(root, "test", "fixtures", "fake-server.mjs");
 export const hostileServer = join(root, "test", "fixtures", "hostile-server.mjs");
 
+/**
+ * How many times longer a test may take than its limit says, in a mutation run (npm run mutation,
+ * whose vitest configuration sets MCPCAGE_MUTATION_RUN): the code is instrumented there, and the scan
+ * of a description of 16 Mi characters took 6.9 s against 0.4 s without, where its limit is 3 s.
+ */
+export const SLOWER = process.env.MCPCAGE_MUTATION_RUN === "1" ? 30 : 1;
+
 /** A path written with `/`, as this system writes it: mcpcage shows ~/.ssh as ~\.ssh on Windows. */
 export function native(path: string): string {
   return path.split("/").join(sep);

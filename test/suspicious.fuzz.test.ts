@@ -4,6 +4,7 @@ import type { ToolDefinition } from "../src/manifest.js";
 import { describeFindings, describeResultSigns, describeViolationsWithFindings, scanChange, scanResult, scanResultText, scanText, scanTool, type Finding } from "../src/suspicious.js";
 import { UNPRINTABLE } from "../src/terminal.js";
 import { anyText, check, jsonValue, TIMEOUT } from "./fuzz.js";
+import { SLOWER } from "./helpers.js";
 
 /*
  * The rules read text a server wrote, built to defeat them: they must never throw, take time in
@@ -35,7 +36,7 @@ function scanInTime(text: string): void {
   const took = performance.now() - started;
   // 120,000 characters take about 10 ms here: the limit is generous for a slow machine, and far
   // below what a rule that backtracks over the text takes.
-  expect(took, `${text.length} characters took ${Math.round(took)} ms`).toBeLessThan(250 + text.length / 1000);
+  expect(took, `${text.length} characters took ${Math.round(took)} ms`).toBeLessThan((250 + text.length / 1000) * SLOWER);
   expect(findings.length).toBeLessThanOrEqual(2 * 20 * 100);
   findings.forEach(readable);
 }

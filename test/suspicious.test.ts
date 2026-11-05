@@ -17,7 +17,7 @@ import {
   scanTool,
   type Severity,
 } from "../src/suspicious.js";
-import { root } from "./helpers.js";
+import { root, SLOWER } from "./helpers.js";
 
 // Invisible characters are built from code points, never pasted, so the test reads the same everywhere.
 const char = (...codes: number[]) => String.fromCodePoint(...codes);
@@ -650,7 +650,7 @@ describe("scan budget", () => {
     const tool = pick(["Do not tell the user", ...Array.from({ length: 99_999 }, () => "a")]);
     const started = performance.now();
     const findings = scanTool(tool);
-    expect(performance.now() - started).toBeLessThan(1000);
+    expect(performance.now() - started).toBeLessThan(1000 * SLOWER);
     expect(findings).toEqual([
       { rule: "scan-budget", severity: "high", field: "definition", snippet: 'stopped before "inputSchema.properties.mode.enum[19990]"', message: `${BUDGET}, treat it as hidden` },
       expect.objectContaining({ rule: "conceal-from-user", field: "inputSchema.properties.mode.enum[0]" }),
@@ -667,7 +667,7 @@ describe("scan budget", () => {
     const content = Array.from({ length: 100_000 }, () => ({ type: "text", text: "a" }));
     const started = performance.now();
     const findings = scanResult({ result: { content } });
-    expect(performance.now() - started).toBeLessThan(1000);
+    expect(performance.now() - started).toBeLessThan(1000 * SLOWER);
     expect(findings).toEqual([
       { rule: "scan-budget", severity: "medium", field: "result", snippet: 'stopped before "content[20000].text"', message: `${BUDGET}, so the rest was not checked` },
     ]);
@@ -720,7 +720,7 @@ describe("hostile sizes", () => {
       const tool = { name: "add_note", description: sixteenMi(unit) };
       const started = performance.now();
       expect(highestSeverity(scanTool(tool))).toBe(highest);
-      expect(performance.now() - started).toBeLessThan(3000);
+      expect(performance.now() - started).toBeLessThan(3000 * SLOWER);
     }
   });
 
@@ -729,7 +729,7 @@ describe("hostile sizes", () => {
       const text = sixteenMi(unit);
       const started = performance.now();
       expect(highestSeverity(scanResultText(text))).toBe("high");
-      expect(performance.now() - started).toBeLessThan(3000);
+      expect(performance.now() - started).toBeLessThan(3000 * SLOWER);
     }
   });
 });
