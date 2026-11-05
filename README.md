@@ -498,6 +498,13 @@ mcpcage has no runtime dependencies. Releases are published to npm with provenan
 publishing, from GitHub Actions with no npm token, with a CycloneDX SBOM and a GitHub build
 attestation attached ([release workflow](.github/workflows/release.yml)).
 
+## Feedback and contributing
+
+Bugs and feature requests: [GitHub issues](https://github.com/ale-ehp/mcpcage/issues).
+Vulnerabilities: privately, as [SECURITY.md](SECURITY.md) says. Changes: pull requests against
+`main`, each with a test that fails without it; [CONTRIBUTING.md](CONTRIBUTING.md) says how to build
+and test, and what else a change needs.
+
 ## Security
 
 Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
