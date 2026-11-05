@@ -1,5 +1,6 @@
 import { win32 } from "node:path";
 import { canonicalJson, sha256 } from "./canonical.js";
+import { isJsonObject } from "./jsonc.js";
 
 /** What the MCP client asked to start, after `mcpcage run --`. */
 export type LaunchSpec =
@@ -35,16 +36,17 @@ const NPX_FLAGS_WITHOUT_VALUE = new Set(["-y", "--yes", "-q", "--quiet", "-s", "
  * with, and on Windows the same run by `cmd /c` (see cmdRunner); and `uvx [flags] <requirement>
  * [args]` or `uv tool run ...`, the form of PyPI servers, `cmd /c uvx` included (see parseUvx).
  * Anything else is a plain host command, which only `--no-sandbox` accepts. `platform` is the system
- * the command line was written for.
+ * the command line was written for, and `environment` the variables it starts with, which uvx reads
+ * too (see fromUvEnvironment): none unless given.
  */
-export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Platform = process.platform): LaunchSpec {
+export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Platform = process.platform, environment: UvEnvironment = []): LaunchSpec {
   if (image) return { kind: "image", image, args: argv };
   const [command] = argv;
   if (!command) throw new Error("missing the server command after `--`");
   const npx = npxArgv(argv, platform);
   if (npx === undefined) {
     const toolRun = toolRunArgs(argv, platform);
-    if (toolRun !== undefined) return parseUvx(toolRun, platform);
+    if (toolRun !== undefined) return parseUvx(toolRun, platform, environment);
     // uv reads flags before `tool run` itself: `uv --directory x tool run` installs and starts the
     // tool from another working directory, which is not what `uvx` does.
     const [first, ...more] = argv.slice(1);
@@ -152,15 +154,92 @@ const UVX_SHORT = new Map<string, string>([
 
 const PRERELEASE_MODES = ["disallow", "allow", "if-necessary", "explicit", "if-necessary-or-explicit"];
 
+/** A CPython version the cage runs: 3.10 to 3.15, with a patch release or without. */
+const PYTHON_VERSION = /^3\.1[0-5](?:\.(?:0|[1-9][0-9]{0,2}))?$/;
+
+/**
+ * The variables a uvx command line starts with, by where they are set: each layer adds its own to
+ * those before it and wins over them, as a client adds an entry's `env` to its own environment.
+ * `where` names the layer in messages ("its env"). Messages name variables, never their values,
+ * which can hold a credential (an index URL with a password).
+ */
+export type UvEnvironment = ReadonlyArray<{ where: string; variables: unknown }>;
+
+/**
+ * The variables of uv's environment that make uvx take its packages from somewhere else than PyPI's
+ * wheels, or decide what it installs from a file on the host, with what uvx does with each: the cage
+ * reproduces none of it, so a line started with one is refused, as the flag it stands for is
+ * (UVX_FLAGS). The names are those `uv tool run --help` gives for its flags in uv 0.13.7. UV_NO_INDEX
+ * is not one: uv 0.13.7 installed from PyPI with it set.
+ */
+const UV_REFUSED: ReadonlyMap<string, string> = new Map([
+  ...["UV_INDEX", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_FIND_LINKS", "UV_INDEX_STRATEGY", "UV_KEYRING_PROVIDER", "UV_TORCH_BACKEND"].map((name): [string, string] => [
+    name,
+    "uvx installs from another index there",
+  ]),
+  ...["UV_CONFIG_FILE", "UV_CONSTRAINT", "UV_OVERRIDE", "UV_BUILD_CONSTRAINT", "UV_ENV_FILE"].map((name): [string, string] => [name, "uvx reads a file on your machine there, which the cage does not read"]),
+  ...["UV_NO_BINARY", "UV_NO_BINARY_PACKAGE"].map((name): [string, string] => [name, "uvx builds packages from source there, and the cage installs PyPI wheels only"]),
+  ["UV_INSECURE_HOST", "uvx turns off certificate checks for a host there, which only another index or a proxy needs"],
+]);
+
+/**
+ * The value `environment` gives uv's variable `name`, and the layer that sets it: the last one that
+ * does. Windows compares names without case, as uv's reads of them there do. An empty value is no
+ * value: uv 0.13.7 ignored UV_INDEX_URL= and UV_PYTHON= alike, and so one set empty by a later layer
+ * unsets what an earlier one gave.
+ */
+function uvVariable(environment: UvEnvironment, name: string, platform: NodeJS.Platform): { where: string; name: string; value: unknown } | undefined {
+  for (const layer of [...environment].reverse()) {
+    if (!isJsonObject(layer.variables)) continue;
+    const written = Object.keys(layer.variables).find((key) => (platform === "win32" ? key.toUpperCase() === name : key === name));
+    if (written === undefined) continue;
+    return layer.variables[written] === "" ? undefined : { where: layer.where, name: written, value: layer.variables[written] };
+  }
+  return undefined;
+}
+
+/**
+ * What uv's environment adds to a uvx command line, as uv reads it: the variables of UV_REFUSED stop
+ * it; UV_RESOLUTION too, but for `highest`, uv's default (uv 0.13.7 installed idna 2.0 for `idna>=2`
+ * with UV_RESOLUTION=lowest, where the cage installs the newest); UV_PYTHON, UV_PRERELEASE and
+ * UV_EXCLUDE_NEWER are what --python, --prerelease and --exclude-newer are when the line does not give
+ * them (`given`: a flag wins over its variable, as in uv), with the same values accepted. Every other
+ * variable of uv's tunes its cache, its output or its lookup of an interpreter on the host, and has
+ * no effect in the cage.
+ */
+function fromUvEnvironment(environment: UvEnvironment, platform: NodeJS.Platform, given: ReadonlyMap<string, string>): { python?: string; prerelease?: string; excludeNewer?: string } {
+  for (const name of UV_REFUSED.keys()) {
+    const set = uvVariable(environment, name, platform);
+    if (set !== undefined) throw new Error(`${set.where} sets ${set.name}: ${UV_REFUSED.get(name)}`);
+  }
+  const resolution = uvVariable(environment, "UV_RESOLUTION", platform);
+  if (resolution !== undefined && resolution.value !== "highest") {
+    throw new Error(`${resolution.where} sets ${resolution.name}: uvx chooses other versions there than the newest, which the cage installs`);
+  }
+  const read = (name: string, valid: (value: string) => boolean, what: string): string | undefined => {
+    const flag = `--${name.slice("UV_".length).toLowerCase().replace(/_/g, "-")}`;
+    if (given.has(flag)) return given.get(flag);
+    const set = uvVariable(environment, name, platform);
+    if (set === undefined) return undefined;
+    if (typeof set.value !== "string" || !valid(set.value)) throw new Error(`${set.where} sets ${set.name} to another value than ${what}`);
+    return set.value;
+  };
+  const python = read("UV_PYTHON", (value) => PYTHON_VERSION.test(value), "a CPython version from 3.10 to 3.15 (such as 3.12 or 3.12.4), the only ones the cage runs");
+  const prerelease = read("UV_PRERELEASE", (value) => PRERELEASE_MODES.includes(value), `one of ${PRERELEASE_MODES.join(", ")}`);
+  const excludeNewer = read("UV_EXCLUDE_NEWER", isExcludeNewer, "a date (2026-01-31), a time with its zone (2026-01-31T12:00:00Z) or a duration (30 days, P30D)");
+  return { ...(python === undefined ? {} : { python }), ...(prerelease === undefined ? {} : { prerelease }), ...(excludeNewer === undefined ? {} : { excludeNewer }) };
+}
+
 /**
  * Reads the words uv's `tool run` is given, as uv 0.13.7 reads them: flags until the first other
  * word or `--`, then the package, or with --from the command, then the server's own arguments,
  * whatever they look like. Flags take their value as the next word, after `=`, or in their
  * one-letter form attached (`-w x`, `--with=x`, `-wx`, `-qwx`). Only what the cage builds from PyPI
  * wheels is accepted: anything else throws, naming the flag but never its value, which can hold a
- * credential (an index URL with a password, a git URL with a token).
+ * credential (an index URL with a password, a git URL with a token). uv reads its environment too:
+ * what `environment` sets is read as uv reads it (see fromUvEnvironment).
  */
-function parseUvx(words: string[], platform: NodeJS.Platform): PypiLaunch {
+function parseUvx(words: string[], platform: NodeJS.Platform, environment: UvEnvironment): PypiLaunch {
   const once = new Map<string, string>();
   const withs: string[] = [];
   const take = (name: string, flag: Extract<UvxFlag, { value: boolean }>, value: string) => {
@@ -233,14 +312,15 @@ function parseUvx(words: string[], platform: NodeJS.Platform): PypiLaunch {
     // uv reads `pkg@1.0` in --with as a path, not as the version uvx's own package takes after @.
     if (pypiRequirement(requirement) === undefined) throw new Error(`uvx --with: ${(outsidePyPI(requirement) || requirement.includes("@")) ? OUTSIDE_PYPI : NOT_A_REQUIREMENT}`);
   }
-  const python = once.get("--python");
-  if (python !== undefined && !/^3\.1[0-5](?:\.(?:0|[1-9][0-9]{0,2}))?$/.test(python)) throw new Error(`uvx --python: ${PYTHON_RANGE}`);
-  const prerelease = once.get("--prerelease");
-  if (prerelease !== undefined && !PRERELEASE_MODES.includes(prerelease)) throw new Error(`uvx --prerelease: give one of ${PRERELEASE_MODES.join(", ")}`);
-  const excludeNewer = once.get("--exclude-newer");
-  if (excludeNewer !== undefined && !isExcludeNewer(excludeNewer)) {
+  const flagPython = once.get("--python");
+  if (flagPython !== undefined && !PYTHON_VERSION.test(flagPython)) throw new Error(`uvx --python: ${PYTHON_RANGE}`);
+  const flagPrerelease = once.get("--prerelease");
+  if (flagPrerelease !== undefined && !PRERELEASE_MODES.includes(flagPrerelease)) throw new Error(`uvx --prerelease: give one of ${PRERELEASE_MODES.join(", ")}`);
+  const flagExcludeNewer = once.get("--exclude-newer");
+  if (flagExcludeNewer !== undefined && !isExcludeNewer(flagExcludeNewer)) {
     throw new Error("uvx --exclude-newer: give a date (2026-01-31), a time with its zone (2026-01-31T12:00:00Z) or a duration (30 days, P30D)");
   }
+  const { python, prerelease, excludeNewer } = fromUvEnvironment(environment, platform, once);
   return {
     kind: "pypi",
     project: normalizedName(tool.name),

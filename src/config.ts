@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
 import { batchFile, envFileOf, foreignPath, mcpcageAt, movedPlaces, nodeScript, type ForeignPath, type McpcageCommand } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
-import { cmdNpx, isNpx, npxArgv, parseLaunch, toolRunArgs } from "./launch.js";
+import { cmdRunner, isNpx, npxArgv, parseLaunch, toolRunArgs, type UvEnvironment } from "./launch.js";
 import { NOT_ON_A_DRIVE, offDrive } from "./sandbox.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
@@ -58,7 +58,7 @@ export interface WrapOutcome {
 }
 
 /**
- * Rewrites every npx-launched stdio server so the client starts it through `mcpcage run`. An entry
+ * Rewrites every stdio server started by npx or uvx so the client starts it through `mcpcage run`. An entry
  * whose command is only named mcpcage (see mcpcageAt) is no cage: what it would start is wrapped as
  * an npx entry is, as `protect --fix` does. It was skipped as "already wrapped" for its name alone.
  * `writable` mounts the paths the servers are given writable (see wrapEntry). An entry that would
@@ -327,9 +327,14 @@ export function hostVariable(name: string, value: unknown): { to: "container" | 
  * choice. A `~/` argument becomes the absolute path that is mounted: inside the cage HOME is
  * /tmp, so a server that expands `~` itself would look in /tmp. A server given the whole disk, the
  * home directory or a directory with credentials (see sensitive.ts) is not caged at all: that mount
- * would undo the cage, so the entry stays as it is and the reason is given. A `cmd /c npx` entry on
- * Windows keeps `cmd /c` after `--`: unwrap gives it back as it was, and `run` reads the npx command
- * line in it (see cmdNpx), so mcpcage never starts cmd for it.
+ * would undo the cage, so the entry stays as it is and the reason is given. A `cmd /c npx` or
+ * `cmd /c uvx` entry on Windows keeps `cmd /c` after `--`: unwrap gives it back as it was, and `run`
+ * reads the npx or uvx command line in it (see cmdRunner), so mcpcage never starts cmd for it.
+ *
+ * A uvx entry is read with its env, as uvx reads it (see parseLaunch): one whose env makes uvx install
+ * from another index, or from a file on the host, stays as it is with the variable named. Its other
+ * variables of uv's stay in its env, where `run` reads them again at every start (UV_PYTHON is its
+ * --python there too), and reach the cage by name, where nothing reads them.
  */
 export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand; writable?: boolean }): { entry: ServerEntry } | { skip: string } {
   const type = serverType(entry);
@@ -339,10 +344,10 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
   // one (an object whose toString is null throws, one nested 10,000 levels deep runs out of stack).
   if (typeof entry.command !== "string") return { skip: "its command is not a string" };
   if (type === "mcpcage") return { skip: "already wrapped" };
-  if (type !== "npx") {
-    const cmd = Array.isArray(entry.args) ? cmdNpx([entry.command, ...entry.args]) : undefined;
-    if (cmd !== undefined && "notPlain" in cmd) return { skip: `${entry.command} /c npx: ${cmd.notPlain}: only a plain npx command line can be caged` };
-    const hint = type === "docker" ? "already containerized; `mcpcage run --image` can add pinning and audit" : "only npx servers can be caged in this version";
+  if (type !== "npx" && type !== "uvx") {
+    const cmd = Array.isArray(entry.args) ? cmdRunner([entry.command, ...entry.args]) : undefined;
+    if (cmd !== undefined && "notPlain" in cmd) return { skip: `${entry.command} /c ${cmd.runner}: ${cmd.notPlain}: only a plain ${cmd.runner} command line can be caged` };
+    const hint = type === "docker" ? "already containerized; `mcpcage run --image` can add pinning and audit" : "only npx and uvx servers can be caged in this version";
     return { skip: `${entry.command}: ${hint}` };
   }
   const given: unknown = entry.args ?? [];
@@ -351,13 +356,14 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
   const args = given as string[];
   let serverArgs: string[];
   try {
-    serverArgs = parseLaunch([entry.command, ...args]).args;
+    serverArgs = parseLaunch([entry.command, ...args], undefined, process.platform, entryEnvironment(entry)).args;
   } catch (error) {
     // `mcpcage run` would refuse this command line at every start: better to leave the entry as it is.
     return { skip: (error as Error).message };
   }
-  // The server's own arguments end the list, after npx's flags and the package, which is never mounted.
-  const npxPart = args.slice(0, args.length - serverArgs.length);
+  // The server's own arguments end the list, after the runner's flags and the package (for uvx, also
+  // the values of --from and --with), which are never mounted.
+  const runnerPart = args.slice(0, args.length - serverArgs.length);
   const paths = serverArgs.map((arg) => hostPath(arg));
   const machine = thisMachine();
   for (const path of paths) {
@@ -391,7 +397,7 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
   const mountFlags = [...new Set(paths.filter((path): path is string => path !== undefined))].flatMap((path) => ["--mount", mode(path)]);
   const server = serverArgs.map((arg, index) => paths[index] ?? arg);
   const launcher = launcherOf(options.command);
-  const wrapped: ServerEntry = { ...entry, command: launcher.command, args: [...launcher.args, "run", ...envFlags, ...mountFlags, "--", entry.command, ...npxPart, ...server] };
+  const wrapped: ServerEntry = { ...entry, command: launcher.command, args: [...launcher.args, "run", ...envFlags, ...mountFlags, "--", entry.command, ...runnerPart, ...server] };
   if (isJsonObject(entry.env)) wrapped.env = Object.fromEntries(env) as Record<string, string>;
   return { entry: wrapped };
 }
@@ -403,6 +409,11 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
  */
 function envFlag(variable: string): string[] {
   return variable.startsWith("-") ? [`--env=${variable}`] : ["--env", variable];
+}
+
+/** The variables of an entry's env, as uvx reads them once the client starts it with them (see UvEnvironment). */
+export function entryEnvironment(entry: ServerEntry): UvEnvironment {
+  return [{ where: "its env", variables: entry.env }];
 }
 
 /** The command and first arguments that start mcpcage as `command` says: on Windows node.exe and its cli.js (see nodeScript). */

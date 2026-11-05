@@ -112,3 +112,27 @@ describe("one entry whose rewrite fails", () => {
     });
   });
 });
+
+describe("a file with uvx servers", () => {
+  it("is wrapped and unwrapped back byte for byte, an entry uvx would install from another index left as it is", () => {
+    const { dir, file } = configFile();
+    const servers = {
+      time: { command: "uvx", args: ["mcp-server-time", "--local-timezone", "UTC"], env: { UV_PYTHON: "3.12" } },
+      docs: { command: "uv", args: ["tool", "run", "--from", "awslabs.aws-documentation-mcp-server@latest", "awslabs.aws-documentation-mcp-server"] },
+      corp: { command: "uvx", args: ["corp-mcp"], env: { UV_INDEX_URL: "https://user:s3cret@pypi.corp.example/simple" } },
+      ...memory.mcpServers,
+    };
+    const original = `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`;
+    writeFileSync(file, original);
+    const outcome = wrapConfig(file, { dryRun: false, command: "/opt/mcpcage" });
+    expect(outcome.changed.map((change) => change.name)).toEqual(["time", "docs", "memory"]);
+    expect(outcome.skipped).toEqual([{ name: "corp", reason: "its env sets UV_INDEX_URL: uvx installs from another index there" }]);
+    const written = JSON.parse(readFileSync(file, "utf8")).mcpServers;
+    expect(written.time).toEqual({ command: "/opt/mcpcage", args: ["run", "--env", "UV_PYTHON", "--", "uvx", "mcp-server-time", "--local-timezone", "UTC"], env: { UV_PYTHON: "3.12" } });
+    expect(written.docs).toEqual({ command: "/opt/mcpcage", args: ["run", "--", "uv", ...servers.docs.args] });
+    expect(written.corp).toEqual(servers.corp);
+    expect(leftovers(dir)).toEqual([]);
+    unwrapConfig(file, { dryRun: false });
+    expect(readFileSync(file, "utf8")).toBe(original);
+  });
+});

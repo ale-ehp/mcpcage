@@ -75,6 +75,28 @@ const npxEntry = fc
     return entry;
   });
 
+/** A uvx entry as PyPI servers' READMEs write them: uvx or uv tool run, flags the cage takes, a package or --from, then the server's arguments. */
+const uvxEntry = fc
+  .record({
+    runner: fc.constantFrom(["uvx"], ["/Users/me/.local/bin/uvx"], ["uv", "tool", "run"]),
+    flags: fc.array(fc.constantFrom(["--python", "3.12"], ["-p", "3.11"], ["--with", "tzdata"], ["-q"], ["--offline"], ["--refresh"], ["--isolated"], ["--prerelease", "allow"], ["--cache-dir", "/tmp"], ["--refresh-package", "x"]), { maxLength: 3 }),
+    spec: fc.constantFrom(["mcp-server-time"], ["mcp-server-time@2026.1.26"], ["mcp-server-time@latest"], ["pkg[extra]>=1"], ["--from", "awslabs.aws-api-mcp-server@latest", "awslabs.aws-api-mcp-server"], ["--from", "mcp-server-git", "python"]),
+    server: fc.array(serverArg, { maxLength: 5 }),
+    env: fc.oneof(
+      { weight: 4, arbitrary: fc.array(fc.tuple(fc.oneof(fc.constantFrom(...ENV_NAMES, "UV_PYTHON", "UV_CACHE_DIR", "UV_NO_PROGRESS", "UV_INDEX_URL"), anyText(6)), envValue), { maxLength: 6 }).map((pairs) => Object.fromEntries(pairs)) },
+      { weight: 1, arbitrary: fc.constant(undefined) },
+    ),
+  })
+  .map(({ runner, flags, spec, server, env }) => {
+    const [command, ...first] = runner as readonly string[] as [string, ...string[]];
+    // --python (or -p) and --prerelease once at most, as uv wants them.
+    const key = (flag: readonly string[]) => (flag[0] === "-p" ? "--python" : flag[0]!);
+    const once = flags.filter((flag, index) => !["--python", "--prerelease"].includes(key(flag)) || flags.findIndex((other) => key(other) === key(flag)) === index);
+    const entry: ServerEntry = { command, args: [...first, ...once.flat(), ...spec, ...server] };
+    if (env !== undefined) entry.env = env as Record<string, string>;
+    return entry;
+  });
+
 /** What unwrap should give back: the entry with its host-only variables dropped, and its paths as wrap mounts them. */
 function expectedBack(entry: ServerEntry): ServerEntry {
   const expected: ServerEntry = { ...entry };
@@ -104,6 +126,30 @@ describe("configuration rewriting, fuzzed", () => {
           // The same JSON: the variables wrap moved into the arguments come back last in env.
           const expected = expectedBack(entry);
           expect(jsonEqual(restored, expected), `${JSON.stringify(restored)}\n  is not\n${JSON.stringify(expected)}`).toBe(true);
+        }),
+        1000,
+      );
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "gives back the uvx entry wrap was given, and mounts the server's own paths only, never the values of uvx's flags",
+    () => {
+      check(
+        fc.property(uvxEntry, fc.boolean(), (entry, writable) => {
+          const wrapped = wrapEntry(entry, { command: "mcpcage", writable });
+          fc.pre(!("skip" in wrapped));
+          if ("skip" in wrapped) return;
+          const args = wrapped.entry.args as string[];
+          const separator = args.indexOf("--");
+          const server = parseLaunch(args.slice(separator + 1), undefined, process.platform).args;
+          const mounts = args.slice(0, separator).flatMap((arg, index, own) => (own[index - 1] === "--mount" ? [arg.replace(/:(?:rw|ro)$/, "")] : []));
+          for (const mount of mounts) expect(server, `${mount} is not one of the server's arguments`).toContain(mount);
+          expect(moveHostEnv(wrapped.entry)).toBeUndefined();
+          const back = unwrapEntry(wrapped.entry);
+          const expected = expectedBack(entry);
+          expect(jsonEqual((back as { entry: ServerEntry }).entry, expected), `${JSON.stringify(back)}\n  is not\n${JSON.stringify(expected)}`).toBe(true);
         }),
         1000,
       );

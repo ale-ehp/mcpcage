@@ -10,7 +10,7 @@ import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
 import { banner } from "./banner.js";
 import { discoverConfigs } from "./clients.js";
-import { RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
+import { entryEnvironment, RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
 import { commandOnPath, installedScript, runningFrom, temporaryMcpcage, type McpcageCommand } from "./installed.js";
 import { npxArgv, parseLaunch, serverIdFor, startsUv, type LaunchSpec } from "./launch.js";
@@ -35,7 +35,7 @@ Usage:
   mcpcage run --image <image> [options] -- [args...]     cage an already containerized server
   mcpcage prepare [options] -- npx -y <package> [args]   build and pin the sandbox image without starting it
   mcpcage prepare [options] -- uvx <package> [args]      the same for a PyPI server
-  mcpcage wrap <config.json> [--dry-run] [--no-build]    route a client's npx servers through mcpcage
+  mcpcage wrap <config.json> [--dry-run] [--no-build]    route a client's npx and uvx servers through mcpcage
   mcpcage unwrap <config.json> [--dry-run]               restore the original commands
   mcpcage protect [--inspect] [--fix] [options]          find every MCP configuration and show what is exposed
   mcpcage diff <server-id>                               show tool changes waiting for approval
@@ -143,11 +143,16 @@ function parseRun(argv: string[]) {
  * always was, as uv itself runs it, under the id it had before mcpcage built uvx servers: read as a
  * PyPI server, it would get another id, under which its approved tools would be trusted again as a
  * new server's, and a flag the cage refuses would stop a line that runs on the host anyway.
+ *
+ * A uvx line is read with mcpcage's own environment, which is the client's plus the entry's env, as
+ * uvx would read it there: the same rules wrap and protect apply to the entry's env (see
+ * parseLaunch), so a variable that makes uvx install from another index stops the server here too,
+ * and UV_PYTHON is its --python.
  */
 function launchSpec(server: string[], image: string | undefined, noSandbox: boolean): LaunchSpec {
   const [command] = server;
   if (noSandbox && image === undefined && command !== undefined && startsUv(server)) return { kind: "host", command, args: server.slice(1) };
-  return parseLaunch(server, image);
+  return parseLaunch(server, image, process.platform, [{ where: "the environment mcpcage runs in", variables: process.env }]);
 }
 
 /** Builds and pins the sandbox image without starting the server (wrap does this for every server). */
@@ -299,7 +304,8 @@ function buildImages(changes: Array<{ name: string; after: ServerEntry }>): numb
   let status = 0;
   for (const change of changes) {
     const args = change.after.args ?? [];
-    const spec = parseLaunch(args.slice(args.indexOf("--") + 1));
+    // With the entry's env, which the client gives mcpcage: its UV_PYTHON is the Python `run` builds for.
+    const spec = parseLaunch(args.slice(args.indexOf("--") + 1), undefined, process.platform, entryEnvironment(change.after));
     if (spec.kind !== "npm" && spec.kind !== "pypi") continue;
     try {
       const prepared = prepareSandbox({

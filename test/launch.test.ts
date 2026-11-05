@@ -382,3 +382,87 @@ describe("uvx command lines", () => {
     expect(serverIdFor({ kind: "host", command: "/usr/local/bin/uvx", args: ["mcp-server-time"] })).toBe("uvx-82cf2188");
   });
 });
+
+describe("uv's environment on a uvx line", () => {
+  const time = (changes: object = {}) => ({ kind: "pypi", project: "mcp-server-time", requirement: "mcp-server-time", command: "mcp-server-time", with: [], resolution: {}, args: [], ...changes });
+  /** `uvx [words]` started with `env`, an entry's env as a client gives it. */
+  const started = (env: unknown, words: string[] = ["mcp-server-time"], platform: NodeJS.Platform = "linux") =>
+    parseLaunch(["uvx", ...words], undefined, platform, [{ where: "its env", variables: env }]);
+
+  it("refuses each variable that makes uvx install from another index, from a file on the machine or from source, naming it and never its value", () => {
+    const secret = "https://user:s3cret-t0ken@pypi.corp.example/simple";
+    const table: Array<[string, string]> = [
+      ...["UV_INDEX", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_FIND_LINKS", "UV_INDEX_STRATEGY", "UV_KEYRING_PROVIDER", "UV_TORCH_BACKEND"].map((name): [string, string] => [name, "uvx installs from another index there"]),
+      ...["UV_CONFIG_FILE", "UV_CONSTRAINT", "UV_OVERRIDE", "UV_BUILD_CONSTRAINT", "UV_ENV_FILE"].map((name): [string, string] => [name, "uvx reads a file on your machine there, which the cage does not read"]),
+      ["UV_NO_BINARY", "uvx builds packages from source there, and the cage installs PyPI wheels only"],
+      ["UV_NO_BINARY_PACKAGE", "uvx builds packages from source there, and the cage installs PyPI wheels only"],
+      ["UV_INSECURE_HOST", "uvx turns off certificate checks for a host there, which only another index or a proxy needs"],
+    ];
+    for (const [name, why] of table) {
+      let message = "";
+      try {
+        started({ API_KEY: "x", [name]: secret });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message, name).toBe(`its env sets ${name}: ${why}`);
+      expect(message).not.toContain("s3cret");
+      // Any value, a number or a list as a configuration file may hold one, and through uv tool run and --from too.
+      expect(() => started({ [name]: 1 }), name).toThrow(`its env sets ${name}: ${why}`);
+      expect(() => parseLaunch(["uv", "tool", "run", "--from", "mcp-server-time", "mcp-server-time"], undefined, "linux", [{ where: "its env", variables: { [name]: "x" } }]), name).toThrow(`its env sets ${name}:`);
+    }
+    // The exact text protect and wrap show for the most common one.
+    expect(() => started({ UV_INDEX_URL: secret })).toThrow(new Error("its env sets UV_INDEX_URL: uvx installs from another index there"));
+  });
+
+  it("leaves alone what uv does not read: an empty value, a name in another case off Windows, UV_NO_INDEX, and the variables that tune uv on the host", () => {
+    // uv 0.13.7 ignored UV_INDEX_URL= and installed from PyPI with UV_NO_INDEX=1.
+    expect(started({ UV_INDEX_URL: "", UV_PYTHON: "", UV_NO_INDEX: "1" })).toEqual(time());
+    expect(started({ uv_index_url: "https://x.example/simple" })).toEqual(time());
+    const tuning = { UV_CACHE_DIR: "/tmp/c", UV_NO_PROGRESS: "1", UV_LINK_MODE: "copy", UV_PYTHON_PREFERENCE: "only-system", UV_NO_CACHE: "1", UV_OFFLINE: "1", UV_NO_CONFIG: "1", UV_RESOLUTION: "highest", UV_NO_BUILD_ISOLATION: "1" };
+    expect(started(tuning)).toEqual(time());
+    // No env at all, or one that is not an object, as configuration files are not type-checked.
+    for (const env of [undefined, null, "UV_INDEX_URL=x", ["UV_INDEX_URL"], 3]) expect(started(env), JSON.stringify(env)).toEqual(time());
+  });
+
+  it("refuses UV_RESOLUTION but for highest, uv's default: lowest made uv install another version than the cage", () => {
+    for (const value of ["lowest", "lowest-direct", "Highest", 1]) {
+      expect(() => started({ UV_RESOLUTION: value }), JSON.stringify(value)).toThrow(new Error("its env sets UV_RESOLUTION: uvx chooses other versions there than the newest, which the cage installs"));
+    }
+  });
+
+  it("reads UV_PYTHON, UV_PRERELEASE and UV_EXCLUDE_NEWER as their flags, with the same values, the flag winning as in uv", () => {
+    expect(started({ UV_PYTHON: "3.12", UV_PRERELEASE: "allow", UV_EXCLUDE_NEWER: "P7D" })).toEqual(time({ python: "3.12", resolution: { prerelease: "allow", excludeNewer: "P7D" } }));
+    expect(started({ UV_PYTHON: "3.11.4" })).toEqual(time({ python: "3.11.4" }));
+    // The flag wins, whatever the variable says: uv does not read the variable then.
+    expect(started({ UV_PYTHON: "pypy3.10", UV_PRERELEASE: "sometimes", UV_EXCLUDE_NEWER: "1 year" }, ["--python", "3.13", "--prerelease", "explicit", "--exclude-newer", "2026-01-01", "mcp-server-time"])).toEqual(
+      time({ python: "3.13", resolution: { prerelease: "explicit", excludeNewer: "2026-01-01" } }),
+    );
+    const python = "its env sets UV_PYTHON to another value than a CPython version from 3.10 to 3.15 (such as 3.12 or 3.12.4), the only ones the cage runs";
+    for (const value of ["3.9", "pypy3.10", "/usr/bin/python3", ">=3.12", "3.12t", 3.12, ["3.12"]]) expect(() => started({ UV_PYTHON: value }), JSON.stringify(value)).toThrow(new Error(python));
+    expect(() => started({ UV_PRERELEASE: "sometimes" })).toThrow(new Error("its env sets UV_PRERELEASE to another value than one of disallow, allow, if-necessary, explicit, if-necessary-or-explicit"));
+    expect(() => started({ UV_EXCLUDE_NEWER: "1 year" })).toThrow(
+      new Error("its env sets UV_EXCLUDE_NEWER to another value than a date (2026-01-31), a time with its zone (2026-01-31T12:00:00Z) or a duration (30 days, P30D)"),
+    );
+    // The Python and the resolution change the lock, not the server's id.
+    expect(serverIdFor(started({ UV_PYTHON: "3.12" }))).toBe(serverIdFor(started({})));
+  });
+
+  it("compares names without case on Windows, as uv's reads there do, and says the name as written", () => {
+    expect(() => started({ Uv_Index_Url: "x" }, ["mcp-server-time"], "win32")).toThrow(new Error("its env sets Uv_Index_Url: uvx installs from another index there"));
+    expect(started({ uv_python: "3.12" }, ["mcp-server-time"], "win32")).toEqual(time({ python: "3.12" }));
+    expect(parseLaunch(["cmd", "/c", "uvx", "mcp-server-time"], undefined, "win32", [{ where: "its env", variables: { UV_PYTHON: "3.14" } }])).toEqual(time({ python: "3.14" }));
+  });
+
+  it("takes each variable from the last layer that sets it, and names that layer", () => {
+    const layers = (user: object, entry: object) => parseLaunch(["uvx", "mcp-server-time"], undefined, "linux", [{ where: "your environment", variables: user }, { where: "its env", variables: entry }]);
+    expect(layers({ UV_PYTHON: "3.11" }, { UV_PYTHON: "3.12" })).toEqual(time({ python: "3.12" }));
+    expect(layers({ UV_PYTHON: "3.11" }, {})).toEqual(time({ python: "3.11" }));
+    expect(() => layers({ UV_INDEX_URL: "x" }, {})).toThrow(new Error("your environment sets UV_INDEX_URL: uvx installs from another index there"));
+    expect(() => layers({ UV_INDEX_URL: "x" }, { UV_INDEX_URL: "y" })).toThrow(new Error("its env sets UV_INDEX_URL: uvx installs from another index there"));
+    // Set empty by the entry, it is unset for uv, whatever the client's environment gave.
+    expect(layers({ UV_INDEX_URL: "x" }, { UV_INDEX_URL: "" })).toEqual(time());
+    // An npx line reads none of it.
+    expect(parseLaunch(["npx", "-y", "x"], undefined, "linux", [{ where: "its env", variables: { UV_INDEX_URL: "x" } }])).toEqual({ kind: "npm", packageName: "x", versionRange: undefined, args: [] });
+  });
+});

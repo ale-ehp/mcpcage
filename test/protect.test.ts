@@ -497,7 +497,8 @@ describe("wrapping one entry", () => {
       expect(serverType({ command: "uv", args }), JSON.stringify(args)).toBe("other");
     }
     expect(serverType({ command: "uv", args: "tool run x" as unknown as string[] })).toBe("other");
-    expect(wrapEntry({ command: "uv", args: ["tool", "run", "mcp-server-time"] }, { command: "mcpcage" })).toEqual({ skip: "uv: only npx servers can be caged in this version" });
+    expect(wrapEntry({ command: "uv", args: ["tool", "run", "mcp-server-time"] }, { command: "mcpcage" })).toEqual({ entry: { command: "mcpcage", args: ["run", "--", "uv", "tool", "run", "mcp-server-time"] } });
+    expect(wrapEntry({ command: "uv", args: ["run", "--with", "mcp-clickhouse", "mcp-clickhouse"] }, { command: "mcpcage" })).toEqual({ skip: "uv: only npx and uvx servers can be caged in this version" });
     expect(serverType({ command: "/usr/local/bin/docker" })).toBe("docker");
     expect(serverType({ command: "node" })).toBe("other");
     expect(serverType({ command: "/opt/mcpcage", args: ["run", "--", "npx", "x"] })).toBe("mcpcage");
@@ -578,10 +579,10 @@ describe("wrapping one entry", () => {
       expect(cmdNpx(argv, "win32")).toBeUndefined();
     }
     expect(cmdNpx(["cmd", "/c", "npx", ...memory], "linux")).toBeUndefined();
-    // cmd /c uvx is a uvx server now, which wrap leaves as it is, with the reason it gave before.
+    // cmd /c uvx is a uvx server, which wrap cages with cmd /c kept after --.
     const blender = { command: "cmd", args: ["/c", "uvx", "mcp-for-blender"] };
     expect(serverType(blender, "win32")).toBe("uvx");
-    expect(onWindows(() => wrapEntry(blender, { command: "mcpcage" }))).toEqual({ skip: "cmd: only npx servers can be caged in this version" });
+    expect(onWindows(() => wrapEntry(blender, { command: "mcpcage" }))).toEqual({ entry: { command: "mcpcage", args: ["run", "--", "cmd", "/c", "uvx", "mcp-for-blender"] } });
   });
 
   it("writes node.exe with mcpcage's cli.js when given that form, and reads every part of such an entry after the script", () => {
@@ -2309,7 +2310,7 @@ describe("mcpcage protect", () => {
 
     const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
     const where = tilde(cursor, home);
-    expect(fix.stdout).toContain(`\nPlan\n  not changed: other in ${where}: python3: only npx servers can be caged in this version\n  cage evil in ${where}\n  cage tuned in ${where}\n`);
+    expect(fix.stdout).toContain(`\nPlan\n  not changed: other in ${where}: python3: only npx and uvx servers can be caged in this version\n  cage evil in ${where}\n  cage tuned in ${where}\n`);
     expect(fix.stdout).toContain(`  caged evil in ${where}\n  caged tuned in ${where}\n${windows ? `  caged bare in ${where}\n` : ""}  backup: ${where}.mcpcage.bak\n`);
     expect(`${fix.stdout}${fix.stderr}`).not.toContain("never-printed");
     // The npx command after "--" caged as wrap cages it: the look-alike's own options are gone, its moved env comes back as wrap moves it.

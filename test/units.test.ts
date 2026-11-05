@@ -912,17 +912,18 @@ describe("client configuration", () => {
     return file;
   }
 
-  it("cages npx servers, carries their env names and skips what it cannot cage", () => {
+  it("cages npx and uvx servers, carries their env names and skips what it cannot cage", () => {
     const file = write({
       mcpServers: {
         github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], env: { GITHUB_TOKEN: "x" } },
         time: { command: "uvx", args: ["mcp-server-time"] },
+        local: { command: "python3", args: ["server.py"] },
         remote: { url: "https://example.com/mcp" },
       },
     });
     const outcome = wrapConfig(file, { dryRun: false, command });
-    expect(outcome.changed.map((change) => change.name)).toEqual(["github"]);
-    expect(outcome.skipped.map((skip) => skip.name)).toEqual(["time", "remote"]);
+    expect(outcome.changed.map((change) => change.name)).toEqual(["github", "time"]);
+    expect(outcome.skipped.map((skip) => skip.name)).toEqual(["local", "remote"]);
     const config = JSON.parse(readFileSync(file, "utf8"));
     expect(config.mcpServers.github).toEqual({
       command: written,

@@ -123,7 +123,8 @@ describe("an entry wrap cannot cage", () => {
     }
     expect(wrapEntry({ args: ["-y", "x"] }, { command: "mcpcage" })).toEqual({ skip: "no command" });
     expect(wrapEntry({ command: "", args: ["-y", "x"] }, { command: "mcpcage" })).toEqual({ skip: "no command" });
-    expect(wrapEntry({ command: "uvx", args: ["mcp-server-time"] }, { command: "mcpcage" })).toEqual({ skip: "uvx: only npx servers can be caged in this version" });
+    expect(wrapEntry({ command: "pipx", args: ["run", "analytics-mcp"] }, { command: "mcpcage" })).toEqual({ skip: "pipx: only npx and uvx servers can be caged in this version" });
+    expect(wrapEntry({ command: "uv", args: ["run", "--with", "mcp-clickhouse", "mcp-clickhouse"] }, { command: "mcpcage" })).toEqual({ skip: "uv: only npx and uvx servers can be caged in this version" });
     expect(wrapEntry({ command: "docker", args: ["run", "-i", "mcp/time"] }, { command: "mcpcage" })).toEqual({
       skip: "docker: already containerized; `mcpcage run --image` can add pinning and audit",
     });
@@ -136,6 +137,68 @@ describe("an entry wrap cannot cage", () => {
     const dir = join(mkdtempSync(join(tmpdir(), "mcpcage-paths-")), "a:rwx", "notes");
     mkdirSync(dir, { recursive: true });
     expect(wrapEntry({ command: "npx", args: ["-y", "server", dir] }, { command: "mcpcage" })).toEqual({ entry: { command: "mcpcage", args: ["run", "--mount", dir, "--", "npx", "-y", "server", dir] } });
+  });
+});
+
+describe("a uvx entry", () => {
+  it("is wrapped as an npx entry is, the whole uvx line after --, uv tool run and cmd /c uvx included", () => {
+    expect(wrapEntry({ command: "uvx", args: ["mcp-server-time", "--local-timezone", "UTC"] }, { command: "mcpcage" })).toEqual({
+      entry: { command: "mcpcage", args: ["run", "--", "uvx", "mcp-server-time", "--local-timezone", "UTC"] },
+    });
+    const toolRun = { command: "/usr/local/bin/uv", args: ["tool", "run", "--from", "awslabs.aws-documentation-mcp-server@latest", "awslabs.aws-documentation-mcp-server"] };
+    expect(wrapEntry(toolRun, { command: "/opt/mcpcage/bin/mcpcage" })).toEqual({ entry: { command: "/opt/mcpcage/bin/mcpcage", args: ["run", "--", ...[toolRun.command, ...toolRun.args]] } });
+    // On Windows cmd /c stays after --, so that unwrap gives the entry back as it was; run never starts cmd.
+    const blender = { command: "cmd", args: ["/c", "uvx", "mcp-for-blender"] };
+    const wrapped = onWindows(() => wrapEntry(blender, { command: "mcpcage" }));
+    expect(wrapped).toEqual({ entry: { command: "mcpcage", args: ["run", "--", "cmd", "/c", "uvx", "mcp-for-blender"] } });
+    expect(onWindows(() => unwrapEntry((wrapped as { entry: ServerEntry }).entry))).toEqual({ entry: blender });
+    // A cmd line that runs more than uvx stays as it is, with the reason, as a cmd /c npx one does.
+    expect(onWindows(() => wrapEntry({ command: "cmd", args: ["/c", "uvx", "mcp-for-blender", "&", "calc"] }, { command: "mcpcage" }))).toEqual({
+      skip: "cmd /c uvx: an argument after /c has & or |, with which cmd starts another command: only a plain uvx command line can be caged",
+    });
+  });
+
+  it("mounts the paths of the server's own arguments only, never the values of uvx's flags", () => {
+    const top = realpathSync.native(mkdtempSync(join(tmpdir(), "mcpcage-uvx-")));
+    const data = join(top, "data");
+    const cache = join(top, "uv-cache");
+    mkdirSync(data);
+    mkdirSync(cache);
+    const entry = { command: "uvx", args: ["--cache-dir", cache, "--python", "3.12", "--with", "tzdata", "--from", "mcp-server-git==2026.1.14", "mcp-server-git", "--repository", data] };
+    expect(wrapEntry(entry, { command: "mcpcage" })).toEqual({ entry: { command: "mcpcage", args: ["run", "--mount", data, "--", "uvx", ...entry.args] } });
+    expect(wrapEntry(entry, { command: "mcpcage", writable: true })).toEqual({ entry: { command: "mcpcage", args: ["run", "--mount", `${data}:rw`, "--", "uvx", ...entry.args] } });
+  });
+
+  it("gives the cage its env by name, moves what acts on the host, and keeps uv's own variables in its env", () => {
+    const env = { API_KEY: "sk-live-0123456789abcdef", NODE_OPTIONS: "--import ./x.mjs", UV_PYTHON: "3.12", UV_CACHE_DIR: "/tmp/uv", HOME: "/tmp/empty" };
+    const wrapped = wrapEntry({ command: "uvx", args: ["mcp-server-fetch"], env }, { command: "mcpcage" });
+    expect(wrapped).toEqual({
+      entry: {
+        command: "mcpcage",
+        args: ["run", "--env", "API_KEY", "--env", "NODE_OPTIONS=--import ./x.mjs", "--env", "UV_PYTHON", "--env", "UV_CACHE_DIR", "--", "uvx", "mcp-server-fetch"],
+        env: { API_KEY: env.API_KEY, UV_PYTHON: "3.12", UV_CACHE_DIR: "/tmp/uv" },
+      },
+    });
+    // unwrap gives the entry back, but HOME, which wrap drops.
+    const { HOME: _home, ...back } = env;
+    expect(unwrapEntry((wrapped as { entry: ServerEntry }).entry)).toEqual({ entry: { command: "uvx", args: ["mcp-server-fetch"], env: { ...back, NODE_OPTIONS: env.NODE_OPTIONS } } });
+  });
+
+  it("stays as it is when its env makes uvx install from another index, naming the variable and never its value", () => {
+    const index = "https://user:s3cret@pypi.corp.example/simple";
+    expect(wrapEntry({ command: "uvx", args: ["mcp-server-time"], env: { UV_INDEX_URL: index } }, { command: "mcpcage" })).toEqual({
+      skip: "its env sets UV_INDEX_URL: uvx installs from another index there",
+    });
+    expect(wrapEntry({ command: "uvx", args: ["mcp-server-time"], env: { UV_PYTHON: "pypy3.10" } }, { command: "mcpcage" })).toEqual({
+      skip: "its env sets UV_PYTHON to another value than a CPython version from 3.10 to 3.15 (such as 3.12 or 3.12.4), the only ones the cage runs",
+    });
+    // A flag the cage refuses, with the reason run would give at every start.
+    expect(wrapEntry({ command: "uvx", args: ["--index-url", index, "mcp-server-time"] }, { command: "mcpcage" })).toEqual({
+      skip: "uvx --index-url: installs from another index than PyPI, and the cage builds from PyPI only",
+    });
+    expect(wrapEntry({ command: "uvx", args: ["--from", "git+https://github.com/x/y", "y"] }, { command: "mcpcage" })).toEqual({
+      skip: "uvx --from: builds or installs code from outside PyPI, and the cage installs PyPI wheels only",
+    });
   });
 });
 

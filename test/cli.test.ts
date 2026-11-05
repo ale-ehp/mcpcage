@@ -356,6 +356,23 @@ describe("cli", () => {
     expect(refused.stderr).toBe("mcpcage: uvx --index-url: installs from another index than PyPI, and the cage builds from PyPI only\n");
   });
 
+  it("reads uv's variables in its own environment as wrap reads them in an entry's env, before Docker is needed", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
+    const index = "https://user:s3cret@pypi.example/simple";
+    for (const command of ["run", "prepare"]) {
+      const refused = mcpcageWithEnv(fakeUserEnv(join(top, "home"), join(top, "cage"), { ...noDocker(top), UV_INDEX_URL: index }), command, "--", "uvx", "mcp-server-time");
+      expect(refused.code).toBe(1);
+      expect(refused.stderr).toBe("mcpcage: the environment mcpcage runs in sets UV_INDEX_URL: uvx installs from another index there\n");
+      const python = mcpcageWithEnv(fakeUserEnv(join(top, "home"), join(top, "cage"), { ...noDocker(top), UV_PYTHON: "pypy3.10" }), command, "--", "uvx", "mcp-server-time");
+      expect(python.stderr).toBe(
+        "mcpcage: the environment mcpcage runs in sets UV_PYTHON to another value than a CPython version from 3.10 to 3.15 (such as 3.12 or 3.12.4), the only ones the cage runs\n",
+      );
+      // A valid one goes on to the build, which needs Docker.
+      const valid = mcpcageWithEnv(fakeUserEnv(join(top, "home"), join(top, "cage"), { ...noDocker(top), UV_PYTHON: "3.12", UV_CACHE_DIR: top }), command, "--", "uvx", "mcp-server-time");
+      expect(valid.stderr).toMatch(/^mcpcage: Docker is required to cage a server /);
+    }
+  });
+
   it.runIf(process.platform !== "win32")("starts a uvx line with --no-sandbox as the host command it was, under the id it had", () => {
     const home = freshHome();
     const dir = mkdtempSync(join(tmpdir(), "mcpcage-uvx-"));
@@ -437,7 +454,7 @@ describe("what wrap and unwrap print", () => {
     expect(wrapped.code).toBe(0);
     expect(wrapped.stdout).not.toMatch(RAW_CONTROL);
     expect(wrapped.stdout).toContain(`  caged notes${SPELLED}: ${written().line} run -- npx -y pkg-a x${SPELLED}\n`);
-    expect(wrapped.stdout).toContain(`  skipped time${SPELLED}: uvx${SPELLED}: only npx servers can be caged in this version\n`);
+    expect(wrapped.stdout).toContain(`  skipped time${SPELLED}: uvx${SPELLED}: only npx and uvx servers can be caged in this version\n`);
 
     writeFileSync(file, JSON.stringify({ mcpServers: { [`back${HOSTILE}`]: { command: "mcpcage", args: ["run", "--", "npx", "-y", `pkg${HOSTILE}`] }, [`odd${HOSTILE}`]: { command: "mcpcage", args: ["run"] } } }));
     const unwrapped = mcpcage(home, "unwrap", file, "--dry-run");
