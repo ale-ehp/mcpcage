@@ -1,7 +1,7 @@
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { describeViolation, isToolList, jsonChanges, pinTools, type ToolDefinition, type Violation } from "../src/manifest.js";
+import { checkFirstListing, describeViolation, isToolList, jsonChanges, pinTools, type ToolDefinition, type Violation } from "../src/manifest.js";
 import { approvePending, listServers, loadPin, loadPending, savePending, savePin } from "../src/pinstore.js";
 import { asStored, freshHome } from "./helpers.js";
 
@@ -24,6 +24,22 @@ describe("a tools/list answer", () => {
     expect(isToolList([{ name: "read" }, { name: "" }])).toBe(true);
     for (const value of [{ tools: [] }, "read", null, 3]) expect(isToolList(value), JSON.stringify(value)).toBe(false);
     for (const entry of [null, "read", 7, {}, { name: 1 }, { name: null }]) expect(isToolList([{ name: "ok" }, entry]), JSON.stringify(entry)).toBe(false);
+  });
+});
+
+describe("the first listing", () => {
+  it("lets a definition repeat unchanged, and calls a name repeated with another a change, and every other new", () => {
+    const a = { name: "a", description: "one" };
+    const b = { name: "b" };
+    expect(checkFirstListing([a, { ...a }, b])).toEqual([
+      { kind: "new-tool", name: "a", after: a },
+      { kind: "new-tool", name: "b", after: b },
+    ]);
+    const changed = { name: "a", description: "two" };
+    expect(checkFirstListing([a, changed, b])).toEqual([
+      { kind: "changed-tool", name: "a", before: a, after: changed },
+      { kind: "new-tool", name: "b", after: b },
+    ]);
   });
 });
 
