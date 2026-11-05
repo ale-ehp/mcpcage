@@ -3,7 +3,13 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ale-ehp/mcpcage/badge)](https://scorecard.dev/viewer/?uri=github.com/ale-ehp/mcpcage)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16366/badge)](https://www.bestpractices.dev/projects/16366)
 
-**Run any MCP server in a cage: tool definitions pinned, hidden instructions explained, calls audited, the server sandboxed in a hardened container.**
+**A cage for your AI assistant's plugins.**
+
+mcpcage puts your AI assistant's plugins in a locked box. Each plugin does its job and nothing else, and if it
+changes behind your back, it is blocked. It works with Claude, Cursor, VS Code and Copilot. Without mcpcage,
+their plugins can read your files and passwords and send them anywhere. With mcpcage they can do that only if
+you allow it. Both protections start together, with one command, on the assistants you already use. These
+plugins are called MCP servers.
 
 ![mcpcage demo: a stolen key stopped, a rug pull blocked and explained, exposed servers found](docs/demo.webp)
 
