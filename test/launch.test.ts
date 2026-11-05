@@ -462,6 +462,12 @@ describe("uv's environment on a uvx line", () => {
     expect(() => layers({ UV_INDEX_URL: "x" }, { UV_INDEX_URL: "y" })).toThrow(new Error("its env sets UV_INDEX_URL: uvx installs from another index there"));
     // Set empty by the entry, it is unset for uv, whatever the client's environment gave.
     expect(layers({ UV_INDEX_URL: "x" }, { UV_INDEX_URL: "" })).toEqual(time());
+    // The user's own UV_CONFIG_FILE names their settings, which uv-settings.ts looks at for an index; an entry's is refused.
+    const own = (user: object, entry: object) =>
+      parseLaunch(["uvx", "mcp-server-time"], undefined, "linux", [{ where: "your environment", variables: user, own: true }, { where: "its env", variables: entry }]);
+    expect(own({ UV_CONFIG_FILE: "/home/me/uv.toml" }, {})).toEqual(time());
+    expect(() => own({}, { UV_CONFIG_FILE: "/tmp/x.toml" })).toThrow(new Error("its env sets UV_CONFIG_FILE: uvx reads a file on your machine there, which the cage does not read"));
+    expect(() => own({ UV_CONSTRAINT: "/home/me/c.txt" }, {})).toThrow(new Error("your environment sets UV_CONSTRAINT: uvx reads a file on your machine there, which the cage does not read"));
     // An npx line reads none of it.
     expect(parseLaunch(["npx", "-y", "x"], undefined, "linux", [{ where: "its env", variables: { UV_INDEX_URL: "x" } }])).toEqual({ kind: "npm", packageName: "x", versionRange: undefined, args: [] });
   });

@@ -12,7 +12,8 @@ import { readJson, writeJson } from "./pinstore.js";
 import { preparePypiImage } from "./pypi.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
-import { WINDOWS_ENV, windowsEnv, windowsSources } from "./windows-places.js";
+import { uvSettingsReason } from "./uv-settings.js";
+import { WINDOWS_ENV, windowsPlaces } from "./windows-places.js";
 
 /**
  * Base images, pinned by digest so a build today and a build next month start from the same bytes.
@@ -92,6 +93,13 @@ export function dockerAvailable(): { ok: boolean; version?: string; error?: stri
 
 /** Builds (or reuses) the server image and returns the hardened `docker run` command. */
 export function prepareSandbox(options: SandboxOptions): Prepared {
+  // uvx would install a PyPI server from the index the user's uv settings name, and the cage builds
+  // from PyPI only: refused first, as protect and wrap leave such an entry (see uv-settings.ts), and
+  // at every start, since the settings can change after the entry was caged.
+  if (options.spec.kind === "pypi") {
+    const reason = uvSettingsReason();
+    if (reason !== undefined) throw new Error(reason);
+  }
   const docker = dockerAvailable();
   if (!docker.ok) {
     // Fail closed: never fall back to running the server on the host.
@@ -1008,14 +1016,6 @@ function trustedEnv(first: string[], byName: readonly string[] = []): NodeJS.Pro
   // Made at once: assigned one by one, a variable named __proto__ (`--env __proto__`) would set the
   // object's prototype instead, and docker would not have it.
   return Object.fromEntries(env);
-}
-
-let asked: Record<string, string | undefined> | undefined;
-
-/** Windows' places on this machine (see windowsEnv), asked once: the registry takes a program for each key. */
-function windowsPlaces(): Record<string, string | undefined> {
-  asked ??= windowsEnv(windowsSources());
-  return asked;
 }
 
 /** The absolute directories of mcpcage's PATH: a relative one depends on the directory mcpcage was started in. */

@@ -161,9 +161,12 @@ const PYTHON_VERSION = /^3\.1[0-5](?:\.(?:0|[1-9][0-9]{0,2}))?$/;
  * The variables a uvx command line starts with, by where they are set: each layer adds its own to
  * those before it and wins over them, as a client adds an entry's `env` to its own environment.
  * `where` names the layer in messages ("its env"). Messages name variables, never their values,
- * which can hold a credential (an index URL with a password).
+ * which can hold a credential (an index URL with a password). `own` marks the user's own
+ * environment, where UV_CONFIG_FILE names the user's settings file, which uvx reads in place of their
+ * uv.toml: that file is looked at for an index as the uv.toml is (see uv-settings.ts), where the same
+ * variable in an entry's env, a file the entry chose, is refused.
  */
-export type UvEnvironment = ReadonlyArray<{ where: string; variables: unknown }>;
+export type UvEnvironment = ReadonlyArray<{ where: string; variables: unknown; own?: boolean }>;
 
 /**
  * The variables of uv's environment that make uvx take its packages from somewhere else than PyPI's
@@ -188,12 +191,12 @@ const UV_REFUSED: ReadonlyMap<string, string> = new Map([
  * value: uv 0.13.7 ignored UV_INDEX_URL= and UV_PYTHON= alike, and so one set empty by a later layer
  * unsets what an earlier one gave.
  */
-function uvVariable(environment: UvEnvironment, name: string, platform: NodeJS.Platform): { where: string; name: string; value: unknown } | undefined {
+function uvVariable(environment: UvEnvironment, name: string, platform: NodeJS.Platform): { where: string; name: string; value: unknown; own: boolean } | undefined {
   for (const layer of [...environment].reverse()) {
     if (!isJsonObject(layer.variables)) continue;
     const written = Object.keys(layer.variables).find((key) => (platform === "win32" ? key.toUpperCase() === name : key === name));
     if (written === undefined) continue;
-    return layer.variables[written] === "" ? undefined : { where: layer.where, name: written, value: layer.variables[written] };
+    return layer.variables[written] === "" ? undefined : { where: layer.where, name: written, value: layer.variables[written], own: layer.own === true };
   }
   return undefined;
 }
@@ -210,7 +213,7 @@ function uvVariable(environment: UvEnvironment, name: string, platform: NodeJS.P
 function fromUvEnvironment(environment: UvEnvironment, platform: NodeJS.Platform, given: ReadonlyMap<string, string>): { python?: string; prerelease?: string; excludeNewer?: string } {
   for (const name of UV_REFUSED.keys()) {
     const set = uvVariable(environment, name, platform);
-    if (set !== undefined) throw new Error(`${set.where} sets ${set.name}: ${UV_REFUSED.get(name)}`);
+    if (set !== undefined && !(set.own && name === "UV_CONFIG_FILE")) throw new Error(`${set.where} sets ${set.name}: ${UV_REFUSED.get(name)}`);
   }
   const resolution = uvVariable(environment, "UV_RESOLUTION", platform);
   if (resolution !== undefined && resolution.value !== "highest") {

@@ -1764,11 +1764,13 @@ describe("mcpcage protect", () => {
     expect(line("remote")).toMatch(/^  remote {8}https:\/\/mcp\.example\.com\/mcp {39}remote, nothing to cage$/);
     expect(out).toContain(`Claude Code  ${native("~/.claude.json")} (user)\n`);
     expect(line("notes")).toMatch(new RegExp(`^  notes {9}${literal(byName(machine.installed))} run --mount ${literal(machine.notes)} -- npx -y notes-mcp +caged$`));
-    expect(line("time")).toMatch(/^  time {10}uvx mcp-server-time +uvx, not supported yet$/);
+    // uvx runs on the host with your permissions, as npx does: counted, and named with its package.
+    expect(line("time")).toMatch(/^  time {10}uvx mcp-server-time +NOT CAGED$/);
+    expect(out).toContain(`${line("time")}\n                package: mcp-server-time (PyPI)\n`);
     expect(out).toContain(`Claude Code  ${native("~/.claude.json")} (project ${project})\n  proj-npx `);
     expect(line("proj-npx")).toMatch(/NOT CAGED$/);
     expect(out).toContain(`Claude Code  ${native("~/.claude.json")} (project /Users/someone/other)\n`);
-    expect(line("local-node")).toMatch(/node, not npx: cannot be caged yet$/);
+    expect(line("local-node")).toMatch(/node, not npx or uvx: cannot be caged yet$/);
     expect(out).not.toContain("/Users/someone/empty"); // a project without servers is not listed
     expect(out).toContain(`Claude Code  ${files.mcpJson}\n  project-tool `);
     expect(out).toContain(`Cursor  ${tilde(files.cursor, home)}\n  files `);
@@ -1790,11 +1792,11 @@ describe("mcpcage protect", () => {
       [
         "Summary",
         `  12 servers in 7 configuration files (${14 + msix.length} files checked, ${7 + msix.length} absent).`,
-        "  8 run on your machine with your permissions and no cage.          -> mcpcage protect --fix",
+        "  9 run on your machine with your permissions and no cage.          -> mcpcage protect --fix",
         "  1 keeps a secret in clear text in a configuration file.",
         "  1 can reach your whole home directory, the disk or a directory with credentials.",
         "  0 use a package with install scripts.",
-        "  3 are remote, already containerized, or started by another command: mcpcage cannot cage them yet.",
+        "  2 are remote, already containerized, or started by another command: mcpcage cannot cage them yet.",
         "  1 already runs through mcpcage.",
       ].join("\n"),
     );
@@ -1864,7 +1866,9 @@ describe("mcpcage protect", () => {
     );
     // Each reason is printed once, with the plan.
     expect(result.stdout.match(/Claude Code is running/g)).toHaveLength(1);
-    expect(result.code).toBe(1); // five npx servers are still outside the cage
+    expect(result.code).toBe(1); // five npx servers and a uvx one are still outside the cage
+    // The uvx server of ~/.claude.json is in the plan, with the command to give it by hand.
+    expect(result.stdout).toContain(`    time: ${installed} run -- uvx mcp-server-time\n`);
 
     const again = mcpcageWithEnv(machine.env, "protect", "--project", project, "--offline", "--command", installed);
     const statuses = Object.fromEntries(
@@ -1874,9 +1878,9 @@ describe("mcpcage protect", () => {
       }),
     );
     expect(statuses).toEqual({
-      filesystem: "NOT CAGED", github: "caged", notes: "caged", "proj-npx": "NOT CAGED", "project-tool": "caged", files: "caged", keys: "NOT CAGED", memory: "NOT CAGED", "vs-proj": "NOT CAGED", "devin-tool": "caged",
+      filesystem: "NOT CAGED", github: "caged", notes: "caged", time: "NOT CAGED", "proj-npx": "NOT CAGED", "project-tool": "caged", files: "caged", keys: "NOT CAGED", memory: "NOT CAGED", "vs-proj": "NOT CAGED", "devin-tool": "caged",
     });
-    expect(again.stdout).toContain("  5 run on your machine with your permissions and no cage.");
+    expect(again.stdout).toContain("  6 run on your machine with your permissions and no cage.");
     expect(again.stdout).toContain("  5 already run through mcpcage.");
     expect(again.code).toBe(1);
   });
@@ -2452,30 +2456,35 @@ describe("mcpcage protect", () => {
     chmodSync(file, 0o600);
     const text = readFileSync(file, "utf8");
 
-    const report = await scanConfigs({ locations: discoverConfigs({ platform: process.platform, home, env: {}, project }), home, offline: true, cacheDir: join(top, "cache"), npmRunner: noNpm });
+    // The user's uv setup as given, not this machine's: no variable of uv's, no uv.toml.
+    const uv = { environment: {}, settings: undefined };
+    const report = await scanConfigs({ locations: discoverConfigs({ platform: process.platform, home, env: {}, project }), home, offline: true, cacheDir: join(top, "cache"), npmRunner: noNpm, uv });
     const planned: string[] = [];
-    const plan = fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: false, dryRun: true, log: (line) => planned.push(line), home });
-    expect(plan.files.map((fixed) => fixed.changed.map((change) => change.name))).toEqual([["user-npx", "proj-npx"]]);
+    const plan = fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: false, dryRun: true, log: (line) => planned.push(line), home, uv });
+    expect(plan.files.map((fixed) => fixed.changed.map((change) => change.name))).toEqual([["user-npx", "time", "proj-npx"]]);
     const shown = native("~/.claude.json");
-    expect(planned).toEqual([`  cage user-npx in ${shown}`, `  cage proj-npx in ${shown} (project ${project})`]);
+    expect(planned).toEqual([`  cage user-npx in ${shown}`, `  cage time in ${shown}`, `  cage proj-npx in ${shown} (project ${project})`]);
     expect(readFileSync(file, "utf8")).toBe(text); // a dry run writes nothing
     // With --writable, the commands to write by hand say what each writable mount lets the server change.
     const byHand: string[] = [];
-    fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: true, dryRun: true, log: (line) => byHand.push(line), home, writable: true });
-    expect(byHand.slice(0, 3)).toEqual([
+    fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: true, dryRun: true, log: (line) => byHand.push(line), home, writable: true, uv });
+    expect(byHand.slice(0, 4)).toEqual([
       "    user-npx: /opt/mcpcage run --env ACME_TOKEN -- npx -y @acme/user-mcp",
+      "    time: /opt/mcpcage run -- uvx mcp-server-time",
       `    proj-npx (project ${project}): /opt/mcpcage run --mount ${data}:rw -- npx -y @acme/project-mcp@1.2.0 ${data}`,
       `      WARNING proj-npx can change files in ${data}, code and settings that git, editors and build tools run included (--writable)`,
     ]);
-    expect(byHand[3]).toMatch(/^ {2}not changed: Claude Code is running/);
+    expect(byHand[4]).toMatch(/^ {2}not changed: Claude Code is running/);
 
     const logged: string[] = [];
-    const outcome = fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: false, dryRun: false, log: (line) => logged.push(line), home });
+    const outcome = fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: false, dryRun: false, log: (line) => logged.push(line), home, uv });
     const after = readFileSync(file, "utf8");
     const parsed = JSON.parse(after);
     expect(parsed.mcpServers["user-npx"]).toEqual({ ...userEntry, command: "/opt/mcpcage", args: ["run", "--env", "ACME_TOKEN", "--", "npx", "-y", "@acme/user-mcp"] });
+    expect(parsed.mcpServers.time).toEqual({ ...original.mcpServers.time, command: "/opt/mcpcage", args: ["run", "--", "uvx", "mcp-server-time"] });
     expect(parsed.projects[project].mcpServers["proj-npx"]).toEqual({ ...projectEntry, command: "/opt/mcpcage", args: ["run", "--mount", data, "--", "npx", "-y", "@acme/project-mcp@1.2.0", data] });
     parsed.mcpServers["user-npx"] = userEntry;
+    parsed.mcpServers.time = original.mcpServers.time;
     parsed.projects[project].mcpServers["proj-npx"] = projectEntry;
     expect(parsed).toEqual(original); // nothing else changed
     expect(after).toMatch(/^\t"mcpServers": \{$/m);
@@ -2485,7 +2494,7 @@ describe("mcpcage protect", () => {
     expect(outcome.files[0]!.backup).toBe(`${file}.mcpcage.bak`);
     expect(readFileSync(`${file}.mcpcage.bak`, "utf8")).toBe(text);
     expect(readdirSync(home).filter((name) => name.endsWith(".tmp"))).toEqual([]);
-    expect(logged).toEqual([`  caged user-npx in ${shown}`, `  caged proj-npx in ${shown} (project ${project})`, `  backup: ${shown}.mcpcage.bak`]);
+    expect(logged).toEqual([`  caged user-npx in ${shown}`, `  caged time in ${shown}`, `  caged proj-npx in ${shown} (project ${project})`, `  backup: ${shown}.mcpcage.bak`]);
     expect(logged.join("\n")).not.toContain("acme_live_0123456789");
   });
 });
@@ -3966,5 +3975,128 @@ describe("listing a server's tools", () => {
     const text = renderReport(report, { home: dir });
     expect(text).toContain('could not inspect: the definition of "nested" is nested more than 256 levels deep, which mcpcage refuses\n');
     expect(text).toContain("could not inspect: the server lists more than 10,000 tools, which mcpcage refuses\n");
+  });
+});
+
+describe("uvx servers in protect", () => {
+  /** A fake home whose only configuration is Cursor's, holding `servers`, and the user's environment there, without any variable of uv's. */
+  function uvxHome(servers: Record<string, unknown>, extra: Record<string, string> = {}) {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-uvx-report-"));
+    const home = join(top, "home");
+    const project = join(top, "work");
+    const cage = join(top, "cage");
+    for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+    const cursor = locationsFor(home, project)("cursor", "user");
+    writeJsonFile(cursor, { mcpServers: servers });
+    const env = fakeUserEnv(home, cage, { CLAUDECODE: "1" });
+    for (const name of Object.keys(env)) if (/^UV_/i.test(name) || name === "XDG_CONFIG_DIRS") delete env[name];
+    return { top, home, project, cage, cursor, env: { ...env, ...extra } };
+  }
+  const lineOf = (text: string, name: string) => text.split("\n").find((line) => line.startsWith(`  ${name} `)) ?? "";
+  /** The detail lines under a server's line. */
+  const detailsOf = (text: string, name: string) => {
+    const lines = text.split("\n");
+    const start = lines.findIndex((line) => line.startsWith(`  ${name} `));
+    const details: string[] = [];
+    for (let index = start + 1; index < lines.length && lines[index]!.startsWith(" ".repeat(16)); index++) details.push(lines[index]!.trim());
+    return details;
+  };
+  const servers = {
+    time: { command: "uvx", args: ["mcp-server-time", "--local-timezone", "UTC"] },
+    git: { command: "uvx", args: ["--from", "git+https://github.com/acme/server", "server"] },
+    corp: { command: "uvx", args: ["corp-mcp"], env: { UV_INDEX_URL: "https://user:s3cret@pypi.corp.example/simple" } },
+    duck: { command: "uv", args: ["tool", "run", "--with", "duckduckgo-mcp-server[browser]", "duckduckgo-mcp-server"] },
+    tuned: { command: "uvx", args: ["mcp-server-fetch"], env: { NODE_OPTIONS: "--import ./x.mjs" } },
+    analytics: { command: "pipx", args: ["run", "analytics-mcp"] },
+    clickhouse: { command: "uv", args: ["run", "--with", "mcp-clickhouse", "mcp-clickhouse"] },
+  };
+
+  it("counts uvx servers as running on your machine, names each package or why it cannot be caged, and exits 1 for them", () => {
+    const machine = uvxHome(servers);
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline");
+    expect(result.stderr).toBe("");
+    const out = result.stdout;
+    expect(out).not.toContain("s3cret");
+    for (const name of ["time", "git", "corp", "duck", "tuned"]) expect(lineOf(out, name), name).toMatch(/ NOT CAGED$/);
+    expect(detailsOf(out, "time")).toEqual(["package: mcp-server-time (PyPI)"]);
+    expect(detailsOf(out, "git")).toEqual(["cannot be caged: uvx --from: builds or installs code from outside PyPI, and the cage installs PyPI wheels only"]);
+    expect(detailsOf(out, "corp")).toEqual(["cannot be caged: its env sets UV_INDEX_URL: uvx installs from another index there"]);
+    expect(detailsOf(out, "duck")).toEqual(["package: duckduckgo-mcp-server (PyPI), with duckduckgo-mcp-server[browser]"]);
+    // Its env acts on the host as an npx entry's does, and is named as such.
+    expect(detailsOf(out, "tuned")).toEqual(["package: mcp-server-fetch (PyPI)", "env NODE_OPTIONS: can make Node run code on your machine before the cage starts"]);
+    // The other runners, now that two are caged.
+    expect(lineOf(out, "analytics")).toMatch(/ pipx, not npx or uvx: cannot be caged yet$/);
+    expect(lineOf(out, "clickhouse")).toMatch(/ uv, not npx or uvx: cannot be caged yet$/);
+    expect(out).toContain("  5 run on your machine with your permissions and no cage.          -> mcpcage protect --fix\n");
+    expect(out).toContain("  2 are remote, already containerized, or started by another command: mcpcage cannot cage them yet.\n");
+    expect(result.code).toBe(1);
+
+    // A machine whose only server is a uvx one exits 1: it runs with your permissions (0.6 exited 0).
+    const only = uvxHome({ time: servers.time });
+    const alone = mcpcageWithEnv(only.env, "protect", "--project", only.project, "--offline");
+    expect(alone.stdout).toContain("  1 runs on your machine with your permissions and no cage.");
+    expect(alone.code).toBe(1);
+  });
+
+  it("--fix cages the uvx servers it can and leaves the others with the reason the report gave", () => {
+    const machine = uvxHome(servers);
+    const installed = fakeMcpcage();
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    const where = tilde(machine.cursor, machine.home);
+    expect(result.stdout).toContain(`  not changed: git in ${where}: uvx --from: builds or installs code from outside PyPI, and the cage installs PyPI wheels only\n`);
+    expect(result.stdout).toContain(`  not changed: corp in ${where}: its env sets UV_INDEX_URL: uvx installs from another index there\n`);
+    expect(`${result.stdout}${result.stderr}`).not.toContain("s3cret");
+    const written = JSON.parse(readFileSync(machine.cursor, "utf8")).mcpServers;
+    expect(written.time).toEqual({ command: installed.command, args: ["run", "--", "uvx", ...servers.time.args] });
+    expect(written.duck).toEqual({ command: installed.command, args: ["run", "--", "uv", ...servers.duck.args] });
+    expect(written.tuned).toEqual({ command: installed.command, args: ["run", "--env", "NODE_OPTIONS=--import ./x.mjs", "--", "uvx", "mcp-server-fetch"], env: {} });
+    for (const name of ["git", "corp", "analytics", "clickhouse"] as const) expect(written[name], name).toEqual(servers[name]);
+    const again = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--command", installed.command);
+    expect(lineOf(again.stdout, "time")).toMatch(/ {2}caged$/);
+    expect(again.stdout).toContain("  2 run on your machine with your permissions and no cage.");
+  });
+
+  it.skipIf(process.platform === "win32")("leaves every uvx server uncaged while your uv settings name an index, and run refuses it too", () => {
+    const machine = uvxHome({ time: servers.time, git: servers.git });
+    const settings = join(machine.home, ".config", "uv", "uv.toml");
+    writeText(settings, '# uv settings\n[[index]]\nname = "corp"\nurl = "https://user:s3cret@pypi.corp.example/simple"\n');
+    const why = `your uv settings (${native("~/.config/uv/uv.toml")}) name a package index, and the cage builds from PyPI only`;
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline");
+    expect(detailsOf(result.stdout, "time")).toEqual([`cannot be caged: ${why}`]);
+    // A line's own reason comes first.
+    expect(detailsOf(result.stdout, "git")).toEqual(["cannot be caged: uvx --from: builds or installs code from outside PyPI, and the cage installs PyPI wheels only"]);
+    expect(result.code).toBe(1);
+    const installed = fakeMcpcage();
+    const fix = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    expect(fix.stdout).toContain(`  not changed: time in ${tilde(machine.cursor, machine.home)}: ${why}\n`);
+    expect(JSON.parse(readFileSync(machine.cursor, "utf8")).mcpServers.time).toEqual(servers.time);
+    // wrap says the same, and `run` and `prepare` stop before Docker is needed: a wrapped entry is never built from PyPI.
+    const wrap = mcpcageWithEnv(machine.env, "wrap", "--dry-run", machine.cursor);
+    expect(wrap.stdout).toContain(`  skipped time: ${why}\n`);
+    for (const command of ["run", "prepare"]) {
+      const refused = mcpcageWithEnv(machine.env, command, "--", "uvx", "mcp-server-time");
+      expect(refused.code).toBe(1);
+      expect(refused.stderr).toBe(`mcpcage: ${why}\n`);
+    }
+    expect(`${result.stdout}${fix.stdout}${wrap.stdout}`).not.toContain("s3cret");
+
+    // Under XDG_CONFIG_HOME, and in the file UV_CONFIG_FILE of your own environment names, alike.
+    rmSync(settings);
+    const xdg = join(machine.top, "xdg");
+    writeText(join(xdg, "uv", "uv.toml"), 'index-url = "https://pypi.corp.example/simple"\n');
+    expect(detailsOf(mcpcageWithEnv({ ...machine.env, XDG_CONFIG_HOME: xdg }, "protect", "--project", machine.project, "--offline").stdout, "time")).toEqual([
+      `cannot be caged: your uv settings (${join(xdg, "uv", "uv.toml")}) name a package index, and the cage builds from PyPI only`,
+    ]);
+    const own = join(machine.top, "own.toml");
+    writeText(own, "no-cache = true\n");
+    expect(detailsOf(mcpcageWithEnv({ ...machine.env, UV_CONFIG_FILE: own }, "protect", "--project", machine.project, "--offline").stdout, "time")).toEqual(["package: mcp-server-time (PyPI)"]);
+    writeText(own, "extra-index-url = ['https://pypi.corp.example/simple']\n");
+    expect(detailsOf(mcpcageWithEnv({ ...machine.env, UV_CONFIG_FILE: own }, "protect", "--project", machine.project, "--offline").stdout, "time")).toEqual([
+      `cannot be caged: your uv settings (${own}) name a package index, and the cage builds from PyPI only`,
+    ]);
+    // A variable of your own environment counts as the entry's env does.
+    expect(detailsOf(mcpcageWithEnv({ ...machine.env, UV_DEFAULT_INDEX: "https://pypi.corp.example/simple" }, "protect", "--project", machine.project, "--offline").stdout, "time")).toEqual([
+      "cannot be caged: your environment sets UV_DEFAULT_INDEX: uvx installs from another index there",
+    ]);
   });
 });

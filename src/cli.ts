@@ -10,7 +10,7 @@ import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
 import { banner } from "./banner.js";
 import { discoverConfigs } from "./clients.js";
-import { entryEnvironment, RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
+import { RUN_OPTIONS, unwrapConfig, uvxEnvironment, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
 import { commandOnPath, installedScript, runningFrom, temporaryMcpcage, type McpcageCommand } from "./installed.js";
 import { npxArgv, parseLaunch, serverIdFor, startsUv, type LaunchSpec } from "./launch.js";
@@ -64,7 +64,7 @@ Protect options:
   --project <dir>       also check this project's .mcp.json, .cursor/, .vscode/ and .devin/ (default: current directory)
   --inspect             start each npx server in the cage and look for hidden instructions in its tools
   --offline             do not ask the npm registry; use what was looked up before
-  --fix                 route every npx server through mcpcage, after showing the plan (backups are kept)
+  --fix                 route every npx and uvx server through mcpcage, after showing the plan (backups are kept)
   --yes                 with --fix: change the files without asking
   --no-build            with --fix: do not build the sandbox images now
   --command <path>      the mcpcage command written into configurations (default: mcpcage's full path;
@@ -147,12 +147,13 @@ function parseRun(argv: string[]) {
  * A uvx line is read with mcpcage's own environment, which is the client's plus the entry's env, as
  * uvx would read it there: the same rules wrap and protect apply to the entry's env (see
  * parseLaunch), so a variable that makes uvx install from another index stops the server here too,
- * and UV_PYTHON is its --python.
+ * and UV_PYTHON is its --python. It is the user's own environment as protect reads it, so its
+ * UV_CONFIG_FILE is a settings file to look at for an index (see uv-settings.ts), as protect does.
  */
 function launchSpec(server: string[], image: string | undefined, noSandbox: boolean): LaunchSpec {
   const [command] = server;
   if (noSandbox && image === undefined && command !== undefined && startsUv(server)) return { kind: "host", command, args: server.slice(1) };
-  return parseLaunch(server, image, process.platform, [{ where: "the environment mcpcage runs in", variables: process.env }]);
+  return parseLaunch(server, image, process.platform, [{ where: "the environment mcpcage runs in", variables: process.env, own: true }]);
 }
 
 /** Builds and pins the sandbox image without starting the server (wrap does this for every server). */
@@ -304,8 +305,8 @@ function buildImages(changes: Array<{ name: string; after: ServerEntry }>): numb
   let status = 0;
   for (const change of changes) {
     const args = change.after.args ?? [];
-    // With the entry's env, which the client gives mcpcage: its UV_PYTHON is the Python `run` builds for.
-    const spec = parseLaunch(args.slice(args.indexOf("--") + 1), undefined, process.platform, entryEnvironment(change.after));
+    // With the env the client gives mcpcage, as wrap read it: its UV_PYTHON is the Python `run` builds for.
+    const spec = parseLaunch(args.slice(args.indexOf("--") + 1), undefined, process.platform, uvxEnvironment(change.after));
     if (spec.kind !== "npm" && spec.kind !== "pypi") continue;
     try {
       const prepared = prepareSandbox({
@@ -325,7 +326,7 @@ function buildImages(changes: Array<{ name: string; after: ServerEntry }>): numb
 
 /**
  * Finds every MCP configuration of this machine and of the project, says what each server is exposed
- * to and, with --fix, routes the npx servers through mcpcage. Without --fix it writes nothing outside
+ * to and, with --fix, routes the npx and uvx servers through mcpcage. Without --fix it writes nothing outside
  * mcpcage's own directory.
  */
 async function protect(argv: string[]): Promise<number> {

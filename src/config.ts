@@ -9,6 +9,7 @@ import { cmdRunner, isNpx, npxArgv, parseLaunch, toolRunArgs, type UvEnvironment
 import { NOT_ON_A_DRIVE, offDrive } from "./sandbox.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
+import { uvSettingsReason } from "./uv-settings.js";
 import { WINDOWS_PLACES } from "./windows-places.js";
 
 /** One MCP server entry, as Claude Desktop, Claude Code, Cursor, VS Code, Copilot, Windsurf and Devin store it. */
@@ -64,12 +65,15 @@ export interface WrapOutcome {
  * `writable` mounts the paths the servers are given writable (see wrapEntry). An entry that would
  * still not count as caged once rewritten stays as it is, with the reason (see cageCheck).
  */
-export function wrapConfig(file: string, options: { dryRun: boolean; command?: McpcageCommand; writable?: boolean }): WrapOutcome {
+export function wrapConfig(file: string, options: { dryRun: boolean; command?: McpcageCommand; writable?: boolean; uv?: UserUv }): WrapOutcome {
   const command = options.command ?? "mcpcage";
+  // The user's uv setup, looked up once, at the first uvx entry.
+  let uv = options.uv;
   return transform(file, options.dryRun, (name, entry, skip) => {
     const original = isWrapped(entry) && mcpcageAt(entry, command) === "other program" ? unwrapEntry(entry) : { entry };
     if ("skip" in original) return skip(name, original.skip);
-    const wrapped = wrapEntry(original.entry, { command, writable: options.writable });
+    if (serverType(original.entry) === "uvx") uv ??= userUvHere();
+    const wrapped = wrapEntry(original.entry, { command, writable: options.writable, ...(uv === undefined ? {} : { uv }) });
     if ("skip" in wrapped) return skip(name, wrapped.skip);
     const reason = cageCheck(wrapped.entry, { command, configFile: file });
     return reason === undefined ? wrapped.entry : skip(name, reason);
@@ -334,9 +338,11 @@ export function hostVariable(name: string, value: unknown): { to: "container" | 
  * A uvx entry is read with its env, as uvx reads it (see parseLaunch): one whose env makes uvx install
  * from another index, or from a file on the host, stays as it is with the variable named. Its other
  * variables of uv's stay in its env, where `run` reads them again at every start (UV_PYTHON is its
- * --python there too), and reach the cage by name, where nothing reads them.
+ * --python there too), and reach the cage by name, where nothing reads them. The user's own uv setup
+ * counts too (`uv`, this machine's when not given): their environment, before the entry's env, and
+ * their uv settings, which stop every uvx entry when they name a package index.
  */
-export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand; writable?: boolean }): { entry: ServerEntry } | { skip: string } {
+export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand; writable?: boolean; uv?: UserUv }): { entry: ServerEntry } | { skip: string } {
   const type = serverType(entry);
   if (type === "remote") return { skip: "remote server: nothing runs locally to cage" };
   if (!entry.command) return { skip: "no command" };
@@ -354,13 +360,16 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
   if (!Array.isArray(given)) return { skip: "its args are not a list" };
   if (given.some((arg) => typeof arg !== "string")) return { skip: "it has an argument that is not a string" };
   const args = given as string[];
+  // Looked for only when there is a uvx entry: on Windows the user's settings are found through the registry.
+  const uv = type === "uvx" ? (options.uv ?? userUvHere()) : undefined;
   let serverArgs: string[];
   try {
-    serverArgs = parseLaunch([entry.command, ...args], undefined, process.platform, entryEnvironment(entry)).args;
+    serverArgs = parseLaunch([entry.command, ...args], undefined, process.platform, uv === undefined ? [] : uvxEnvironment(entry, uv.environment)).args;
   } catch (error) {
     // `mcpcage run` would refuse this command line at every start: better to leave the entry as it is.
     return { skip: (error as Error).message };
   }
+  if (uv?.settings !== undefined) return { skip: uv.settings };
   // The server's own arguments end the list, after the runner's flags and the package (for uvx, also
   // the values of --from and --with), which are never mounted.
   const runnerPart = args.slice(0, args.length - serverArgs.length);
@@ -414,6 +423,31 @@ function envFlag(variable: string): string[] {
 /** The variables of an entry's env, as uvx reads them once the client starts it with them (see UvEnvironment). */
 export function entryEnvironment(entry: ServerEntry): UvEnvironment {
   return [{ where: "its env", variables: entry.env }];
+}
+
+/**
+ * The variables a uvx entry starts with, as far as mcpcage can tell where it runs: the user's own
+ * environment, which a client started from the user's session passes on, then the entry's env, which
+ * the client adds to it. wrap, protect and --fix read a uvx line with both, as `run` reads its own
+ * environment, so that what they call caged is what `run` starts.
+ */
+export function uvxEnvironment(entry: ServerEntry, environment: unknown = process.env): UvEnvironment {
+  return [{ where: "your environment", variables: environment, own: true }, ...entryEnvironment(entry)];
+}
+
+/**
+ * The user's own uv setup, which wrap and protect read a uvx entry with: their environment (see
+ * uvxEnvironment), and why their uv settings stop the cage (see uvSettingsReason), undefined when
+ * they do not.
+ */
+export interface UserUv {
+  environment: unknown;
+  settings: string | undefined;
+}
+
+/** The user's uv setup on this machine: mcpcage's own environment, run in the user's terminal, and their uv settings. */
+export function userUvHere(): UserUv {
+  return { environment: process.env, settings: uvSettingsReason() };
 }
 
 /** The command and first arguments that start mcpcage as `command` says: on Windows node.exe and its cli.js (see nodeScript). */

@@ -3,12 +3,12 @@ import { posix, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
 import {
-  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, mcpcageArgs, moveHostEnv, relaunch, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, wrapEntry,
-  type EnvEffects, type ServerEntry, type ServerType,
+  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, mcpcageArgs, moveHostEnv, relaunch, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, userUvHere, uvxEnvironment, wrapEntry,
+  type EnvEffects, type ServerEntry, type ServerType, type UserUv,
 } from "./config.js";
 import { batchFile, envFileOf, mcpcageAt, nodeScript, type ForeignPath, type McpcageCommand, type McpcageKind } from "./installed.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
-import { cmdNpx, cmdWouldRead, npxArgv, parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
+import { cmdRunner, cmdWouldRead, npxArgv, parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
 import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
@@ -20,7 +20,7 @@ import { terminalSafe } from "./terminal.js";
 
 /*
  * `mcpcage protect`: every MCP configuration of this machine and of the current project, what each
- * server can reach in plain words, and the rewrite that puts the npx servers in the cage. A scan
+ * server can reach in plain words, and the rewrite that puts the npx and uvx servers in the cage. A scan
  * changes no file. Values of environment variables, headers and credential arguments are never
  * kept in the report, printed or logged: only their names are.
  */
@@ -92,8 +92,12 @@ export interface ServerReport {
   envFile?: { path?: string; effects?: EnvEffects };
   /** What in the entry is not as a client expects it, such as an argument that is not a string. */
   problems: string[];
-  /** For a `cmd /c npx` entry on Windows that runs more than npx, why it is not caged (see cmdNpx). */
-  notPlain?: string;
+  /** For a `cmd /c npx` or `cmd /c uvx` entry on Windows that runs more than the runner, which one, and why it is not caged (see cmdRunner). */
+  notPlain?: { runner: string; reason: string };
+  /** For a uvx entry: the PyPI package it installs, as the report names it (`mcp-server-time (PyPI)`, or `x==1.2 (PyPI), with y`). */
+  pypiPackage?: string;
+  /** For a uvx entry that cannot be caged: why, in the words wrap and --fix use to leave it as it is. */
+  cannotCage?: string;
   /** Why the entry could not be described whole: the report says so on its lines and goes on. */
   error?: string;
   installScripts?: InstallScripts;
@@ -135,12 +139,16 @@ export interface ScanOptions {
    * mcpcage, counts as mcpcage (see mcpcageAt).
    */
   ownCommand?: McpcageCommand;
+  /** The user's uv setup that uvx entries are read with (see UserUv): this machine's, looked up at the first uvx entry, when not given. */
+  uv?: UserUv;
 }
 
 /** Reads every configuration that exists and describes each of its servers. */
 export async function scanConfigs(options: ScanOptions): Promise<ProtectReport> {
   const report: ProtectReport = { files: [], servers: [] };
   const lookups = new Map<string, InstallScripts>();
+  let uv = options.uv;
+  const userUv = () => (uv ??= userUvHere());
   for (const location of options.locations) {
     const file: ScannedFile = { ...location, servers: 0 };
     report.files.push(file);
@@ -159,7 +167,7 @@ export async function scanConfigs(options: ScanOptions): Promise<ProtectReport> 
       if (!isJsonObject(servers)) continue;
       for (const [name, entry] of Object.entries(servers)) {
         if (!isJsonObject(entry)) continue;
-        report.servers.push(await describeServer(file, section.project, name, entry as ServerEntry, options, lookups));
+        report.servers.push(await describeServer(file, section.project, name, entry as ServerEntry, options, lookups, userUv));
         file.servers++;
       }
     }
@@ -174,6 +182,7 @@ async function describeServer(
   entry: ServerEntry,
   options: ScanOptions,
   lookups: Map<string, InstallScripts>,
+  userUv: () => UserUv,
 ): Promise<ServerReport> {
   const type = serverType(entry);
   const server: ServerReport = {
@@ -220,15 +229,16 @@ async function describeServer(
     server.secrets = [...new Set([...secretNames(entry), ...shown.secrets])];
     // The script node.exe is given is mcpcage's own, in the PATH's npm directory: not a path the server is given.
     server.broadAccess = type === "remote" ? [] : broadPaths(fromRun(entry), options.home);
-    if (type === "npx" || type === "mcpcage") {
+    if (type === "npx" || type === "uvx" || type === "mcpcage") {
       const installed = server.mcpcage === "installed";
       Object.assign(server, effectsOf(entry.env, installed));
       // VS Code adds the variables of the file an envFile names to those of env: they act the same way.
       const envFile = envFileOf(entry, file.file);
       if (envFile !== undefined) server.envFile = envFile.variables === undefined ? { path: envFile.path } : { path: envFile.path, effects: effectsOf(envFile.variables, installed) };
     }
-    const cmd = type === "other" && Array.isArray(entry.args) ? cmdNpx([entry.command, ...entry.args]) : undefined;
-    if (cmd !== undefined && "notPlain" in cmd) server.notPlain = cmd.notPlain;
+    const cmd = type === "other" && Array.isArray(entry.args) ? cmdRunner([entry.command, ...entry.args]) : undefined;
+    if (cmd !== undefined && "notPlain" in cmd) server.notPlain = { runner: cmd.runner, reason: cmd.notPlain };
+    if (type === "uvx") Object.assign(server, pypiOf(entry, userUv()));
     const odd = Array.isArray(entry.args) ? entry.args.filter((arg) => typeof arg !== "string").length : 0;
     if (odd > 0) server.problems.push(`args: ${odd === 1 ? "an argument that is not a string" : `${odd} arguments that are not strings`}`);
     const launch = npxCommand(entry, type);
@@ -367,14 +377,31 @@ function npmLaunch(argv: string[]): NpmLaunch | undefined {
 }
 
 /**
- * A server that runs on this machine with the user's permissions: npx outside mcpcage,
+ * What a uvx entry installs, as `run` would read its line once caged (with the user's environment and
+ * the entry's env, see uvxEnvironment), or why it cannot be caged: the line's own reason first, then
+ * the user's uv settings. The reasons are wrap's, which names flags and variables, never their values.
+ */
+function pypiOf(entry: ServerEntry, uv: UserUv): { pypiPackage: string } | { cannotCage: string } | Record<string, never> {
+  let spec: LaunchSpec;
+  try {
+    spec = parseLaunch([entry.command as string, ...stringArgs(entry)], undefined, process.platform, uvxEnvironment(entry, uv.environment));
+  } catch (error) {
+    return { cannotCage: messageOf(error) };
+  }
+  if (spec.kind !== "pypi") return {};
+  if (uv.settings !== undefined) return { cannotCage: uv.settings };
+  return { pypiPackage: `${spec.requirement} (PyPI)${spec.with.length > 0 ? `, with ${spec.with.join(", ")}` : ""}` };
+}
+
+/**
+ * A server that runs on this machine with the user's permissions: npx or uvx outside mcpcage,
  * `mcpcage run --no-sandbox`, or a program that is only named mcpcage; or a caged one whose env
  * runs on this machine, in mcpcage, first, whose PATH has directories that are not the user's, or
  * that moves the places `run` refuses to mount, its envFile's as well as its env's, or whose envFile
  * could not be read. An mcpcage that cannot be found starts nothing.
  */
 export function isUncaged(server: ServerReport): boolean {
-  if (server.type === "npx") return true;
+  if (server.type === "npx" || server.type === "uvx") return true;
   if (server.type !== "mcpcage") return false;
   // A wrapped entry that could not be described is not known to be caged.
   if (server.error !== undefined) return true;
@@ -542,11 +569,13 @@ export function renderReport(report: ProtectReport, options: { home: string }): 
 function serverLines(server: ServerReport, home: string): string[] {
   const indent = " ".repeat(NAME_WIDTH + 4);
   const details: string[] = server.problems.map(terminalSafe);
-  if (server.notPlain !== undefined) details.push(`cmd: ${terminalSafe(server.notPlain)}`);
+  if (server.notPlain !== undefined) details.push(`cmd: ${terminalSafe(server.notPlain.reason)}`);
   if (server.error !== undefined) details.push(`could not describe this entry: ${terminalSafe(server.error)}`);
   for (const path of server.broadAccess) details.push(`access: ${terminalSafe(path)}: ${broadAccessKind(path, home) ?? "a broad path"}`);
   if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(terminalSafe).join(", ")}`);
   if (server.installScripts) details.push(installLine(server.installScripts));
+  if (server.pypiPackage !== undefined) details.push(`package: ${terminalSafe(server.pypiPackage)}`);
+  if (server.cannotCage !== undefined) details.push(`cannot be caged: ${terminalSafe(server.cannotCage)}`);
   // Before what --inspect found, whose signs belong under its own line.
   if (server.cmdInjection !== undefined) {
     details.push(`a client that starts the ${server.batch} makes cmd.exe re-read its arguments, and one has ${terminalSafe(server.cmdInjection)}`);
@@ -575,10 +604,11 @@ function serverLines(server: ServerReport, home: string): string[] {
 }
 
 function status(server: ServerReport): string {
-  // An npx entry runs on the host whatever else could not be read in it.
-  if (server.error !== undefined && server.type !== "npx") return "could not be described";
+  // An npx or uvx entry runs on the host whatever else could not be read in it.
+  if (server.error !== undefined && server.type !== "npx" && server.type !== "uvx") return "could not be described";
   switch (server.type) {
     case "npx":
+    case "uvx":
       return "NOT CAGED";
     case "mcpcage": {
       const command = terminalSafe(commandOf(server.command));
@@ -609,11 +639,9 @@ function status(server: ServerReport): string {
       return "remote, nothing to cage";
     case "docker":
       return "docker, already containerized";
-    case "uvx":
-      return "uvx, not supported yet";
     default:
       if (server.command === NO_COMMAND) return "no command: nothing to start";
-      return `${terminalSafe(programOf(server.command))}, ${server.notPlain === undefined ? "not npx: cannot be caged yet" : "not a plain npx command line: cannot be caged"}`;
+      return `${terminalSafe(programOf(server.command))}, ${server.notPlain === undefined ? "not npx or uvx: cannot be caged yet" : `not a plain ${server.notPlain.runner} command line: cannot be caged`}`;
   }
 }
 
@@ -676,7 +704,7 @@ function summary(report: ProtectReport): string[] {
   const present = report.files.filter((file) => file.exists).length;
   const unchecked = uncheckedFiles(report);
   const uncaged = count(isUncaged);
-  const elsewhere = count((server) => server.type !== "npx" && server.type !== "mcpcage");
+  const elsewhere = count((server) => server.type !== "npx" && server.type !== "uvx" && server.type !== "mcpcage");
   const inCage = (server: ServerReport) => server.type === "mcpcage" && server.mcpcage === "installed" && server.offDrive === undefined && !isUncaged(server);
   const caged = count((server) => inCage(server) && server.batch === undefined && server.opened.length === 0);
   const opened = count((server) => inCage(server) && server.batch === undefined && server.opened.length > 0);
@@ -745,10 +773,12 @@ export interface FixOptions {
   home?: string;
   /** `--writable`: mount the paths of the servers it cages writable, as wrapEntry does with it. */
   writable?: boolean;
+  /** The user's uv setup that uvx entries are read with (see UserUv): this machine's, looked up at the first uvx entry, when not given. */
+  uv?: UserUv;
 }
 
 /**
- * Rewrites the report's npx servers to start through `mcpcage run`, and moves the env that would
+ * Rewrites the report's npx and uvx servers to start through `mcpcage run`, and moves the env that would
  * run on this machine out of the caged ones (see moveHostEnv), file by file. Each file is read again
  * right before it changes; only its server entries change, in the file's own style, with a backup
  * next to it and an atomic replace.
@@ -756,6 +786,8 @@ export interface FixOptions {
 export function fixConfigs(options: FixOptions): FixOutcome {
   const home = options.home ?? homedir();
   const files: FixedFile[] = [];
+  let uv = options.uv;
+  const userUv = () => (uv ??= userUvHere());
   for (const file of options.report.files) {
     if (!file.exists || file.error !== undefined) continue;
     const servers = options.report.servers.filter((server) => server.file === file.file);
@@ -765,6 +797,7 @@ export function fixConfigs(options: FixOptions): FixOutcome {
     const targets = servers.filter(
       (server) =>
         server.type === "npx" ||
+        server.type === "uvx" ||
         (server.type === "mcpcage" &&
           (server.mcpcage === "other program" ||
             (server.protectedByMcpcage && server.offDrive === undefined && server.error === undefined && (actsOnHost(server) || envFileActs(server) || server.batch !== undefined)))),
@@ -774,7 +807,7 @@ export function fixConfigs(options: FixOptions): FixOutcome {
     const onHost = servers.filter((server) => server.type === "mcpcage" && server.mcpcage === "installed" && server.error === undefined && (!server.protectedByMcpcage || server.offDrive !== undefined));
     if (targets.length === 0 && onHost.length === 0) continue;
     try {
-      files.push(fixFile(file, targets, onHost, options, home));
+      files.push(fixFile(file, targets, onHost, options, home, userUv));
     } catch (error) {
       // One file that cannot be rewritten leaves the others to be.
       const fixed: FixedFile = { file: file.file, changed: [], skipped: [], refused: messageOf(error) };
@@ -785,7 +818,7 @@ export function fixConfigs(options: FixOptions): FixOutcome {
   return { files };
 }
 
-function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerReport[], options: FixOptions, home: string): FixedFile {
+function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerReport[], options: FixOptions, home: string, userUv: () => UserUv): FixedFile {
   const fixed: FixedFile = { file: file.file, changed: [], skipped: [] };
   const shown = shownFile(file, home);
   const where = (label: string | undefined) => (label === undefined ? shown : `${shown} (project ${terminalSafe(label)})`);
@@ -807,7 +840,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const server of targets) {
     const servers = valueAt(config, server.label === undefined ? [file.key] : ["projects", server.label, "mcpServers"]);
     const entry = isJsonObject(servers) && Object.hasOwn(servers, server.name) ? servers[server.name] : undefined;
-    const wrapped = !isJsonObject(servers) || !isJsonObject(entry) ? { skip: "it is no longer in the file" } : rewrite(entry as ServerEntry, options.command, options.writable === true, file.file);
+    const wrapped = !isJsonObject(servers) || !isJsonObject(entry) ? { skip: "it is no longer in the file" } : rewrite(entry as ServerEntry, options.command, options.writable === true, file.file, userUv);
     if ("skip" in wrapped) {
       fixed.skipped.push({ name: server.name, label: server.label, reason: wrapped.skip });
       continue;
@@ -882,20 +915,22 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
  * because of a PATH, a client place or an envFile that only the user can change, stays as it is,
  * with what to do, instead of being called caged.
  */
-function rewrite(entry: ServerEntry, command: McpcageCommand, writable: boolean, configFile: string): { entry: ServerEntry; alreadyCaged?: boolean } | { skip: string } {
-  const rewritten = rewriteEntry(entry, command, writable);
+function rewrite(entry: ServerEntry, command: McpcageCommand, writable: boolean, configFile: string, userUv: () => UserUv): { entry: ServerEntry; alreadyCaged?: boolean } | { skip: string } {
+  const rewritten = rewriteEntry(entry, command, writable, userUv);
   if ("skip" in rewritten) return rewritten;
   const reason = cageCheck(rewritten.entry, { command, configFile });
   if (reason !== undefined) return { skip: reason };
   return rewritten.entry === entry ? { skip: "its env no longer runs on your machine" } : rewritten;
 }
 
-function rewriteEntry(entry: ServerEntry, command: McpcageCommand, writable: boolean): { entry: ServerEntry; alreadyCaged?: boolean } | { skip: string } {
-  if (serverType(entry) !== "mcpcage") return wrapEntry(entry, { command, writable });
+function rewriteEntry(entry: ServerEntry, command: McpcageCommand, writable: boolean, userUv: () => UserUv): { entry: ServerEntry; alreadyCaged?: boolean } | { skip: string } {
+  // The user's uv setup is looked up for a uvx entry only (on Windows through the registry).
+  const wrap = (original: ServerEntry) => wrapEntry(original, { command, writable, ...(serverType(original) === "uvx" ? { uv: userUv() } : {}) });
+  if (serverType(entry) !== "mcpcage") return wrap(entry);
   const found = mcpcageAt(entry as ServerEntry & { command: string }, command);
   if (found === "other program") {
     const inner = unwrapEntry(entry);
-    return "skip" in inner ? inner : wrapEntry(inner.entry, { command, writable });
+    return "skip" in inner ? inner : wrap(inner.entry);
   }
   if (found === "not found") return { skip: "its mcpcage can no longer be found" };
   // The same mcpcage with the same options, without the batch file some clients cannot start.
