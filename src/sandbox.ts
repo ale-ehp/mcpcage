@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { accessSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
+import { accessSync, closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -546,12 +546,31 @@ const MAX_POINTER_BYTES = 64 * 1024;
 /**
  * The path a `.git` file (`gitdir: <path>`) or a `commondir` file (the path alone) names, read the
  * way git reads it: the prefix exactly, then everything up to the line endings at the end.
+ * The file sits in a writable mount, where a server in another cage may be writing while mcpcage
+ * reads: its size is looked at on what was opened, and no more than one byte past MAX_POINTER_BYTES
+ * is read whatever that size said, so a file that grows or is replaced after the look is not read
+ * whole. Opened without waiting where the system allows it, as readConfigFile in clients.ts does: a
+ * FIFO put in its place is then refused, as empty or unreadable, instead of stalling the start.
  */
 function pointer(file: string, prefix: string, refuse: (problem: string) => Error): string {
+  const tooLarge = () => refuse(`${file} is too large to say where a git repository is`);
   let text: string;
   try {
-    if (statSync(file).size > MAX_POINTER_BYTES) throw refuse(`${file} is too large to say where a git repository is`);
-    text = readFileSync(file, "utf8");
+    const fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    try {
+      if (fstatSync(fd).size > MAX_POINTER_BYTES) throw tooLarge();
+      const bytes = Buffer.alloc(MAX_POINTER_BYTES + 1);
+      let length = 0;
+      while (length < bytes.length) {
+        const read = readSync(fd, bytes, length, bytes.length - length, null);
+        if (read === 0) break;
+        length += read;
+      }
+      if (length > MAX_POINTER_BYTES) throw tooLarge();
+      text = bytes.toString("utf8", 0, length);
+    } finally {
+      closeSync(fd);
+    }
   } catch (error) {
     if (!(error as NodeJS.ErrnoException).code) throw error;
     throw refuse(`cannot read ${file}, which says where a git repository is (${(error as NodeJS.ErrnoException).code})`);

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync, writeFileSync, type PathLike } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -210,6 +210,49 @@ describe("the repository a .git file leads to, at its edges", () => {
     expect(refusal(() => settings([rw(dir)]))).toBe(refused(dir, `${file} is too large to say where a git repository is`, "Fix or remove it"));
     writeFileSync(file, `gitdir: ${"a".repeat(64 * 1024 - 9)}\n`);
     expect(refusal(() => settings([rw(dir)]))).not.toContain("too large");
+  });
+
+  it("refuses a .git file that grows past the limit after its size was looked at", async () => {
+    // Another cage can write in the same mount while mcpcage reads: the file is made to grow by 64 KiB
+    // right after the first look at its size, by path or on the opened file, whichever comes first.
+    const dir = layout({ "app/.git": "gitdir: ../meta\n", ...at("meta", repository) });
+    const file = join(dir, "app", ".git");
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const fs = await importOriginal<typeof import("node:fs")>();
+      let opened: number | undefined;
+      let grown = false;
+      const grow = () => {
+        if (!grown) fs.appendFileSync(file, "a".repeat(64 * 1024));
+        grown = true;
+      };
+      const statSync = ((path: PathLike, ...rest: unknown[]) => {
+        const stat = (fs.statSync as (...args: unknown[]) => unknown)(path, ...rest);
+        if (String(path) === file) grow();
+        return stat;
+      }) as typeof fs.statSync;
+      const openSync = ((path: PathLike, ...rest: unknown[]) => {
+        const fd = (fs.openSync as (...args: unknown[]) => number)(path, ...rest);
+        if (String(path) === file) opened = fd;
+        return fd;
+      }) as typeof fs.openSync;
+      const fstatSync = ((fd: number, ...rest: unknown[]) => {
+        const stat = (fs.fstatSync as (...args: unknown[]) => unknown)(fd, ...rest);
+        if (fd === opened) grow();
+        return stat;
+      }) as typeof fs.fstatSync;
+      return { ...fs, statSync, openSync, fstatSync };
+    });
+    try {
+      const sandbox = await import("../src/sandbox.js");
+      expect(refusal(() => sandbox.withSettingsReadOnly([rw(dir)], sandbox.SETTINGS_LIMITS, "linux"))).toBe(
+        refused(dir, `${file} is too large to say where a git repository is`, "Fix or remove it"),
+      );
+      expect(statSync(file).size).toBeGreaterThan(64 * 1024);
+    } finally {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    }
   });
 
   it("refuses a commondir that is not a file, with what to do", () => {
