@@ -87,7 +87,9 @@ describe("the docker run command line", () => {
   });
 
   it("gives a Windows server each argument in a mounted folder as its place in the cage: ~/, a path on the current drive, never a relative one", () => {
+    // os.homedir() reads HOME on macOS and Linux, USERPROFILE on Windows.
     vi.stubEnv("HOME", "C:\\Users\\me");
+    vi.stubEnv("USERPROFILE", "C:\\Users\\me");
     vi.spyOn(process, "cwd").mockReturnValue("C:\\work");
     const mounts = [ro("C:\\Users\\me\\notes"), ro("C:\\work")];
     const args = runArgs({ ...base, mounts, spec: { ...base.spec, args: ["~/notes", "~/notes/a b", "relative", "\\work\\x", "\\\\server\\share", "--flag"] } }, "img", "win32");
