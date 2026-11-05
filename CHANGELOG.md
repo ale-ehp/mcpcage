@@ -3,6 +3,78 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-11-05
+
+A round of testing aimed at trust: a fourth review of the Windows code, the 24 most downloaded
+MCP servers run in the cage, property-based tests of everything that reads untrusted input, and
+mutation testing.
+
+### Security
+
+- A server could slip a new tool past the pin by listing one malformed entry with it: a
+  `tools/list` answer such as `[{"name":"read_file"}, {"name":"send_keys", ...}, {"name":null}]`
+  reached the client whole, the new tool neither pinned nor compared with the pin, with no block.
+  mcpcage compared a listing with the pin only when every entry was a tool definition. Such an
+  answer is now refused whole: the client gets an error, nothing is pinned, the session is locked,
+  and the audit log records `list-blocked` with reason `not-tools`. Every published version up to
+  0.6.1 is affected.
+- A `tools/call` sent without an id (a JSON-RPC notification) skipped the call filter and the
+  audit log, so a call to a tool nobody approved reached the server. Every `tools/call` is now
+  filtered; a refused one without an id gets no answer, as JSON-RPC requires, and is recorded as
+  `call-blocked`.
+- A `tools/call` whose tool name is not a string was looked up as `""`: with a tool named `""`
+  approved, every such call passed. It is now refused.
+- A `tools/call` whose arguments were nested a few thousand levels deep stopped mcpcage with a
+  stack overflow before it answered. Arguments nested more than 256 levels deep are now refused.
+- Windows: an entry's `env` could make `docker` start another program on the host while `protect`
+  counted the entry as caged: `ProgramData` (or another of Windows' place variables) naming a folder
+  with a `docker-buildx.exe` of its own, `GODEBUG`, or, when a client leaves those variables out, a
+  project folder holding Docker plugins. mcpcage now moves Windows' place variables and `GODEBUG`
+  from an entry's `env` into the cage, and gives docker and npm the places Windows itself reports
+  (the registry, the account's home, `SystemRoot`), not the ones it was started with.
+- Windows: an `env` that sets one variable twice in two cases (`Path` and `PATH`) is counted as not
+  caged. Windows keeps only one of them, and which one depends on the client.
+- Windows: an entry that starts mcpcage through `mcpcage.cmd` with arguments that `cmd.exe` reads
+  again (a quote, `&`, `|`, ...) is counted as not caged: cmd runs them as commands before mcpcage
+  starts (CVE-2024-27980). `--fix` rewrites it as node with mcpcage's `cli.js`.
+- macOS and Linux: a writable mount whose path has `..` after a symlink
+  (`/x/link/../proj:rw`) got no read-only `.git`, and a server in the cage could write
+  `.git/config` on the host, which git then runs. mcpcage looked through the directory the system
+  finds (the `..` taken from where the symlink leads) while Docker mounted the one the path spells.
+  A mount's path is now read as Docker reads it before mcpcage checks and looks through it. Affects
+  0.5.0 to 0.6.1.
+
+### Fixed
+
+- A new server, or `--rebuild`, could get an old version of its package from Docker's build cache
+  instead of npm's `latest`: a build that resolves a package now runs without the cache.
+- `npx -s` and `npx --silent` are accepted, as `@modelcontextprotocol/server-pdf`'s README writes
+  them; 0.6.1 refused them as an unsupported flag.
+- `wrap` and `--fix` leave as it is an entry whose `env` names a variable with `=` in it (the cage
+  would read a different value), and write a variable whose name starts with a dash as
+  `--env=NAME`, which `run` used to refuse at every start.
+- Windows: a `--mount` of `\\`, `//` or `\\.` alone is refused as written. It was resolved to `C:\`
+  and, with `--allow-sensitive-mount`, mounted the whole drive, while `protect` said the entry
+  could not start.
+
+### Added
+
+- [Compatibility](docs/compatibility.md): the 24 MCP servers started with `npx` that npm counts the
+  most downloads for, run through the cage on macOS and Windows: 22 work with the defaults, 2 need
+  `--allow-net`. `npm run compat` runs it, and a weekly workflow runs it on Linux.
+- Property-based tests (fast-check) of the proxy, the pin, wrap and unwrap, the places never
+  mounted and Windows' paths, with a far longer run every week on Linux and Windows. They
+  found the first four security items above, and the `env` and `\\` fixes.
+- Mutation testing (Stryker, `npm run mutation`), weekly: the tests notice 88% of the changes made
+  to the code that decides what is safe.
+- The OpenSSF Scorecard runs on every push to `main` and weekly, with its badge in the README. Each
+  GitHub release carries the signed build provenance (`.sigstore.json`).
+
+### Changed
+
+- The README and the threat model say that the read-only settings in a writable mount are looked
+  for at any depth except inside `node_modules`, and why.
+
 ## [0.6.1] - 2026-11-04
 
 ### Fixed
