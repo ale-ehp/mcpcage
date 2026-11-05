@@ -12,16 +12,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # attach the package and SBOM to the GitHub release
-      id-token: write # Sigstore keyless signing for npm provenance and the build attestation
+      id-token: write # npm trusted publishing; Sigstore signing for npm provenance and the build attestation
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Trusted publishing needs npm 11.5.1 or later: every Node 24 from 24.5.0 bundles one, Node 22
+      # bundles npm 10. No registry-url: it only pointed npm at a token, and without it a failed OIDC
+      # exchange stops npm publish with ENEEDAUTH instead of sending "${NODE_AUTH_TOKEN}" as a token.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
+          node-version: 24
       - run: npm ci
       - run: npm test
       - run: npm sbom --sbom-format cyclonedx --omit dev > mcpcage.cdx.json
@@ -30,10 +32,11 @@ jobs:
         id: provenance
         with:
           subject-path: mcpcage-*.tgz
+      # No npm token: npm trades the job's OIDC token for a short-lived one, as the trusted publisher
+      # set on npmjs.com for this file allows. --provenance stays explicit: on its own npm adds
+      # provenance only when it finds the repository and the package public, else publishes without.
       - name: Publish to npm with provenance
         run: npm publish --provenance --access public mcpcage-*.tgz
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       # GitHub keeps the provenance among the repository's attestations. Attached to the release as
       # <package>.sigstore.json it also travels with the package for `gh attestation verify --bundle`,
       # and it is where Scorecard's Signed-Releases check looks for a signature.

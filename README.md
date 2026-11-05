@@ -494,8 +494,9 @@ Mutation testing changes the code one small change at a time and checks that a t
 notice 88% of the changes to the code that decides what is safe, and 73% in all of `src/`, whose CLI
 is tested only as a process, out of Stryker's reach ([weekly run](.github/workflows/mutation.yml)).
 
-mcpcage has no runtime dependencies. Releases are published to npm with provenance, with a
-CycloneDX SBOM and a GitHub build attestation attached ([release workflow](.github/workflows/release.yml)).
+mcpcage has no runtime dependencies. Releases are published to npm with provenance by trusted
+publishing, from GitHub Actions with no npm token, with a CycloneDX SBOM and a GitHub build
+attestation attached ([release workflow](.github/workflows/release.yml)).
 
 ## Security
 
