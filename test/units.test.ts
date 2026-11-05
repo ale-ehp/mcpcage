@@ -639,13 +639,17 @@ describe("settings in a writable mount", () => {
     });
   });
 
-  it("mounts every existing git and editor setting read-only on top of a writable directory, at any depth", () => {
+  it("mounts every existing git and editor setting read-only on top of a writable directory, at any depth but under node_modules", () => {
     const dir = project();
     const mounts = settings([rw(dir)]);
     expect(mounts[0]).toEqual(rw(dir));
     expect(byTarget(mounts.slice(1))).toEqual(
       byTarget([...[".git", ".mcp.json", ".vscode", "app/.VSCode", "sub/.git", "worktree/.git"].map((path) => ro(join(dir, path))), ...["app", "sub", "worktree"].map((path) => rw(join(dir, path)))]),
     );
+    // The project holds node_modules/x/.git, which is left out on purpose: a package runner never
+    // drops a repository there, the server could make a new one anyway, and walking a real
+    // node_modules would pass the entry limit or slow every start (see withSettingsReadOnly).
+    expect(mounts.map((mount) => mount.target)).not.toContain(join(dir, "node_modules", "x", ".git"));
 
     const args = runArgs({ ...base, mounts }, "img").filter((arg) => arg.startsWith("type=bind"));
     expect(args).toContain(`type=bind,source=${dir},target=${inCage(dir)}`);

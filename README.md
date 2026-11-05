@@ -197,8 +197,11 @@ mounts are read-only unless you write `:rw` or pass `--writable` to `wrap` or `p
 `protect` names every writable mount of a caged server (`writable: <path>`) and counts that server
 as caged with its cage opened. As a best effort inside a writable mount, the git and editor
 settings that exist when the server starts (`.git`, `.vscode`, `.idea`, `.cursor`, `.claude`,
-`.devin`, `.windsurf`, `.mcp.json`, at any depth) are mounted read-only on top, and so is the
-repository a `.git` file points to (a worktree, a submodule). The directories that lead to each of
+`.devin`, `.windsurf`, `.mcp.json`, at any depth except under `node_modules`) are mounted read-only
+on top, and so is the repository a `.git` file points to (a worktree, a submodule). `node_modules`
+is left out because a package runner never drops a setting there (npm strips `.git` from a tarball,
+git tracks no path with a `.git` component), the server can make a new one anywhere in the mount
+regardless, and walking it would pass the entry limit or slow every start. The directories that lead to each of
 them are held in place, so the server cannot move a setting away and put its own where it was: each
 is a mount point of its own, so renaming one fails with `EBUSY`, and moving a file from one held
 directory into another, or between a held directory and the rest of the mount, fails with `EXDEV`,

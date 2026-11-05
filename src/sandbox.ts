@@ -298,6 +298,19 @@ export const SETTINGS_LIMITS = { entries: 100_000, mounts: 1_000 };
  * is an explicit choice: it gets nothing on top of it or inside it. Anything that would leave a
  * setting writable, or take too long to find them all, refuses the start instead.
  *
+ * node_modules is left out on purpose. A setting there would have to exist before the server starts,
+ * and a package runner never puts one there: npm strips `.git` from a published tarball, and git
+ * refuses to track any path with a `.git` component, so neither `npm install` nor `git clone` drops
+ * a repository into it. The server can already make a new `.git` anywhere in a writable mount
+ * (a documented residual), so keeping a pre-existing one under node_modules read-only would add
+ * nothing. git on the host uses the nearest `.git` above the directory a command runs in, never one
+ * under node_modules; and VS Code's `git.autoRepositoryDetection`, on by default, scans to
+ * `git.repositoryScanMaxDepth` 1 and skips `git.repositoryScanIgnoredFolders`, whose default is
+ * `["node_modules"]` (checked in VS Code's extensions/git/package.json). Descending would be costly:
+ * a real project's node_modules measured here held 62,829 entries against 582 in the rest of it, and
+ * the walk, which runs at every start, went from 2 ms to about 100 ms; a larger one would pass the
+ * 100,000-entry limit and refuse an ordinary project's writable mount outright.
+ *
  * A read-only mount moves with its directory: a server that renamed `app` to `app.old` would take
  * `app/.git` along, read-only, and make a new `app/.git` of its own, which git on the host then runs.
  * So each directory on the way from the writable mount down to a setting is mounted too, onto itself

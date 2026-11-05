@@ -75,8 +75,15 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   so write access is an explicit choice, and `protect` names each writable mount of a caged server
   and counts it as caged with its cage opened. As a best effort, the git and editor settings that
   exist at start (`.git`, `.vscode`, `.idea`, `.cursor`, `.claude`, `.devin`, `.windsurf`,
-  `.mcp.json`, at any depth) stay read-only, because git and editors run the commands they name as
-  soon as the project is open; so does the repository a `.git` file points to. The directories that
+  `.mcp.json`, at any depth except under `node_modules`) stay read-only, because git and editors run
+  the commands they name as soon as the project is open; so does the repository a `.git` file points
+  to. `node_modules` is left out on purpose: a setting there would have to exist before the server
+  starts, and no package runner drops one there (npm strips `.git` from a tarball, git tracks no path
+  with a `.git` component); the server can make a new `.git` anywhere in a writable mount regardless
+  (below); git on the host uses the nearest `.git` above the working directory, never one under
+  `node_modules`, and VS Code's repository scan ignores `node_modules` and goes one level deep by
+  default; and walking a real `node_modules` (tens of thousands of entries) would pass the entry
+  limit, refusing an ordinary project, or slow every start. The directories that
   lead to each of them are held in place, each a mount point of its own, so that none can be moved
   away and replaced: renaming one fails with `EBUSY`, and moving a file from one held directory into
   another, or between a held directory and the rest of the mount, fails with `EXDEV`, as between two
