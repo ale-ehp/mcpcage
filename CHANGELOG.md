@@ -3,6 +3,31 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-11-05
+
+### Security
+
+- docker and npm, which mcpcage runs on your machine to build and start the cage, were given
+  mcpcage's whole environment, the server entry's `env` included, and docker hands its environment
+  to the programs it starts, its credential helpers among them. With Docker set up for Google's
+  registries by `gcloud auth configure-docker`, an entry whose `env` set `CLOUDSDK_PYTHON` to a
+  script had that script run on the host at the next build, before any container started, while
+  `mcpcage protect` counted the entry as caged. docker and npm now get an environment built from
+  names: the `PATH` of their install places, the variables `protect` reports as acting on the host
+  (yours, in a caged entry: `DOCKER_HOST`, `DOCKER_CONFIG`, `HOME`, `npm_config_*`...), and `USER`,
+  `LOGNAME`, the locale, `TMPDIR`, `SSH_AUTH_SOCK` and the proxy variables. Only `docker run` also
+  gets the variables named with `--env NAME`, and it now runs with `--pull never`, so no credential
+  helper runs then. Every published version up to 0.6.3 is affected. Advisory:
+  [GHSA-g5f7-cc77-v865](https://github.com/ale-ehp/mcpcage/security/advisories/GHSA-g5f7-cc77-v865).
+
+### Changed
+
+- A Docker credential helper that needs a variable mcpcage no longer passes does not get it: the
+  secretservice helper of Linux desktops looks for the session bus through
+  `DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`, and a `docker pull` that asks it may fail. See
+  THREAT-MODEL.md for this and for what `docker run` still passes on.
+- The npm package description says what mcpcage does in plain words, as the README does.
+
 ## [0.6.3] - 2026-11-05
 
 ### Changed
