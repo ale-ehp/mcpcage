@@ -21,6 +21,14 @@ import { WINDOWS_ENV, windowsEnv, windowsSources } from "./windows-places.js";
 const BASES = readBases();
 export const INSTALL_BASE = BASES.install;
 export const RUNTIME_BASE = BASES.runtime;
+/** The image a PyPI server is resolved in: uv, and a Python for it to query, never given a package. */
+export const PYPI_RESOLVE_BASE = BASES["pypi-resolve"];
+/** The image the uv binary of a PyPI server's install stage comes from: the resolve image's release. */
+export const UV_BASE = BASES["pypi-uv"];
+/** The install stage of a PyPI server: the runtime's own distroless base, as root. */
+export const PYPI_INSTALL_BASE = BASES["pypi-install"];
+/** The runtime of a PyPI server: distroless with the C library and no shell, nonroot. */
+export const PYPI_RUNTIME_BASE = BASES["pypi-runtime"];
 export const NONROOT = "65532:65532";
 
 export interface Mount {
@@ -1035,7 +1043,7 @@ function runtimeFile(name: string): string {
   throw new Error(`runtime/${name} is missing from the mcpcage installation`);
 }
 
-function readBases(): { install: string; runtime: string } {
+function readBases(): Record<"install" | "runtime" | "pypi-resolve" | "pypi-uv" | "pypi-install" | "pypi-runtime", string> {
   const text = readFileSync(runtimeFile("bases.Dockerfile"), "utf8");
   const from = (stage: string) => {
     const match = new RegExp(`^FROM\\s+(\\S+)\\s+AS\\s+${stage}\\s*$`, "im").exec(text);
@@ -1043,7 +1051,14 @@ function readBases(): { install: string; runtime: string } {
     if (!/@sha256:[0-9a-f]{64}$/.test(match[1])) throw new Error(`runtime/bases.Dockerfile: ${match[1]} is not pinned by digest`);
     return match[1];
   };
-  return { install: from("install"), runtime: from("runtime") };
+  return {
+    install: from("install"),
+    runtime: from("runtime"),
+    "pypi-resolve": from("pypi-resolve"),
+    "pypi-uv": from("pypi-uv"),
+    "pypi-install": from("pypi-install"),
+    "pypi-runtime": from("pypi-runtime"),
+  };
 }
 
 function shellQuote(text: string): string {

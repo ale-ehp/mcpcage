@@ -13,7 +13,9 @@ updates:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
   # Digest updates for the base images caged servers are built from. The Node line itself is
-  # chosen by hand, together with the distroless runtime (nodejs22) and @types/node.
+  # chosen by hand, together with the distroless runtime (nodejs22) and @types/node; so is uv's
+  # release, which before 1.0 can change what a resolve picks in a minor version (0.13.0 made
+  # Python 3.15 its default).
   - package-ecosystem: docker
     directory: /runtime
     schedule:
@@ -21,3 +23,5 @@ updates:
     ignore:
       - dependency-name: node
         update-types: ["version-update:semver-major"]
+      - dependency-name: ghcr.io/astral-sh/uv
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
