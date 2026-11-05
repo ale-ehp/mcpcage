@@ -3,6 +3,18 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-11-05
+
+### Changed
+
+- Releases are published to npm by trusted publishing: the release workflow trades its GitHub
+  Actions OIDC token for a short-lived npm one, so no npm token is stored in the repository or
+  anywhere else. The package keeps its provenance, its CycloneDX SBOM and its signed build
+  attestation. The release job runs on Node 24, whose npm supports it.
+- Development only: Stryker, which runs the mutation tests, is given minimatch and qs versions
+  without known vulnerabilities, through scoped npm overrides. Nothing changes for whoever installs
+  mcpcage, which still has no runtime dependencies.
+
 ## [0.6.2] - 2026-11-05
 
 A round of testing aimed at trust: a fourth review of the Windows code, the 24 most downloaded
