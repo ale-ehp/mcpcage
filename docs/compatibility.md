@@ -12,8 +12,9 @@ mcpcage](#what-the-run-found-in-mcpcage)), on 2026-11-04 (UTC):
   containerd image store), Node 26.8.
 - **Windows**: Windows 10 Enterprise LTSC 21H2 (x64), Docker Desktop 4.49.0 (engine 28.5.1,
   BuildKit), Node 24.15.
-- **Linux**: the [compat workflow](../.github/workflows/compat.yml) runs the same list on
-  ubuntu-latest every week, and by hand, and puts its table in the job's summary.
+- **Linux**: Ubuntu 24.04.5 on GitHub's ubuntu-latest runner, Docker 28.0.4, Node 22.23, with
+  mcpcage 0.6.3, on 2026-11-05 (UTC), by the [compat workflow](../.github/workflows/compat.yml),
+  which runs the same list every week, and by hand, and puts its table in the job's summary.
 
 To run it yourself, with Docker and the network:
 
@@ -45,34 +46,35 @@ work in the cage at all is in the notes.
 
 | Package | Downloads, last week | Version tested | macOS, Colima | Windows, Docker Desktop | Linux | Notes |
 |---|---:|---|---|---|---|---|
-| `@playwright/mcp` | 10,188,231 | 0.0.84 | ok, 25 tools | ok, 25 tools | see the compat workflow | Its browser tools fail: no browser in the cage ([browsers](#browsers-and-shells)) |
-| `@modelcontextprotocol/server-pdf` | 2,278,311 | 2.0.4 | ok, 9 tools | ok, 9 tools | see the compat workflow | Started as its README writes it, `npx -y --silent ... --stdio`, which 0.6.1 refused ([fix](#what-the-run-found-in-mcpcage)); call: `list_pdfs` |
-| `chrome-devtools-mcp` | 1,876,272 | 1.12.0 | ok, 32 tools | ok, 32 tools | see the compat workflow | Its tools fail: no Chrome in the cage ([browsers](#browsers-and-shells)) |
-| `@modelcontextprotocol/server-filesystem` | 1,294,151 | 2.2.0 | ok, 16 tools | ok, 16 tools | see the compat workflow | A folder mounted read-only; call: `list_allowed_directories`, which names it (on Windows at `/c/Users/...`) |
-| `mcp-remote` | 1,260,396 | 0.16.0 | needs network: with it, 3 tools | needs network: with it, 3 tools | see the compat workflow | A bridge to a remote server, here DeepWiki's, which needs no key ([network](#network)) |
-| `@upstash/context7-mcp` | 741,246 | 4.5.0 | ok, 2 tools | ok, 2 tools | see the compat workflow | Its calls fetch documentation: they need `--allow-net` |
-| `@wonderwhy-er/desktop-commander` | 724,305 | 0.3.1 | ok, 25 tools | ok, 25 tools | see the compat workflow | Call: `get_config`. Its commands fail: no shell in the cage ([shells](#browsers-and-shells)) |
-| `@notionhq/notion-mcp-server` | 387,210 | 2.6.1 | ok, 24 tools | ok, 24 tools | see the compat workflow | Starts without a token |
-| `@modelcontextprotocol/server-everything` | 315,517 | 2.2.1 | ok, 16 tools | ok, 16 tools | see the compat workflow | Call: `echo` |
-| `@modelcontextprotocol/server-memory` | 297,809 | 2.1.0 | ok, 9 tools | ok, 9 tools | see the compat workflow | Call: `read_graph`. To write, it needs `MEMORY_FILE_PATH` in a writable mount ([writing](#writing)) |
-| `hostinger-api-mcp` | 278,207 | 3.28.5 | ok, 3 tools | ok, 3 tools | see the compat workflow | Starts without a token |
-| `@sentry/mcp-server` | 237,679 | 0.42.0 | ok, 9 tools | ok, 9 tools | see the compat workflow | Dummy `SENTRY_ACCESS_TOKEN`: refuses to start without one ([keys](#keys)) |
-| `@zereight/mcp-gitlab` | 226,163 | 2.3.21 | ok, 40 tools | ok, 40 tools | see the compat workflow | Dummy `GITLAB_PERSONAL_ACCESS_TOKEN` ([keys](#keys)) |
-| `@pandacss/mcp` | 224,180 | 2.5.0 | ok, 12 tools | ok, 12 tools | see the compat workflow | Given `--cwd` and a mounted folder with a `panda.config.mjs` ([working directory](#working-directory)); call: `get_config` |
-| `@supabase/mcp-server-supabase` | 205,830 | 0.15.0 | needs network: with it, 19 tools | needs network: with it, 19 tools | see the compat workflow | Dummy `SUPABASE_ACCESS_TOKEN` ([keys](#keys)); `--read-only` |
-| `@modelcontextprotocol/server-github` | 189,189 | 2025.4.8 | ok, 26 tools | ok, 26 tools | see the compat workflow | Archived reference server; starts without a token |
-| `mongodb-mcp-server` | 186,455 | 3.2.2 | ok, 18 tools | ok, 18 tools | see the compat workflow | `--readOnly`; starts without a connection string |
-| `@modelcontextprotocol/server-slack` | 185,396 | 2025.4.25 | ok, 8 tools | ok, 8 tools | see the compat workflow | Archived reference server; dummy `SLACK_BOT_TOKEN` and `SLACK_TEAM_ID` ([keys](#keys)) |
-| `@modelcontextprotocol/server-sequential-thinking` | 183,170 | 2.1.1 | ok, 1 tool | ok, 1 tool | see the compat workflow | Call: `sequentialthinking` |
-| `@azure/mcp` | 161,645 | 4.0.0-beta.5 | ok, 73 tools | ok, 73 tools | see the compat workflow | `server start`, with `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` ([.NET](#net)) |
-| `figma-developer-mcp` | 159,735 | 0.13.2 | ok, 2 tools | ok, 2 tools | see the compat workflow | `--stdio`; dummy `FIGMA_API_KEY` ([keys](#keys)) |
-| `next-devtools-mcp` | 159,006 | 0.4.0 | ok, 4 tools | ok, 4 tools | see the compat workflow | |
-| `@modelcontextprotocol/server-postgres` | 155,598 | 0.6.2 | ok, 1 tool | ok, 1 tool | see the compat workflow | Archived reference server; given a database URL it cannot reach, it connects only to answer a query |
-| `firecrawl-mcp` | 147,462 | 3.37.0 | ok, 26 tools | ok, 26 tools | see the compat workflow | Starts without a key |
+| `@playwright/mcp` | 10,188,231 | 0.0.84 | ok, 25 tools | ok, 25 tools | ok, 25 tools | Its browser tools fail: no browser in the cage ([browsers](#browsers-and-shells)) |
+| `@modelcontextprotocol/server-pdf` | 2,278,311 | 2.0.4 | ok, 9 tools | ok, 9 tools | ok, 9 tools | Started as its README writes it, `npx -y --silent ... --stdio`, which 0.6.1 refused ([fix](#what-the-run-found-in-mcpcage)); call: `list_pdfs` |
+| `chrome-devtools-mcp` | 1,876,272 | 1.12.0 | ok, 32 tools | ok, 32 tools | ok, 32 tools | Its tools fail: no Chrome in the cage ([browsers](#browsers-and-shells)) |
+| `@modelcontextprotocol/server-filesystem` | 1,294,151 | 2.2.0 | ok, 16 tools | ok, 16 tools | ok, 16 tools | A folder mounted read-only; call: `list_allowed_directories`, which names it (on Windows at `/c/Users/...`) |
+| `mcp-remote` | 1,260,396 | 0.16.0 | needs network: with it, 3 tools | needs network: with it, 3 tools | needs network: with it, 3 tools | A bridge to a remote server, here DeepWiki's, which needs no key ([network](#network)) |
+| `@upstash/context7-mcp` | 741,246 | 4.5.0 | ok, 2 tools | ok, 2 tools | ok, 2 tools | Its calls fetch documentation: they need `--allow-net` |
+| `@wonderwhy-er/desktop-commander` | 724,305 | 0.3.1 | ok, 25 tools | ok, 25 tools | ok, 25 tools | Call: `get_config`. Its commands fail: no shell in the cage ([shells](#browsers-and-shells)) |
+| `@notionhq/notion-mcp-server` | 387,210 | 2.6.1 | ok, 24 tools | ok, 24 tools | ok, 24 tools | Starts without a token |
+| `@modelcontextprotocol/server-everything` | 315,517 | 2.2.1 | ok, 16 tools | ok, 16 tools | ok, 16 tools | Call: `echo` |
+| `@modelcontextprotocol/server-memory` | 297,809 | 2.1.0 | ok, 9 tools | ok, 9 tools | ok, 9 tools | Call: `read_graph`. To write, it needs `MEMORY_FILE_PATH` in a writable mount ([writing](#writing)) |
+| `hostinger-api-mcp` | 278,207 | 3.28.5 (Linux: 3.30.1) | ok, 3 tools | ok, 3 tools | ok, 3 tools | Starts without a token |
+| `@sentry/mcp-server` | 237,679 | 0.42.0 | ok, 9 tools | ok, 9 tools | ok, 9 tools | Dummy `SENTRY_ACCESS_TOKEN`: refuses to start without one ([keys](#keys)) |
+| `@zereight/mcp-gitlab` | 226,163 | 2.3.21 | ok, 40 tools | ok, 40 tools | ok, 40 tools | Dummy `GITLAB_PERSONAL_ACCESS_TOKEN` ([keys](#keys)) |
+| `@pandacss/mcp` | 224,180 | 2.5.0 | ok, 12 tools | ok, 12 tools | ok, 12 tools | Given `--cwd` and a mounted folder with a `panda.config.mjs` ([working directory](#working-directory)); call: `get_config` |
+| `@supabase/mcp-server-supabase` | 205,830 | 0.15.0 | needs network: with it, 19 tools | needs network: with it, 19 tools | needs network: with it, 19 tools | Dummy `SUPABASE_ACCESS_TOKEN` ([keys](#keys)); `--read-only` |
+| `@modelcontextprotocol/server-github` | 189,189 | 2025.4.8 | ok, 26 tools | ok, 26 tools | ok, 26 tools | Archived reference server; starts without a token |
+| `mongodb-mcp-server` | 186,455 | 3.2.2 | ok, 18 tools | ok, 18 tools | ok, 18 tools | `--readOnly`; starts without a connection string |
+| `@modelcontextprotocol/server-slack` | 185,396 | 2025.4.25 | ok, 8 tools | ok, 8 tools | ok, 8 tools | Archived reference server; dummy `SLACK_BOT_TOKEN` and `SLACK_TEAM_ID` ([keys](#keys)) |
+| `@modelcontextprotocol/server-sequential-thinking` | 183,170 | 2.1.1 | ok, 1 tool | ok, 1 tool | ok, 1 tool | Call: `sequentialthinking` |
+| `@azure/mcp` | 161,645 | 4.0.0-beta.5 | ok, 73 tools | ok, 73 tools | ok, 73 tools | `server start`, with `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` ([.NET](#net)) |
+| `figma-developer-mcp` | 159,735 | 0.13.2 | ok, 2 tools | ok, 2 tools | ok, 2 tools | `--stdio`; dummy `FIGMA_API_KEY` ([keys](#keys)) |
+| `next-devtools-mcp` | 159,006 | 0.4.0 | ok, 4 tools | ok, 4 tools | ok, 4 tools | |
+| `@modelcontextprotocol/server-postgres` | 155,598 | 0.6.2 | ok, 1 tool | ok, 1 tool | ok, 1 tool | Archived reference server; given a database URL it cannot reach, it connects only to answer a query |
+| `firecrawl-mcp` | 147,462 | 3.37.0 | ok, 26 tools | ok, 26 tools | ok, 26 tools | Starts without a key |
 
 Downloads are npm's for 2026-10-28 to 2026-11-03. The version tested is the one npm's `latest`
-gave on the day; the weekly run tests whatever `latest` is then. The two systems gave the same
-results and the same versions.
+gave on the day; the weekly run tests whatever `latest` is then. The three systems gave the same
+results, with the same number of tools. The versions were the same too, except for
+`hostinger-api-mcp`, whose `latest` was 3.30.1 by the day of the Linux run.
 
 ## Notes
 
