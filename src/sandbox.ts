@@ -184,18 +184,25 @@ export function parseMount(value: string): Mount {
 }
 
 /**
- * The mount of `path`, an absolute path of this machine, at its place in the cage (see cagePath).
- * On Windows the path is taken as the system spells it on disk (realpathSync.native: each name in
- * its case, long names for 8.3 short ones, C:\PROGRA~1 as C:\Program Files), because the
+ * The mount of `written`, an absolute path of this machine, at its place in the cage (see cagePath).
+ * The path is resolved first, on every system: `.` and `..` taken out as written, as Docker takes
+ * them out of a bind mount's source and target before it mounts. The system reads a `..` from where
+ * a symlink before it leads instead: for `/x/link/../proj` Docker mounted /x/proj, while existsSync
+ * and the settings walk (withSettingsReadOnly) read the proj next to where link points, so a
+ * writable mount of a repository named so got no read-only .git, and a server in the cage wrote its
+ * .git/config on the host. On Windows node hands every path to the system resolved already.
+ * On Windows the path is then taken as the system spells it on disk (realpathSync.native: each name
+ * in its case, long names for 8.3 short ones, C:\PROGRA~1 as C:\Program Files), because the
  * container compares paths with case: a read-only mount spelled one way did not cover the same
  * directory inside a writable mount spelled another way, and withSettingsReadOnly, which tells
  * what holds what by the paths, would have counted it as covered.
  */
-export function hostMount(path: string, readOnly: boolean): Mount {
-  // Checked before the disk is asked: a network path makes existsSync wait on the network. A path off
-  // any drive as written is refused as written: resolved, \\ alone (or //, \\.) became C:\, and the
+export function hostMount(written: string, readOnly: boolean): Mount {
+  // A path off any drive is refused as written: resolved, \\ alone (or //, \\.) became C:\, and the
   // whole drive was mounted.
-  if (process.platform === "win32") cagePath(offDrive(path) ? path : resolve(path));
+  const path = offDrive(written) ? written : resolve(written);
+  // Checked before the disk is asked: a network path makes existsSync wait on the network.
+  if (process.platform === "win32") cagePath(path);
   if (!existsSync(path)) throw new Error(`${path} does not exist`);
   const source = process.platform === "win32" ? realpathSync.native(path) : path;
   // A folder on a mapped network drive is spelled on disk as the share it is on.

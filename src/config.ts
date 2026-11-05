@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
 import { batchFile, envFileOf, foreignPath, mcpcageAt, movedPlaces, nodeScript, type ForeignPath, type McpcageCommand } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
@@ -473,11 +473,15 @@ export function withoutEnvValues(args: string[]): string[] {
 }
 
 
-/** The absolute path an argument names on this machine, when it exists here: `/x` as written, `~/x` expanded. */
+/**
+ * The absolute path an argument names on this machine, when it exists here: `/x` as written, `~/x`
+ * expanded. What must exist is what Docker would mount for it, `..` taken out as written (see
+ * hostMount): `/x/link/../proj` is /x/proj, wherever link leads.
+ */
 export function hostPath(arg: unknown): string | undefined {
   if (typeof arg !== "string") return undefined; // configuration files are not type-checked
   const path = arg.startsWith("~/") ? join(homedir(), arg.slice(2)) : arg;
-  return isAbsolute(path) && existsSync(path) ? path : undefined;
+  return isAbsolute(path) && existsSync(offDrive(path) ? path : resolve(path)) ? path : undefined;
 }
 
 /**

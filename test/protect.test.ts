@@ -1485,6 +1485,21 @@ describe("inspection sandbox", () => {
     expect(seen(inspected)).toEqual([`type=bind,source=${onDisk(data)},target=${place},readonly`, place, `${place}${process.platform === "win32" ? "/" : sep}notes.md`]);
   });
 
+  it("mounts what Docker mounts for a path with a .. after a symlink, and gives the server the path as written", () => {
+    // Docker takes each `..` out of a path as written: link/../proj is the proj next to link, while the
+    // system follows link to deep/a first. Only deep/only-deep exists where link leads: Docker would
+    // find no only-deep to mount. A link is a junction on Windows, which needs no privilege.
+    const top = realpathSync.native(mkdtempSync(join(tmpdir(), "mcpcage-data-")));
+    mkdirSync(join(top, "proj"));
+    mkdirSync(join(top, "deep", "a"), { recursive: true });
+    mkdirSync(join(top, "deep", "only-deep"));
+    symlinkSync(join(top, "deep", "a"), join(top, "link"), "junction");
+    const written = (name: string) => [top, "link", "..", name].join(sep);
+    const options = inspectionSandbox({ argv: ["npx", "-y", "@modelcontextprotocol/server-filesystem", written("proj"), written("only-deep")], env: {} });
+    expect(options.mounts).toEqual([{ source: join(top, "proj"), target: join(top, "proj"), readOnly: true }]);
+    expect(options.spec.args).toEqual([written("proj"), written("only-deep")]);
+  });
+
   it("inspects a server given a share on Windows without it, and says so, instead of failing the inspection", async () => {
     // `//x` names what `/x` names on macOS and Linux, and is a share on Windows (\\server\share):
     // what Windows cannot mount is tested here with a directory that exists. On Windows itself it is
@@ -1504,8 +1519,8 @@ describe("inspection sandbox", () => {
     // One server, described before scanConfigs first waits: all of it as on Windows.
     const report = await onWindows(() => scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, inspect }));
     expect(report.servers[0]!.inspection).toEqual({ tools: 1, findings: [], skipped: [{ path: share, reason: "it is not a path on a drive, and only those have a place in the cage on Windows" }] });
-    // On macOS and Linux it is an ordinary path, mounted.
-    if (process.platform !== "win32") expect(inspectionSandbox({ argv, env: {} }).mounts).toEqual([{ source: share, target: share, readOnly: true }]);
+    // On macOS and Linux it is an ordinary path, mounted as Docker reads it: //x is /x.
+    if (process.platform !== "win32") expect(inspectionSandbox({ argv, env: {} }).mounts).toEqual([{ source: dir, target: dir, readOnly: true }]);
   });
 
   // Windows allows no colon in a file name: no directory there is named .ssh:rw.

@@ -3,8 +3,8 @@
 // a way out in its environment and reach the network. Every attack must fail the way the cage
 // promises, and mcpcage must come through each one.
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { join, sep } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -248,6 +248,32 @@ describe.skipIf(!docker.ok)("an abusive server in its cage (real Docker)", () =>
       expect(readFileSync(config, "utf8")).toBe("[core]\n\trepositoryformatversion = 0\n");
       expect(readFileSync(settings, "utf8")).toBe("{}\n");
       expect(readdirSync(hooks)).toEqual([]);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it.skipIf(process.platform === "win32")("cannot change git's settings in a read-write mount named with a .. after a symlink", async () => {
+    // Docker takes each `..` out of a mount's path as written: project/link/../app is project/app. The
+    // system follows link first, to deep/a, and finds deep/app. Looked for there, app's .git got no
+    // read-only mount, and the server added a line to app/.git/config, which git on the host runs.
+    const project = mkdtempSync(join(root, "test", "fixtures", "abuse-project-"));
+    const app = join(project, "app");
+    const config = join(app, ".git", "config");
+    const notes = join(app, "notes.md");
+    mkdirSync(join(app, ".git"), { recursive: true });
+    mkdirSync(join(project, "deep", "a"), { recursive: true });
+    mkdirSync(join(project, "deep", "app"));
+    symlinkSync(join(project, "deep", "a"), join(project, "link"));
+    writeFileSync(config, "[core]\n\trepositoryformatversion = 0\n");
+    writeFileSync(notes, "# Notes\n");
+    for (const dir of [project, app, join(app, ".git")]) chmodSync(dir, 0o777);
+    for (const file of [config, notes]) chmodSync(file, 0o666);
+    try {
+      const report = await call<WriteReport>("write_outside", { args: { files: [config, notes] }, runArgs: ["--mount", `${[project, "link", "..", "app"].join(sep)}:rw`] });
+      expect(report.appends).toEqual({ [config]: "EROFS", [notes]: true });
+      expect(readFileSync(config, "utf8")).toBe("[core]\n\trepositoryformatversion = 0\n");
+      expect(readFileSync(notes, "utf8")).toBe("# Notes\n# appended by mcpcage-abuse\n");
     } finally {
       rmSync(project, { recursive: true, force: true });
     }

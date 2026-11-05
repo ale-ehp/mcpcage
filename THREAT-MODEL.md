@@ -77,7 +77,10 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   exist at start (`.git`, `.vscode`, `.idea`, `.cursor`, `.claude`, `.devin`, `.windsurf`,
   `.mcp.json`, at any depth except under `node_modules`) stay read-only, because git and editors run
   the commands they name as soon as the project is open; so does the repository a `.git` file points
-  to. `node_modules` is left out on purpose: a setting there would have to exist before the server
+  to. They are looked for in the directory Docker mounts: a mount's path is read as Docker reads it,
+  each `..` taking away the name written before it, so `/x/link/../app` is `/x/app` even where `link`
+  is a symlink, from whose target the system would take the `..`. `node_modules` is left out on
+  purpose: a setting there would have to exist before the server
   starts, and no package runner drops one there (npm strips `.git` from a tarball, git tracks no path
   with a `.git` component); the server can make a new `.git` anywhere in a writable mount regardless
   (below); git on the host uses the nearest `.git` above the working directory, never one under

@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseArgs } from "node:util";
 import { cageCheck, hostVariable, RUN_OPTIONS, unwrapEntry, wrapEntry, type ServerEntry } from "../src/config.js";
@@ -95,6 +95,24 @@ describe("an entry wrap cannot cage", () => {
     const dir = join(mkdtempSync(join(tmpdir(), "mcpcage-paths-")), "a:rwx", "notes");
     mkdirSync(dir, { recursive: true });
     expect(wrapEntry({ command: "npx", args: ["-y", "server", dir] }, { command: "mcpcage" })).toEqual({ entry: { command: "mcpcage", args: ["run", "--mount", dir, "--", "npx", "-y", "server", dir] } });
+  });
+});
+
+describe("the paths wrap mounts", () => {
+  it("are those Docker would mount for a path with a .. after a symlink, written as given", () => {
+    // Docker takes each `..` out of a path as written: link/../proj is the proj next to link, while the
+    // system follows link to deep/a first. Only deep/only-deep exists where link leads: a --mount of it
+    // would name nothing for Docker. A link is a junction on Windows, which needs no privilege.
+    const top = realpathSync.native(mkdtempSync(join(tmpdir(), "mcpcage-wrap-")));
+    mkdirSync(join(top, "proj"));
+    mkdirSync(join(top, "deep", "a"), { recursive: true });
+    mkdirSync(join(top, "deep", "only-deep"));
+    symlinkSync(join(top, "deep", "a"), join(top, "link"), "junction");
+    const written = (name: string) => [top, "link", "..", name].join(sep);
+    const server = ["npx", "-y", "@modelcontextprotocol/server-filesystem", written("proj"), written("only-deep")];
+    const result = wrapEntry({ command: server[0]!, args: server.slice(1) }, { command: "mcpcage" });
+    const args = "entry" in result ? result.entry.args! : [];
+    expect(args.slice(args.indexOf("run"))).toEqual(["run", "--mount", written("proj"), "--", ...server]);
   });
 });
 

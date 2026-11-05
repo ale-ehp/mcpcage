@@ -1,6 +1,6 @@
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync, type PathLike } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { unwrapConfig, wrapConfig } from "../src/config.js";
 import { asStored } from "./helpers.js";
@@ -9,6 +9,7 @@ import { asStored } from "./helpers.js";
 // full disk or when mcpcage is killed: the client must still find its whole old file.
 const rename = vi.hoisted(() => ({ fail: false }));
 // One path whose question fails, in place of whatever else could trip up the rewrite of one entry.
+// It is asked resolved (hostPath), which on Windows puts the current drive before /mcpcage-test.
 const lookup = vi.hoisted(() => ({ failFor: undefined as string | undefined }));
 vi.mock("node:fs", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:fs")>();
@@ -17,7 +18,7 @@ vi.mock("node:fs", async (importOriginal) => {
     original.renameSync(from, to);
   };
   const existsSync = (path: PathLike) => {
-    if (lookup.failFor !== undefined && path === lookup.failFor) throw Object.assign(new Error(`EIO: i/o error, access '${lookup.failFor}'`), { code: "EIO" });
+    if (lookup.failFor !== undefined && resolve(String(path)) === resolve(lookup.failFor)) throw Object.assign(new Error(`EIO: i/o error, access '${lookup.failFor}'`), { code: "EIO" });
     return original.existsSync(path);
   };
   return { ...original, renameSync, existsSync };

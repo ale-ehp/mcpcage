@@ -136,7 +136,10 @@ or put `mcpcage run` in front of a server command yourself:
 `wrap` and `protect --fix` add that `--mount` for you: every path a server is given as an argument
 and that exists on your machine is mounted read-only at the same path, and `~/` is expanded,
 because inside the cage HOME is `/tmp`; with `--writable` they are mounted writable (`:rw`), with
-a warning for each (see below). The exception is a path that would undo the cage: the whole
+a warning for each (see below). A path, here or in a `--mount` you write, is read as Docker reads
+it: each `..` takes away the name written before it, so `/Users/me/link/../notes` is
+`/Users/me/notes` even when `link` is a symlink to another place, and that is the directory mcpcage
+checks, looks through and mounts. The exception is a path that would undo the cage: the whole
 disk, your home directory, a directory with credentials or system files (`~/.ssh`, `~/.aws`,
 `~/.config/gh`, `/etc`, the Docker sockets, mcpcage's own `~/.mcpcage`...), or a place your machine
 runs commands from: other clients' MCP and agent configurations (`~/.cursor`, `~/.claude`, Claude

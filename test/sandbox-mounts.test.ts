@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cagePath, dockerProgram, hostMount, NOT_ON_A_DRIVE, parseMount, runArgs, SETTINGS_LIMITS, withSettingsReadOnly, type Mount } from "../src/sandbox.js";
 import { onWindows } from "./fake-programs.js";
@@ -117,6 +117,27 @@ describe("a --mount", () => {
     expect(parseMount("~/notes:rw")).toEqual({ source: join(home, "notes"), target: join(home, "notes"), readOnly: false });
     vi.spyOn(process, "cwd").mockReturnValue(home);
     expect(parseMount("notes")).toEqual({ source: join(home, "notes"), target: join(home, "notes"), readOnly: true });
+  });
+
+  it("is the directory Docker mounts when a .. follows a symlink, and the settings looked for are that directory's", () => {
+    // Docker takes each `..` out of a bind mount's path as written: link/../proj is the proj next to
+    // link. The system, asked for link/../proj, follows link first and finds the proj next to where
+    // it leads, deep/proj. Read so, a writable mount of the repository proj got no read-only .git:
+    // the settings were looked for in deep/proj, which holds none, and a server in the cage wrote
+    // proj/.git/config. deep/proj's own .vscode became a read-only mount of a proj/.vscode that does
+    // not exist. A link is a junction on Windows, which needs no privilege.
+    const dir = layout({ "proj/.git/config": "[core]\n", "deep/a/": "", "deep/proj/.vscode/settings.json": "{}\n" });
+    symlinkSync(join(dir, "deep", "a"), join(dir, "link"), "junction");
+    // join would take the .. out itself.
+    const written = [dir, "link", "..", "proj"].join(sep);
+    const proj = join(dir, "proj");
+    expect(hostMount(written, true)).toEqual(ro(proj));
+    expect(parseMount(written)).toEqual(ro(proj));
+    expect(parseMount(`${written}:rw`)).toEqual(rw(proj));
+    expect(settings([parseMount(`${written}:rw`)])).toEqual([rw(proj), ro(join(proj, ".git"))]);
+    // Where only the directory the link leads to exists, there is nothing for Docker to mount.
+    const deepOnly = [dir, "link", "..", "proj", ".vscode"].join(sep);
+    expect(refusal(() => parseMount(deepOnly))).toBe(`--mount: ${join(proj, ".vscode")} does not exist`);
   });
 });
 
