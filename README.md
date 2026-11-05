@@ -1,6 +1,7 @@
 # mcpcage
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ale-ehp/mcpcage/badge)](https://scorecard.dev/viewer/?uri=github.com/ale-ehp/mcpcage)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16366/badge)](https://www.bestpractices.dev/projects/16366)
 
 **Run any MCP server in a cage: tool definitions pinned, hidden instructions explained, calls audited, the server sandboxed in a hardened container.**
 
