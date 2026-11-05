@@ -196,6 +196,15 @@ function listOf(names: string[]): string {
 }
 
 /**
+ * `text` written so that a regular expression matches it as it is: each character that means
+ * something there (`.`, `\`, `(`, `[`, `+`, `|`, ...) escaped. Node 24 has RegExp.escape for this;
+ * mcpcage still runs on Node 22, which does not.
+ */
+export function escapeRegExp(text: string): string {
+  return text.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&");
+}
+
+/**
  * Variables of a server entry's `env` that act on the host once the entry starts mcpcage. A client
  * starts an entry's command with the entry's `env` added to its environment: after `wrap` that
  * command is mcpcage, so the `env` configures mcpcage's own process on the host, and the node,
@@ -264,7 +273,7 @@ export const HOST_ENV: ReadonlyArray<{ name: RegExp; to: "container" | "drop"; p
   // settings on the host. An entry whose env set ProgramData had mcpcage run that entry's
   // Docker\cli-plugins\docker-buildx.exe on the host at `docker build`, and protect called it caged.
   {
-    name: new RegExp(`^(?:${WINDOWS_PLACES.map((place) => place.replace(/[()]/g, "\\$&")).join("|")})$`, "i"),
+    name: new RegExp(`^(?:${WINDOWS_PLACES.map(escapeRegExp).join("|")})$`, "i"),
     to: "container",
     platform: "win32",
     what: (name) =>

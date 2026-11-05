@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseArgs } from "node:util";
-import { cageCheck, hostVariable, RUN_OPTIONS, unwrapEntry, wrapEntry, type ServerEntry } from "../src/config.js";
+import { cageCheck, escapeRegExp, hostVariable, RUN_OPTIONS, unwrapEntry, wrapEntry, type ServerEntry } from "../src/config.js";
+import { WINDOWS_PLACES } from "../src/windows-places.js";
 import { idleProgram, onWindows } from "./fake-programs.js";
 
 describe("the variables of an entry that act on the host", () => {
@@ -54,6 +55,46 @@ describe("the variables of an entry that act on the host", () => {
       expect(hostVariable("SystemRoot", "C:\\x")).toEqual({ to: "container", what: "is where Windows keeps its own code, which node loads from there as it starts mcpcage, before the cage starts" });
       expect(hostVariable("ProgramData", "C:\\x")).toEqual({ to: "container", what: "tells docker, npm and node on your machine where to find programs, plugins and settings" });
     });
+  });
+
+  it("on Windows match each of Windows' places by its whole name as written, in any case", () => {
+    onWindows(() => {
+      for (const name of WINDOWS_PLACES) {
+        for (const spelled of [name, name.toUpperCase(), name.toLowerCase()]) expect(hostVariable(spelled, "C:\\x")?.to, spelled).toBe("container");
+      }
+      // The parentheses of ProgramFiles(x86) are no group: the name matches only with them, in place.
+      for (const name of ["ProgramFilesx86", "ProgramFilesXx86X", "ProgramFiles(x86", "ProgramFiles(x86)x", "MY_ProgramFiles(x86)", "ProgramFiles(x86)|TEMP", "MY_TEMP", "TEMP_X"]) {
+        expect(hostVariable(name, "C:\\x"), name).toBeUndefined();
+      }
+    });
+  });
+});
+
+describe("escapeRegExp", () => {
+  it("makes a regular expression match a text exactly as it is written", () => {
+    const texts = [".", "\\", "a.b", "C:\\x", "x+", "(x86)", "[x]", "a{2}", "^a$", "a|b", "a*?", "/x/", "$&", "a\\.b"];
+    for (const text of texts) {
+      expect(new RegExp(`^${escapeRegExp(text)}$`).test(text), text).toBe(true);
+      // Also with the u flag, which refuses an escape of a character that means nothing.
+      expect(new RegExp(`^${escapeRegExp(text)}$`, "u").test(text), text).toBe(true);
+    }
+  });
+
+  it("leaves no character to stand for another", () => {
+    // Each text with a text its characters would match if they were read as a pattern.
+    const loose: Array<[string, string]> = [
+      ["a.b", "aXb"],
+      ["C:\\x", "C:x"],
+      ["x+", "xx"],
+      ["(x86)", "x86"],
+      ["[x]", "x"],
+      ["a{2}", "aa"],
+      ["a|b", "a"],
+      ["a*", ""],
+      ["a?", ""],
+      ["a\\.b", "a.b"],
+    ];
+    for (const [text, other] of loose) expect(new RegExp(`^${escapeRegExp(text)}$`).test(other), `${text} matched ${other}`).toBe(false);
   });
 });
 
