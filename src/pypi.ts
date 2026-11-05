@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { sha256 } from "./canonical.js";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
+import { canonicalJson, sha256 } from "./canonical.js";
 import { pypiRequirement, type PypiLaunch } from "./launch.js";
-import { serverDir } from "./paths.js";
-import { dockerProgram, ensureDir, NONROOT, PYPI_RESOLVE_BASE } from "./sandbox.js";
+import { cageHome, serverDir } from "./paths.js";
+import { readJson } from "./pinstore.js";
+import { dockerProgram, ensureDir, NONROOT, PYPI_INSTALL_BASE, PYPI_RESOLVE_BASE, PYPI_RUNTIME_BASE, UV_BASE, type SandboxOptions, type ServerRecord } from "./sandbox.js";
 import { terminalSafe } from "./terminal.js";
 
 /*
@@ -356,6 +357,227 @@ function versionKey(version: string): number[] | undefined {
   key.push(hasPost ? Number(post || 0) : -1);
   key.push(dev !== undefined ? Number(devNumber || 0) : Number.MAX_SAFE_INTEGER);
   return key;
+}
+
+/**
+ * Builds (or reuses) the image of a PyPI server and returns its record. The lock is reused, and
+ * nothing is resolved again, unless --rebuild, or the part of the spec that decides what is installed
+ * changed (the requirement, --with, --python, the resolution options; the server's own arguments do
+ * not), or the engine is of another architecture than the lock's wheels (a store copied to another
+ * machine), or the lock on disk is not the one recorded. So `@latest` and an unpinned requirement
+ * mean the newest release at the first build, kept until --rebuild, as uvx keeps the tool it cached.
+ * The image is built again from the same lock when it is gone, and reused when its tag is there.
+ */
+export function preparePypiImage(options: SandboxOptions, runner: DockerRunner = realDocker): ServerRecord {
+  const spec = options.spec as PypiLaunch;
+  const dir = serverDir(options.serverId);
+  const previous = readJson<ServerRecord>(join(dir, "server.json"));
+  const platform = wheelPlatform(runner);
+  const lockfile = join(dir, "requirements.lock");
+  const kept = existsSync(lockfile) ? readFileSync(lockfile, "utf8") : undefined;
+  const reuse =
+    !options.rebuild &&
+    previous?.spec.kind === "pypi" &&
+    canonicalJson(installed(previous.spec)) === canonicalJson(installed(spec)) &&
+    previous.platform === platform &&
+    previous.python !== undefined &&
+    previous.packageName !== undefined &&
+    previous.version !== undefined &&
+    kept !== undefined &&
+    sha256(kept) === previous.lockfileSha256;
+  const locked = reuse
+    ? { packageName: previous.packageName!, version: previous.version!, python: previous.python!, lock: kept }
+    : lockPypi(options.serverId, spec, { log: options.log, runner, platform });
+  const python = managedPython(locked.python);
+  const dockerfile = pypiDockerfile({ command: spec.command, python });
+  // The image is a function of the lock and the Dockerfile, which names the Python, the bases and the
+  // command: the same tag is the same image, whoever built it.
+  const tag = `mcpcage/${options.serverId}:${sha256(`${locked.lock}\n${dockerfile}`).slice(0, 12)}`;
+  let id = imageIdOf(tag, runner);
+  if (id === undefined || options.rebuild) {
+    buildPypiImage({ serverId: options.serverId, tag, dockerfile, lock: locked.lock }, { log: options.log, runner });
+    id = imageIdOf(tag, runner);
+    if (id === undefined) throw new Error(`docker build left no image ${tag}`);
+  }
+  // The same image: the record stays, with the spec of this start (its arguments may differ).
+  if (reuse && previous.image === tag && previous.imageId === id) return { ...previous, spec };
+  return {
+    serverId: options.serverId,
+    spec,
+    image: tag,
+    imageId: id,
+    packageName: locked.packageName,
+    version: locked.version,
+    lockfileSha256: sha256(locked.lock),
+    python,
+    platform,
+    uvVersion: uvVersion(),
+    builtAt: new Date().toISOString(),
+  };
+}
+
+/** What of a PyPI spec decides what is installed: a change in any of it is a new resolve. */
+function installed(spec: PypiLaunch): unknown {
+  return { requirement: spec.requirement, with: spec.with, python: spec.python ?? null, resolution: spec.resolution };
+}
+
+/**
+ * Builds the image `tag` from `lock` with `dockerfile` (see pypiDockerfile). Docker's build cache is
+ * used: the npm path builds a fresh install with --no-cache because `npm install` resolves inside the
+ * build, so a cached layer of an earlier build held an older resolve; here nothing resolves in the
+ * build. Each step is a function of what it is given: the Python by its exact version, which uv
+ * checks against the sha256 it ships with, and the packages by the hashes of the lock, which
+ * `uv pip sync --require-hashes` checks. A layer from the cache is the layer the step would make.
+ * `wheels`, for tests alone: local wheel files put in the context under wheels/, for a lock that
+ * names them in /app/wheels; mcpcage itself never passes any.
+ */
+export function buildPypiImage(
+  build: { serverId: string; tag: string; dockerfile: string; lock: string },
+  options: { log: (message: string) => void; runner?: DockerRunner; wheels?: string[] },
+): void {
+  const runner = options.runner ?? realDocker;
+  ensureDir(cageHome());
+  const context = mkdtempSync(join(cageHome(), "build-"));
+  try {
+    writeFileSync(join(context, "Dockerfile"), build.dockerfile);
+    writeFileSync(join(context, "requirements.lock"), build.lock);
+    if (options.wheels !== undefined && options.wheels.length > 0) {
+      mkdirSync(join(context, "wheels"));
+      for (const wheel of options.wheels) copyFileSync(wheel, join(context, "wheels", basename(wheel)));
+    }
+    options.log(`mcpcage: building the sandbox image for ${build.serverId} from its lock (wheels only, no package code runs)...`);
+    const result = runner(["build", "--label", `mcpcage.server=${build.serverId}`, "-t", build.tag, context], { stream: true });
+    if (result.status !== 0) throw new Error(`docker build failed for ${build.serverId}${result.stderr.trim() === "" ? "" : `: ${firstLines(result.stderr)}`}`);
+  } finally {
+    rmSync(context, { recursive: true, force: true });
+  }
+}
+
+/** The id of the image `reference`, or undefined when there is none. */
+function imageIdOf(reference: string, runner: DockerRunner): string | undefined {
+  const result = runner(["image", "inspect", "--format", "{{.Id}}", reference]);
+  return result.status === 0 && result.stdout.trim() !== "" ? result.stdout.trim() : undefined;
+}
+
+/**
+ * The CPython uv installs for each minor version the cage runs: the newest patch that the pinned uv
+ * (0.13.7) knows, python-build-standalone 20261026, which uv checks against the sha256 it ships with.
+ * test/pypi.docker.test.ts asks the pinned uv, so that a uv bump that knows newer ones fails until
+ * this table follows it.
+ */
+export const MANAGED_PYTHON: ReadonlyMap<string, string> = new Map([
+  ["3.10", "3.10.22"],
+  ["3.11", "3.11.18"],
+  ["3.12", "3.12.16"],
+  ["3.13", "3.13.18"],
+  ["3.14", "3.14.10"],
+  ["3.15", "3.15.2"],
+]);
+
+/** The exact CPython to install for `python`: a minor version from MANAGED_PYTHON, or the patch --python names. */
+export function managedPython(python: string): string {
+  const exact = /^3\.1[0-5]\.(?:0|[1-9][0-9]{0,2})$/.test(python) ? python : MANAGED_PYTHON.get(python);
+  if (exact === undefined) throw new Error(`the cage runs CPython 3.10 to 3.15, and ${terminalSafe(JSON.stringify(python))} is not one of them`);
+  return exact;
+}
+
+/** The release of the uv that builds the image, from the tag of its pinned image. */
+export function uvVersion(): string {
+  const version = /^ghcr\.io\/astral-sh\/uv:([0-9]+\.[0-9]+\.[0-9]+)@sha256:/.exec(UV_BASE)?.[1];
+  if (version === undefined) throw new Error(`runtime/bases.Dockerfile: ${UV_BASE} is not uv's image tagged with its release`);
+  return version;
+}
+
+/** A console script's name as the cage starts it: a plain file name of the venv's bin. */
+const COMMAND = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/*
+ * Removes pip from the managed Python's own site-packages, and its scripts: the venv never had it,
+ * and the runtime keeps no package manager, as the npm path's keeps no npm. uv links each minor
+ * version to its install (cpython-3.13-linux-... -> cpython-3.13.18-linux-...), which is skipped.
+ */
+const REMOVE_PIP = [
+  "import glob, os, shutil",
+  "for home in glob.glob('/opt/python/*'):",
+  "    if os.path.islink(home):",
+  "        continue",
+  "    for path in glob.glob(home + '/lib/python3.*/site-packages/pip') + glob.glob(home + '/lib/python3.*/site-packages/pip-*.dist-info') + glob.glob(home + '/bin/pip*'):",
+  "        if os.path.isdir(path) and not os.path.islink(path):",
+  "            shutil.rmtree(path)",
+  "        else:",
+  "            os.remove(path)",
+  "",
+].join("\n");
+
+/*
+ * Compiles the bytecode of each directory given, in worker processes (compile_dir's workers=0), the
+ * .pyc files valid whatever the sources' times say (the image never changes). A file that does not
+ * compile is left without bytecode, as pip and uv leave it: nothing can import it anyway, and some
+ * wheels still carry a file written for Python 2 (olefile's olefile2.py, which excel-mcp-server
+ * depends on), for which `python -m compileall` exits 1 and failed the whole build.
+ */
+const COMPILE = [
+  "import compileall, py_compile, sys",
+  "for path in sys.argv[1:]:",
+  "    compileall.compile_dir(path, quiet=2, workers=0, invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)",
+  "",
+].join("\n");
+
+/** Fails the build, naming the programs the venv has, when the command is not one of them. */
+const COMMAND_EXISTS =
+  "import os, sys; b = '/app/venv/bin'; p = os.path.join(b, sys.argv[1]); " +
+  "sys.exit(0 if os.path.isfile(p) and os.access(p, os.X_OK) else 'no ' + sys.argv[1] + ' in the package; it has: ' + ', '.join(sorted(os.listdir(b))))";
+
+/**
+ * The Dockerfile of a PyPI server. The install stage puts the exact managed CPython in /opt/python,
+ * makes an empty venv, and installs the lock into it with the one uv command that touches the venv:
+ * `uv pip sync --require-hashes --no-build`, on the empty venv, which starts no Python of the venv
+ * with packages in it. Nothing after it starts uv. Python itself runs only with -I -S: -S skips the
+ * site module, so no .pth file of a package (whose `import` lines site executes at every start),
+ * no sitecustomize; -I ignores the PYTHON* variables and the user's site. So no package code runs
+ * in the build, which has the network. Bytecode is compiled so, never with uv's --compile-bytecode,
+ * which runs the venv's Python with its site; the runtime's root is read-only, so Python could never
+ * cache it there, and python-build-standalone ships the standard library without it. The runtime
+ * stage gets the interpreter and the venv only, and starts the console script, whose
+ * `#!/app/venv/bin/python` line the kernel follows: no shell, no uv, no pip there.
+ *
+ * Every RUN is in exec form: the distroless bases have no shell. The command and the Python are
+ * checked before they are written, as the npm path quotes its install line. `wheels` adds the
+ * context's wheels/ for a test's lock (see buildPypiImage), and nothing else.
+ */
+export function pypiDockerfile(build: { command: string; python: string; wheels?: boolean }): string {
+  const python = managedPython(build.python);
+  if (!COMMAND.test(build.command)) throw new Error("the command of a PyPI server must be a plain file name: letters, digits, dots, dashes and underscores, starting with a letter or digit");
+  const minor = python.split(".").slice(0, 2).join(".");
+  const venvPython = "/app/venv/bin/python";
+  const run = (...argv: string[]) => `RUN ${JSON.stringify(argv)}`;
+  return [
+    "# Generated by mcpcage. The install stage installs the locked wheels with their hashes checked,",
+    "# never building a package; the runtime stage gets the interpreter and the venv only.",
+    `FROM ${UV_BASE} AS uv`,
+    `FROM ${PYPI_INSTALL_BASE} AS install`,
+    "COPY --from=uv /uv /usr/local/bin/uv",
+    "ENV UV_NO_CONFIG=1 UV_NO_CACHE=1 UV_NO_BUILD=1 UV_NO_PROGRESS=1 UV_LINK_MODE=copy UV_PYTHON_INSTALL_DIR=/opt/python UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_BIN=0 UV_PYTHON_INSTALL_REGISTRY=0",
+    run("uv", "python", "install", python),
+    run("uv", "venv", "--python", python, "/app/venv"),
+    ...(build.wheels === true ? ["COPY wheels /app/wheels"] : []),
+    "COPY requirements.lock /app/requirements.lock",
+    "# The only uv command once the venv exists, on the empty venv.",
+    run("uv", "pip", "sync", "--require-hashes", "--no-build", "--python", venvPython, "/app/requirements.lock"),
+    "# Python with -I -S only: no site module, so no .pth file of a package runs.",
+    run(venvPython, "-I", "-S", "-c", REMOVE_PIP),
+    run(venvPython, "-I", "-S", "-c", COMPILE, `/app/venv/lib/python${minor}/site-packages`, "/opt/python"),
+    run(venvPython, "-I", "-S", "-c", COMMAND_EXISTS, build.command),
+    "",
+    `FROM ${PYPI_RUNTIME_BASE}`,
+    "COPY --from=install /opt/python /opt/python",
+    "COPY --from=install /app/venv /app/venv",
+    "ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1",
+    "WORKDIR /app",
+    `USER ${NONROOT}`,
+    `ENTRYPOINT ${JSON.stringify([`/app/venv/bin/${build.command}`])}`,
+    "",
+  ].join("\n");
 }
 
 /** The first lines of what a program printed on stderr, for an error message. */

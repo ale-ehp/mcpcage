@@ -9,6 +9,7 @@ import { hostEnvName } from "./config.js";
 import type { LaunchSpec } from "./launch.js";
 import { cageHome, serverDir } from "./paths.js";
 import { readJson, writeJson } from "./pinstore.js";
+import { preparePypiImage } from "./pypi.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
 import { WINDOWS_ENV, windowsEnv, windowsSources } from "./windows-places.js";
@@ -40,7 +41,7 @@ export interface Mount {
 
 export interface SandboxOptions {
   serverId: string;
-  spec: Extract<LaunchSpec, { kind: "npm" | "image" }>;
+  spec: Extract<LaunchSpec, { kind: "npm" | "image" | "pypi" }>;
   mounts: Mount[];
   /** `NAME` (value taken from mcpcage's own environment) or `NAME=value`. */
   env: string[];
@@ -62,6 +63,12 @@ export interface ServerRecord {
   version?: string;
   integrity?: string;
   lockfileSha256?: string;
+  /** A PyPI server's: the exact CPython installed (3.13.18). */
+  python?: string;
+  /** A PyPI server's: the platform its wheels are for (aarch64-manylinux_2_40). */
+  platform?: string;
+  /** A PyPI server's: the release of the uv that resolved and installed it. */
+  uvVersion?: string;
   builtAt: string;
 }
 
@@ -90,7 +97,7 @@ export function prepareSandbox(options: SandboxOptions): Prepared {
     // Fail closed: never fall back to running the server on the host.
     throw new Error(`Docker is required to cage a server (${docker.error}). Start Docker, or use --no-sandbox to run on the host with pinning and audit only.`);
   }
-  const record = options.spec.kind === "npm" ? prepareNpmImage(options) : prepareImage(options);
+  const record = options.spec.kind === "npm" ? prepareNpmImage(options) : options.spec.kind === "pypi" ? preparePypiImage(options) : prepareImage(options);
   writeJson(join(serverDir(options.serverId), "server.json"), record);
   // The paths come from the user's arguments or the entry's.
   for (const line of placesInCage(options.mounts)) options.log(terminalSafe(`mcpcage: ${line}`));

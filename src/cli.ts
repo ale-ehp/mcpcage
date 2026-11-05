@@ -218,6 +218,10 @@ async function run(argv: string[]): Promise<number> {
       package: prepared.record.packageName,
       version: prepared.record.version,
       integrity: prepared.record.integrity,
+      // A PyPI server's: the CPython, the wheels' platform and the uv that installed them.
+      python: prepared.record.python,
+      platform: prepared.record.platform,
+      uvVersion: prepared.record.uvVersion,
       network: values["allow-net"] ? "bridge" : "none",
       mounts: values.mount,
       env: values.env.map((variable) => variable.split("=")[0]),

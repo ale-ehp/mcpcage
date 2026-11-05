@@ -23,6 +23,8 @@ import { dockerProgram } from "../src/sandbox.js";
 export interface BuiltImages {
   /** Notes what the mcpcage command that returned `result` built with `home` as MCPCAGE_HOME, and returns `result`. */
   track<Result extends { stderr: string }>(result: Result, home: string): Result;
+  /** Notes what a build that the test ran itself printed, and the image it made (an id or a tag). */
+  note(output: string, image?: string): void;
   /**
    * Removes the images noted, the containers of a build step that failed and any container still
    * running from them. Docker gone, or anything it refuses, is a warning: it never fails the run.
@@ -44,8 +46,12 @@ export function builtImages(): BuiltImages {
       fromServers(home, images);
       return result;
     },
+    note(output, image) {
+      fromBuildOutput(output, images, containers);
+      if (image !== undefined) images.add(image);
+    },
     remove() {
-      if (before === undefined || homes.size === 0) return;
+      if (before === undefined || (homes.size === 0 && images.size === 0 && containers.size === 0)) return;
       if (imagesNow() === undefined) {
         console.warn("mcpcage tests: Docker did not answer, so the images this file built were not removed");
         return;
@@ -106,7 +112,7 @@ function fromServers(home: string, images: Set<string>): void {
     try {
       const record = JSON.parse(readFileSync(join(home, "servers", server, "server.json"), "utf8")) as { spec?: { kind?: string }; imageId?: string };
       // An image given with --image was pulled or was there, not built.
-      if (record.spec?.kind === "npm" && record.imageId) images.add(record.imageId);
+      if ((record.spec?.kind === "npm" || record.spec?.kind === "pypi") && record.imageId) images.add(record.imageId);
     } catch {
       // no image built for this server
     }
