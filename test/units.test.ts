@@ -47,7 +47,7 @@ describe("launch parsing", () => {
       kind: "npm", packageName: "@modelcontextprotocol/server-pdf", versionRange: undefined, args: ["--stdio"],
     });
     expect(parseLaunch(["npx", "-s", "-y", "mcp-server"])).toMatchObject({ kind: "npm", packageName: "mcp-server", args: [] });
-    expect(parseLaunch(["uvx", "mcp-server-time"])).toEqual({ kind: "host", command: "uvx", args: ["mcp-server-time"] });
+    expect(parseLaunch(["python3", "server.py"])).toEqual({ kind: "host", command: "python3", args: ["server.py"] });
     expect(parseLaunch([], "mcp/time")).toEqual({ kind: "image", image: "mcp/time", args: [] });
   });
 

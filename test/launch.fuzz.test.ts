@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { serverType } from "../src/config.js";
-import { cmdNpx, isNpx, npxArgv, parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
+import { cmdNpx, isNpx, npxArgv, parseLaunch, pypiRequirement, serverIdFor, splitPackageSpec, toolRunArgs, type PypiLaunch } from "../src/launch.js";
 import { anyText, check, TIMEOUT } from "./fuzz.js";
 
 /*
@@ -10,12 +10,50 @@ import { anyText, check, TIMEOUT } from "./fuzz.js";
  * without cmd, so it must hold nothing cmd would have read differently.
  */
 
+/** Words of uv's command lines: uvx and uv, their flags and values, requirements of every kind. */
+const UV_WORDS = [
+  "uvx", "UVX.EXE", "uvx.exe", "C:\\Users\\me\\.local\\bin\\uvx.exe", "/usr/local/bin/uvx", "uv", "uv.exe", "tool", "run",
+  "--from", "--from=x", "--with", "-w", "--with=a,b>=1,<2", "-wx", "-p", "--python", "--python=3.13", "-p3.12", "3.12", "3.12.4", "3.9", "312",
+  "--prerelease", "allow", "--exclude-newer", "P3D", "2026-01-01", "3 days", "--color", "never", "--offline", "-q", "-qq", "-qwx", "-n", "--refresh",
+  "--index-url", "--index-url=https://u:p@x/simple", "-i", "-ihttps://x", "--directory", "--constraints", "--no-binary", "--upgrade", "-U",
+  "mcp-server-time", "Mcp_Server.Time", "mcp-server-time@latest", "mcp-server-time@2026.1.26", "pkg@v1.2", "pkg[x]", "pkg[a,b]@1.0", "pkg==1.0", "pkg>=1,<2",
+  "pkg ~= 1.2", "pkg===1.0", "pkg==1.*", "pkg@>=1", "pkg@LATEST", "pkg@", "@1.2", "pkg; python_version>'3'", "pkg @ https://x/y.whl", "git+https://x/y",
+  "git+ssh://git@github.com/x/y", "https://x/y-1.0-py3-none-any.whl", "./x", "../x", "/abs/x.whl", "x.tar.gz", "foo.zip", "x.exe", "server.cmd", "python", ".", "..",
+];
+
 /** Words of a command line: npx's flags, package specs, cmd's switches, and the characters cmd reads. */
 const word = fc.oneof(
   { weight: 3, arbitrary: anyText(12) },
   { weight: 3, arbitrary: fc.constantFrom("npx", "NPX", "npx.cmd", "C:\\nodejs\\npx.cmd", "-y", "--yes", "-q", "-p", "--package=x", "-c", "--", "@acme/notes-mcp", "@acme/notes-mcp@1.2.3", "@scope", "pkg@", "./x", ".\\x", "C:\\x", "x.tgz", "~/x") },
+  { weight: 3, arbitrary: fc.constantFrom(...UV_WORDS) },
   { weight: 2, arbitrary: fc.constantFrom("/c", "/C", "/d", "/s", "/D", "/q", "/k", "/c npx", "npx&calc", "a b", "a\tb", "", "%PATH%", "!x!", "^", "(", ")", '"', "<", ">", "|", "&", "\u00a0", "\u3000", ",", ";", "=") },
 );
+
+/**
+ * What every PyPI spec must hold, whatever line it was read from: a requirement and --with values of
+ * the PyPI subset, never a path, a URL or a flag; a project that is the requirement's name in normal
+ * form; a command that is a plain file name; a Python the cage has; the server's own arguments at the
+ * end of the line uv's `tool run` reads.
+ */
+function expectPypi(spec: PypiLaunch, argv: string[], platform: NodeJS.Platform): void {
+  const line = toolRunArgs(argv, platform)!;
+  expect(line).toBeDefined();
+  expect(line.slice(line.length - spec.args.length)).toEqual(spec.args);
+  const parsed = pypiRequirement(spec.requirement);
+  expect(parsed, spec.requirement).toBeDefined();
+  expect(spec.project).toBe(parsed!.name.toLowerCase().replace(/[-_.]+/g, "-"));
+  for (const requirement of [spec.requirement, ...spec.with]) {
+    expect(pypiRequirement(requirement), requirement).toBeDefined();
+    expect(requirement, requirement).not.toMatch(/^[\s]*-|[/\\@;]|:\/\/|\.(?:whl|zip|tgz|tar)$/i);
+  }
+  expect(spec.command).not.toBe("");
+  expect(spec.command).not.toMatch(/^-|[/\\\u0000-\u001f\u007f]|^\.\.?$/);
+  // A command after --from, written for Windows, is never one of its own programs or scripts. Without
+  // --from the command is the package's name as written, which uvx reads as a name even with .exe.
+  if (platform === "win32" && spec.command !== parsed!.name) expect(spec.command).not.toMatch(/\.(?:exe|cmd|bat|ps1)$/i);
+  if (spec.python !== undefined) expect(spec.python).toMatch(/^3\.1[0-5](?:\.[0-9]+)?$/);
+  if (spec.resolution.prerelease !== undefined) expect(["disallow", "allow", "if-necessary", "explicit", "if-necessary-or-explicit"]).toContain(spec.resolution.prerelease);
+}
 
 const CMD = fc.constantFrom("cmd", "cmd.exe", "CMD.EXE", "C:\\Windows\\System32\\cmd.exe", "c:/windows/system32/cmd.exe", ".\\cmd.exe", "cmd.com", "xcmd");
 
@@ -43,10 +81,72 @@ describe("command lines, fuzzed", () => {
             expect(line.slice(line.length - spec.args.length)).toEqual(spec.args);
             expect(spec.packageName !== "" || spec.localPath !== undefined).toBe(true);
             if (spec.packageName !== "") expect(splitPackageSpec(spec.packageName).name).toBe(spec.packageName);
+          } else if (spec.kind === "pypi") {
+            expectPypi(spec, argv, platform);
           } else {
             expect(spec).toEqual({ kind: "host", command: argv[0], args: argv.slice(1) });
+            expect(toolRunArgs(argv, platform)).toBeUndefined();
           }
           expect(serverIdFor(spec)).toMatch(/^[a-z0-9-]{1,40}-[0-9a-f]{8}$/);
+        }),
+        2000,
+      );
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "read a uvx or uv tool run line into a PyPI spec the cage can build, or refuse it with a plain error",
+    () => {
+      let read = 0;
+      check(
+        fc.property(
+          fc.constantFrom(["uvx"], ["UVX.EXE"], ["C:\\Users\\me\\.local\\bin\\uvx.exe"], ["/usr/local/bin/uvx"], ["uv", "tool", "run"], ["uv.exe", "tool", "run"]),
+          fc.array(fc.oneof({ weight: 1, arbitrary: anyText(10) }, { weight: 4, arbitrary: fc.constantFrom(...UV_WORDS) }), { maxLength: 7 }),
+          fc.constantFrom<NodeJS.Platform>("darwin", "linux", "win32"),
+          (start, words, platform) => {
+            const argv = [...start, ...words];
+            let spec;
+            try {
+              spec = parseLaunch(argv, undefined, platform);
+            } catch (error) {
+              expect((error as Error).constructor).toBe(Error);
+              // A refusal names a flag, never its value: neither the password of an index URL nor a token.
+              expect((error as Error).message).not.toMatch(/u:p@|https:\/\/x/);
+              return;
+            }
+            if (spec.kind === "host") {
+              // Only a name that Windows alone reads without case, read elsewhere.
+              expect(platform !== "win32" && /[A-Z]/.test(start[0]!)).toBe(true);
+              return;
+            }
+            expect(spec.kind).toBe("pypi");
+            read++;
+            expectPypi(spec as PypiLaunch, argv, platform);
+            expect(serverIdFor(spec)).toMatch(/^[a-z0-9-]{1,40}-[0-9a-f]{8}$/);
+          },
+        ),
+        2000,
+      );
+      // Not an empty property: many lines are read.
+      expect(read).toBeGreaterThan(100);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "take a requirement only when it is a name, extras and versions",
+    () => {
+      const piece = fc.oneof(anyText(6), fc.constantFrom("pkg", "Pkg_1.x", "[", "]", "x", ",", " ", "==", "!=", "<=", ">=", "<", ">", "~=", "===", "1.0", "1.*", "v2", "+local", "rc1", ".post1", ".dev0", "@", ";", "(", ")", "://", "/", "\\", ".whl", ".tar.gz", "-", "_", "."));
+      check(
+        fc.property(fc.array(piece, { maxLength: 8 }), (pieces) => {
+          const text = pieces.join("");
+          const parsed = pypiRequirement(text);
+          if (parsed === undefined) return;
+          expect(parsed.name).toMatch(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/);
+          expect(text).not.toMatch(/[@;()/\\]|:\/\//);
+          expect(text).toMatch(/^[ \t]*[A-Za-z0-9]/);
+          for (const specifier of parsed.specifiers) expect(specifier).toMatch(/^(?:===|==|!=|<=|>=|~=|<|>)v?[0-9]/i);
         }),
         2000,
       );

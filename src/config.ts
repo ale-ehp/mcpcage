@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
 import { batchFile, envFileOf, foreignPath, mcpcageAt, movedPlaces, nodeScript, type ForeignPath, type McpcageCommand } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
-import { cmdNpx, isNpx, npxArgv, parseLaunch } from "./launch.js";
+import { cmdNpx, isNpx, npxArgv, parseLaunch, toolRunArgs } from "./launch.js";
 import { NOT_ON_A_DRIVE, offDrive } from "./sandbox.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
@@ -519,6 +519,8 @@ export function serverType(entry: ServerEntry, platform: NodeJS.Platform = proce
   if (isNpx(entry.command, platform)) return "npx";
   // `cmd /c npx ...` on Windows, when what follows /c is npx and its arguments alone (see cmdNpx).
   if (Array.isArray(entry.args) && npxArgv([entry.command, ...entry.args], platform) !== undefined) return "npx";
+  // `uv tool run ...`, which is uvx itself (see toolRunArgs).
+  if (Array.isArray(entry.args) && toolRunArgs([entry.command, ...entry.args], platform) !== undefined) return "uvx";
   const program = programName(entry.command, platform);
   if (/^uvx(\.exe)?$/.test(program)) return "uvx";
   if (/^docker(\.exe)?$/.test(program)) return "docker";

@@ -13,7 +13,7 @@ import { discoverConfigs } from "./clients.js";
 import { RUN_OPTIONS, unwrapConfig, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
 import { listTools } from "./inspect.js";
 import { commandOnPath, installedScript, runningFrom, temporaryMcpcage, type McpcageCommand } from "./installed.js";
-import { npxArgv, parseLaunch, serverIdFor } from "./launch.js";
+import { npxArgv, parseLaunch, serverIdFor, startsUv, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, tooDeep } from "./manifest.js";
 import { cageHome, checkServerId, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, refuseTooMany, type Pending } from "./pinstore.js";
@@ -132,14 +132,30 @@ function parseRun(argv: string[]) {
   }
   // The id names directories of the store, so one given here must stay a plain name (see paths.ts).
   const id = values.id === undefined ? undefined : checkServerId(values.id, "--id");
-  const spec = parseLaunch(server, values.image);
+  const spec = launchSpec(server, values.image, values["no-sandbox"]);
   return { values, server, spec, serverId: id ?? serverIdFor(spec), sensitive };
 }
+
+/**
+ * What the server's command line starts. Until mcpcage builds uvx servers, `--no-sandbox` starts a
+ * line of uv's as the host command it always was: read as a PyPI server, it would get another id,
+ * under which its approved tools would be trusted again as a new server's, and a flag the cage
+ * refuses would stop a line that runs on the host anyway.
+ */
+function launchSpec(server: string[], image: string | undefined, noSandbox: boolean): LaunchSpec {
+  const [command] = server;
+  if (noSandbox && image === undefined && command !== undefined && startsUv(server)) return { kind: "host", command, args: server.slice(1) };
+  return parseLaunch(server, image);
+}
+
+/** Why `run` and `prepare` refuse a uvx server, which parseLaunch reads but nothing builds yet. */
+const PYPI_NOT_BUILT = "uvx servers are not built yet: this version of mcpcage cages npx servers and --image containers only";
 
 /** Builds and pins the sandbox image without starting the server (wrap does this for every server). */
 async function prepare(argv: string[]): Promise<number> {
   const { values, spec, serverId } = parseRun(argv);
   if (spec.kind === "host") throw new Error(`"${spec.command}" is not an npx command; nothing to prepare`);
+  if (spec.kind === "pypi") throw new Error(`${PYPI_NOT_BUILT}; nothing to prepare`);
   const prepared = prepareSandbox({
     serverId, spec, mounts: [], env: [], allowNet: false, memory: values.memory, cpus: values.cpus,
     keepImageUser: values["keep-image-user"], rebuild: values.rebuild, log: (message) => console.error(message),
@@ -174,6 +190,7 @@ async function run(argv: string[]): Promise<number> {
     if (spec.kind === "host") {
       throw new Error(`"${spec.command}" is not an npx command. Use \`mcpcage run -- npx -y <package>\`, \`--image <image>\` for containerized servers, or --no-sandbox.`);
     }
+    if (spec.kind === "pypi") throw new Error(`${PYPI_NOT_BUILT}. Pass --no-sandbox to start it on the host, with pinning and audit but no isolation.`);
     // Said before Docker is needed: what the cage leaves open is said even when Docker is missing or the build fails.
     if (values["allow-net"]) log(`mcpcage: WARNING ${serverId} has network access (--allow-net).`);
     // The path is the entry's argument; the server id is a plain name (checkServerId, serverIdFor).

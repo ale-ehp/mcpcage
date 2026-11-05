@@ -5,7 +5,24 @@ import { canonicalJson, sha256 } from "./canonical.js";
 export type LaunchSpec =
   | { kind: "npm"; packageName: string; versionRange?: string; localPath?: string; args: string[] }
   | { kind: "image"; image: string; args: string[] }
+  | {
+      kind: "pypi";
+      /** The PEP 503 normal form of the package's name: `awslabs-aws-api-mcp-server`. */
+      project: string;
+      /** The requirement as written after uvx or --from, `@v` made `==v`: `awslabs.aws-api-mcp-server==1.6.0`. */
+      requirement: string;
+      /** The program of the package's environment to start: the requirement's name, or the word after --from. */
+      command: string;
+      /** The --with requirements, in order. */
+      with: string[];
+      /** The CPython version --python asks for: 3.12 or 3.12.4. */
+      python?: string;
+      resolution: { prerelease?: string; excludeNewer?: string };
+      args: string[];
+    }
   | { kind: "host"; command: string; args: string[] };
+
+export type PypiLaunch = Extract<LaunchSpec, { kind: "pypi" }>;
 
 // --silent and -s, like -q and --quiet, only set npm's log level: in the cage npm never runs, the
 // image's launcher starts the package. @modelcontextprotocol/server-pdf's README configures
@@ -15,15 +32,26 @@ const NPX_FLAGS_WITHOUT_VALUE = new Set(["-y", "--yes", "-q", "--quiet", "-s", "
 
 /**
  * Understands `npx [-y] <package>[@version] [args...]`, the form most MCP servers are configured
- * with, and on Windows the same run by `cmd /c` (see cmdNpx). Anything else is a plain host command,
- * which only `--no-sandbox` accepts. `platform` is the system the command line was written for.
+ * with, and on Windows the same run by `cmd /c` (see cmdNpx); and `uvx [flags] <requirement> [args]`
+ * or `uv tool run ...`, the form of PyPI servers (see parseUvx). Anything else is a plain host
+ * command, which only `--no-sandbox` accepts. `platform` is the system the command line was written for.
  */
 export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Platform = process.platform): LaunchSpec {
   if (image) return { kind: "image", image, args: argv };
   const [command] = argv;
   if (!command) throw new Error("missing the server command after `--`");
   const npx = npxArgv(argv, platform);
-  if (npx === undefined) return { kind: "host", command, args: argv.slice(1) };
+  if (npx === undefined) {
+    const toolRun = toolRunArgs(argv, platform);
+    if (toolRun !== undefined) return parseUvx(toolRun, platform);
+    // uv reads flags before `tool run` itself: `uv --directory x tool run` installs and starts the
+    // tool from another working directory, which is not what `uvx` does.
+    const [first, ...more] = argv.slice(1);
+    if (isUv(command, platform) && first?.startsWith("-") && more.some((word, index) => word === "tool" && more[index + 1] === "run")) {
+      throw new Error(`uv ${flagName(first)} before tool run: flags there are uv's own (--directory changes its working directory), and only \`uv tool run [flags] <package>\` is read as uvx`);
+    }
+    return { kind: "host", command, args: argv.slice(1) };
+  }
   const rest = npx.slice(1);
 
   let index = 0;
@@ -41,6 +69,378 @@ export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Pla
   if (isLocalPath(spec, platform)) return { kind: "npm", packageName: "", localPath: spec, args };
   const { name, range } = splitPackageSpec(spec);
   return { kind: "npm", packageName: name, versionRange: range, args };
+}
+
+/**
+ * The words uv's `tool run` reads in a server's command line: what follows `uvx`, or `uv tool run`.
+ * Undefined for any other line, `uv` with flags before `tool run` included (see parseLaunch).
+ */
+export function toolRunArgs(argv: readonly unknown[], platform: NodeJS.Platform = process.platform): string[] | undefined {
+  const [command, ...args] = argv;
+  if (typeof command !== "string") return undefined;
+  if (isUvx(command, platform)) return args as string[];
+  if (isUv(command, platform) && args[0] === "tool" && args[1] === "run") return args.slice(2) as string[];
+  return undefined;
+}
+
+/**
+ * Whether a command names uvx: `uvx` or `uvx.exe`, bare or as a path, in any case on Windows, which
+ * compares file names without case (see isNpx). uv's installer puts uvx.exe in
+ * %USERPROFILE%\.local\bin, and READMEs give that full path for clients that start with a short PATH.
+ */
+export function isUvx(command: string, platform: NodeJS.Platform = process.platform): boolean {
+  return /(^|[/\\])uvx(\.exe)?$/.test(platform === "win32" ? command.toLowerCase() : command);
+}
+
+/** Whether a command line starts uv: uvx, or uv itself with any arguments. */
+export function startsUv(argv: readonly unknown[], platform: NodeJS.Platform = process.platform): boolean {
+  const [command] = argv;
+  return toolRunArgs(argv, platform) !== undefined || (typeof command === "string" && isUv(command, platform));
+}
+
+/** Whether a command names uv itself: `uv` or `uv.exe`, as isUvx. */
+function isUv(command: string, platform: NodeJS.Platform): boolean {
+  return /(^|[/\\])uv(\.exe)?$/.test(platform === "win32" ? command.toLowerCase() : command);
+}
+
+// Why a uvx flag is refused, by what it would do: the cage builds the server from PyPI wheels, for
+// its own platform, without reading anything on the host.
+const OUTSIDE_PYPI = "builds or installs code from outside PyPI, and the cage installs PyPI wheels only";
+const OTHER_INDEX = "installs from another index than PyPI, and the cage builds from PyPI only";
+const HOST_FILE = "reads a file on your machine, which the cage does not read when it builds";
+const FROM_SOURCE = "builds from source or for another platform, and the cage installs PyPI wheels for its own";
+const INSECURE_HOST = "turns off certificate checks for a host, which only another index or a proxy needs";
+const NOT_A_REQUIREMENT = "not a PyPI requirement: give a name, optional [extras] and versions (==, !=, <=, >=, <, >, ~=, ===)";
+const PYTHON_RANGE = "the cage runs CPython 3.10 to 3.15: give a version such as 3.12 or 3.12.4";
+const AT_VERSION = "after @, uvx takes only an exact version or latest, and reads anything else as a path or URL (for a range, write pkg>=1.2)";
+const PLAIN_COMMAND = "the command after its package must be a plain file name (no / or \\, no leading -, no control characters, not . or ..)";
+
+/** What a flag of `uv tool run` does in the cage: read into the spec, ignored, or refused with the reason. */
+type UvxFlag = { value: boolean; read?: "from" | "with" | "python" | "prerelease" | "exclude-newer" | "color" } | { refused: string };
+
+/**
+ * The flags of `uv tool run` (uv 0.13.7, `uv tool run --help`) that the cage reads, those it can
+ * ignore because they only tune uv's cache, output or interpreter lookup on the host, and those it
+ * refuses. Any flag not here is refused as unsupported: uvx's meaning for it is not reproduced.
+ */
+const UVX_FLAGS = new Map<string, UvxFlag>([
+  ["--from", { value: true, read: "from" }],
+  ["--with", { value: true, read: "with" }],
+  ["--python", { value: true, read: "python" }],
+  ["--prerelease", { value: true, read: "prerelease" }],
+  ["--exclude-newer", { value: true, read: "exclude-newer" }],
+  ["--color", { value: true, read: "color" }],
+  ["--refresh-package", { value: true }],
+  ["--cache-dir", { value: true }],
+  ...["--no-build", "--no-config", "--isolated", "--refresh", "--no-cache", "--offline", "--managed-python", "--no-managed-python", "--no-python-downloads", "--system-certs", "--quiet", "--verbose", "--no-progress"].map((flag): [string, UvxFlag] => [flag, { value: false }]),
+  ...["--with-editable", "--with-requirements"].map((flag): [string, UvxFlag] => [flag, { refused: OUTSIDE_PYPI }]),
+  ...["--index", "--default-index", "--index-url", "--extra-index-url", "--find-links", "--no-index", "--index-strategy", "--keyring-provider", "--torch-backend"].map((flag): [string, UvxFlag] => [flag, { refused: OTHER_INDEX }]),
+  ...["--constraints", "--overrides", "--build-constraints", "--config-file", "--env-file", "--directory", "--project"].map((flag): [string, UvxFlag] => [flag, { refused: HOST_FILE }]),
+  ...["--no-binary", "--no-binary-package", "--config-setting", "--config-settings-package", "--no-build-isolation", "--no-build-isolation-package", "--python-platform", "--lfs"].map((flag): [string, UvxFlag] => [flag, { refused: FROM_SOURCE }]),
+  ["--allow-insecure-host", { refused: INSECURE_HOST }],
+]);
+
+/** The one-letter forms of the flags above. */
+const UVX_SHORT = new Map<string, string>([
+  ["w", "--with"], ["p", "--python"], ["q", "--quiet"], ["v", "--verbose"], ["n", "--no-cache"],
+  ["i", "--index-url"], ["f", "--find-links"], ["c", "--constraints"], ["b", "--build-constraints"], ["C", "--config-setting"],
+]);
+
+const PRERELEASE_MODES = ["disallow", "allow", "if-necessary", "explicit", "if-necessary-or-explicit"];
+
+/**
+ * Reads the words uv's `tool run` is given, as uv 0.13.7 reads them: flags until the first other
+ * word or `--`, then the package, or with --from the command, then the server's own arguments,
+ * whatever they look like. Flags take their value as the next word, after `=`, or in their
+ * one-letter form attached (`-w x`, `--with=x`, `-wx`, `-qwx`). Only what the cage builds from PyPI
+ * wheels is accepted: anything else throws, naming the flag but never its value, which can hold a
+ * credential (an index URL with a password, a git URL with a token).
+ */
+function parseUvx(words: string[], platform: NodeJS.Platform): PypiLaunch {
+  const once = new Map<string, string>();
+  const withs: string[] = [];
+  const take = (name: string, flag: Extract<UvxFlag, { value: boolean }>, value: string) => {
+    if (flag.read === "with") {
+      withs.push(...splitWith(value));
+    } else if (flag.read === "color") {
+      if (!["auto", "always", "never"].includes(value)) throw new Error("uvx --color: give auto, always or never");
+    } else if (flag.read !== undefined) {
+      if (once.has(name)) throw new Error(`uvx ${name} is given twice`);
+      once.set(name, value);
+    }
+  };
+  /** The value of a flag written apart from it: the next word, unless it is another flag, as uv says. */
+  const next = (name: string, index: number): string => {
+    const value = words[index + 1];
+    if (value === undefined || value.startsWith("-")) throw new Error(`uvx ${name} needs a value`);
+    return value;
+  };
+
+  let index = 0;
+  for (; index < words.length; index++) {
+    const word = words[index]!;
+    if (word === "--") {
+      index++;
+      break;
+    }
+    if (!word.startsWith("-") || word === "-") break;
+    if (word.startsWith("--")) {
+      const name = flagName(word);
+      const flag = UVX_FLAGS.get(name);
+      if (flag === undefined) throw new Error(`unsupported uvx flag ${name}`);
+      if ("refused" in flag) throw new Error(`uvx ${name}: ${flag.refused}`);
+      if (!flag.value) {
+        if (name !== word) throw new Error(`uvx ${name} takes no value`);
+        continue;
+      }
+      if (name !== word) {
+        take(name, flag, word.slice(name.length + 1));
+      } else {
+        take(name, flag, next(name, index));
+        index++;
+      }
+      continue;
+    }
+    // One-letter flags, several in one word as uv allows (-qq, -qn): one that takes a value takes the
+    // rest of the word, after an optional "=", or the next word.
+    for (let at = 1; at < word.length; at++) {
+      const letter = String.fromCodePoint(word.codePointAt(at)!);
+      const long = UVX_SHORT.get(letter);
+      if (long === undefined) throw new Error(`unsupported uvx flag -${letter}`);
+      const flag = UVX_FLAGS.get(long)!;
+      if ("refused" in flag) throw new Error(`uvx -${letter}: ${flag.refused}`);
+      if (!flag.value) continue;
+      const rest = word.slice(at + 1);
+      if (rest !== "") {
+        take(long, flag, rest.startsWith("=") ? rest.slice(1) : rest);
+      } else {
+        take(long, flag, next(long, index));
+        index++;
+      }
+      break;
+    }
+  }
+
+  const target = words[index];
+  const from = once.get("--from");
+  if (target === undefined) throw new Error(from === undefined ? "uvx needs a package name" : "uvx --from needs a command after its package");
+  const tool = toolRequirement(from ?? target, from === undefined ? "<package>" : "--from");
+  for (const requirement of withs) {
+    // uv reads `pkg@1.0` in --with as a path, not as the version uvx's own package takes after @.
+    if (pypiRequirement(requirement) === undefined) throw new Error(`uvx --with: ${(outsidePyPI(requirement) || requirement.includes("@")) ? OUTSIDE_PYPI : NOT_A_REQUIREMENT}`);
+  }
+  const python = once.get("--python");
+  if (python !== undefined && !/^3\.1[0-5](?:\.(?:0|[1-9][0-9]{0,2}))?$/.test(python)) throw new Error(`uvx --python: ${PYTHON_RANGE}`);
+  const prerelease = once.get("--prerelease");
+  if (prerelease !== undefined && !PRERELEASE_MODES.includes(prerelease)) throw new Error(`uvx --prerelease: give one of ${PRERELEASE_MODES.join(", ")}`);
+  const excludeNewer = once.get("--exclude-newer");
+  if (excludeNewer !== undefined && !isExcludeNewer(excludeNewer)) {
+    throw new Error("uvx --exclude-newer: give a date (2026-01-31), a time with its zone (2026-01-31T12:00:00Z) or a duration (30 days, P30D)");
+  }
+  return {
+    kind: "pypi",
+    project: normalizedName(tool.name),
+    requirement: tool.requirement,
+    command: from === undefined ? tool.name : toolCommand(target, platform),
+    with: withs,
+    ...(python === undefined ? {} : { python }),
+    resolution: { ...(prerelease === undefined ? {} : { prerelease }), ...(excludeNewer === undefined ? {} : { excludeNewer }) },
+    args: words.slice(index + 1),
+  };
+}
+
+/** A flag's name: the word up to its "=", without the value that follows. */
+function flagName(word: string): string {
+  const equals = word.indexOf("=");
+  return equals === -1 ? word : word.slice(0, equals);
+}
+
+/**
+ * The requirement uvx installs for its package or --from (`where`), and the name in it. uvx reads
+ * `pkg@1.2` as `pkg==1.2` and `pkg@latest` as `pkg`, and anything else after @ as a path or URL
+ * ("the @ syntax cannot be used for anything other than an exact version",
+ * https://docs.astral.sh/uv/guides/tools/#requesting-specific-versions); the rest is a PEP 508
+ * requirement, of which the cage takes names, extras and versions only.
+ */
+function toolRequirement(text: string, where: string): { requirement: string; name: string } {
+  const refuse = (reason: string) => new Error(`uvx ${where}: ${reason}`);
+  const at = text.indexOf("@");
+  if (at === -1) {
+    const parsed = pypiRequirement(text);
+    if (parsed === undefined) throw refuse(outsidePyPI(text) ? OUTSIDE_PYPI : NOT_A_REQUIREMENT);
+    return { requirement: text, name: parsed.name };
+  }
+  const base = text.slice(0, at);
+  const version = text.slice(at + 1);
+  const parsed = pypiRequirement(base);
+  if (parsed === undefined || parsed.specifiers.length > 0 || /[ \t]/.test(base)) throw refuse(outsidePyPI(text) ? OUTSIDE_PYPI : NOT_A_REQUIREMENT);
+  if (version === "latest") return { requirement: base, name: parsed.name };
+  if (isVersion(version)) return { requirement: `${base}==${version}`, name: parsed.name };
+  throw refuse(outsidePyPI(version) ? OUTSIDE_PYPI : AT_VERSION);
+}
+
+/**
+ * Whether uv would read a requirement as code from somewhere other than an index: a URL, a git
+ * source, a path, an archive or wheel file. Only to say why it is refused: anything that is not
+ * a PyPI requirement is refused either way.
+ */
+function outsidePyPI(text: string): boolean {
+  return /:\/\/|^git\+|^file:|[/\\]|^[.~]|^[A-Za-z]:/.test(text) || ARCHIVE.test(text) || ARCHIVE.test(/^[ \t]*([A-Za-z0-9._-]*)/.exec(text)![1]!);
+}
+
+/**
+ * The file extensions with which uv 0.13.7 reads a requirement as a file on disk, not a name:
+ * `uvx foo.tar.gz` is file:///foo.tar.gz for it, whatever the PEP 508 grammar says of the name.
+ */
+const ARCHIVE = /\.(?:whl|zip|tar|tgz|tbz|tlz|txz|tar\.(?:gz|bz2|lz|lzma|xz|zst))$/i;
+
+/**
+ * The command after --from: a file name the package's environment has, as uvx looks it up there.
+ * A command line written for Windows names it with .exe (awslabs' servers: `--from
+ * awslabs.aws-api-mcp-server@latest awslabs.aws-api-mcp-server.exe`), which the Linux cage drops;
+ * the .ps1, .cmd and .bat scripts uv also finds there are Windows' own
+ * (https://docs.astral.sh/uv/guides/tools/#legacy-windows-scripts).
+ */
+function toolCommand(word: string, platform: NodeJS.Platform): string {
+  const windows = platform === "win32";
+  if (windows && /\.(?:cmd|bat|ps1)$/i.test(word)) throw new Error("uvx --from: the command is a Windows script (.cmd, .bat or .ps1), which the cage cannot start");
+  const command = windows ? word.replace(/\.exe$/i, "") : word;
+  if (command === "" || command === "." || command === ".." || command.startsWith("-") || /[/\\\u0000-\u001f\u007f]/.test(command)) throw new Error(`uvx --from: ${PLAIN_COMMAND}`);
+  return command;
+}
+
+/**
+ * The requirements of one --with value. uv splits it at each comma outside brackets that no version
+ * operator follows, so `a,b` is two requirements and `a>=1,<2` one, and drops the empty ones (uv
+ * 0.13.7: `--with 'a>=1,b'` installs both, `--with ''` nothing).
+ */
+function splitWith(value: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index];
+    if (character === "[") depth++;
+    else if (character === "]") depth = Math.max(0, depth - 1);
+    else if (character === "," && depth === 0) {
+      let after = index + 1;
+      while (after < value.length && ASCII_SPACE.includes(value[after]!)) after++;
+      if (after < value.length && "!=<>~".includes(value[after]!)) continue;
+      parts.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(value.slice(start));
+  return parts.map((part) => trimmed(part, ASCII_SPACE)).filter((part) => part !== "");
+}
+
+const ASCII_SPACE = " \t\n\r\f\v";
+
+/** `text` without the `characters` that start or end it; by hand, as a regex such as /\s+$/ takes quadratic time on a long run of them. */
+function trimmed(text: string, characters: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && characters.includes(text[start]!)) start++;
+  while (end > start && characters.includes(text[end - 1]!)) end--;
+  return text.slice(start, end);
+}
+
+/**
+ * A requirement in the subset of PEP 508 the cage builds from PyPI: a name, optional [extras], an
+ * optional comma-separated list of versions, spaces and tabs between them. No markers (`; ...`), no
+ * `@ url`, no parentheses. Undefined for any other text. The versions follow PEP 440, with the limits
+ * uv 0.13.7 puts on them: `~=` needs two parts of a release, a local version (`+x`) goes with `==`,
+ * `!=` and `===` only, a wildcard (`1.2.*`) with `==` and `!=` only.
+ */
+export function pypiRequirement(text: string): { name: string; extras: string[]; specifiers: string[] } | undefined {
+  let at = 0;
+  const skipSpace = () => {
+    while (text[at] === " " || text[at] === "\t") at++;
+  };
+  const readName = (): string | undefined => {
+    const start = at;
+    while (at < text.length && /[A-Za-z0-9._-]/.test(text[at]!)) at++;
+    const name = text.slice(start, at);
+    return /^[A-Za-z0-9]/.test(name) && /[A-Za-z0-9]$/.test(name) ? name : undefined;
+  };
+  skipSpace();
+  const name = readName();
+  if (name === undefined || ARCHIVE.test(name)) return undefined;
+  skipSpace();
+  const extras: string[] = [];
+  if (text[at] === "[") {
+    const close = text.indexOf("]", at);
+    if (close === -1) return undefined;
+    const inside = trimmed(text.slice(at + 1, close), " \t");
+    if (inside !== "") {
+      for (const extra of inside.split(",")) {
+        const word = trimmed(extra, " \t");
+        if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(word)) return undefined;
+        extras.push(word);
+      }
+    }
+    at = close + 1;
+    skipSpace();
+  }
+  const specifiers: string[] = [];
+  while (at < text.length) {
+    const operator = ["===", "==", "!=", "<=", ">=", "~=", "<", ">"].find((candidate) => text.startsWith(candidate, at));
+    if (operator === undefined) return undefined;
+    at += operator.length;
+    skipSpace();
+    const start = at;
+    while (at < text.length && !" \t,".includes(text[at]!)) at++;
+    const version = text.slice(start, at);
+    if (!isSpecifierVersion(operator, version)) return undefined;
+    specifiers.push(`${operator}${version}`);
+    skipSpace();
+    if (at === text.length) break;
+    if (text[at] !== ",") return undefined;
+    at++;
+    skipSpace();
+    // A comma joins two versions: uv takes a final one too, the PEP 508 grammar does not.
+    if (at === text.length) return undefined;
+  }
+  return { name, extras, specifiers };
+}
+
+/** A PEP 440 version, as written: epoch, release, pre, post and dev parts, a local label. */
+const VERSION = /^v?(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*(?:[-_.]?(?:alpha|a|beta|b|preview|pre|c|rc)[-_.]?[0-9]*)?(?:-[0-9]+|[-_.]?(?:post|rev|r)[-_.]?[0-9]*)?(?:[-_.]?dev[-_.]?[0-9]*)?(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?$/i;
+
+function isVersion(text: string): boolean {
+  return VERSION.test(text);
+}
+
+function isSpecifierVersion(operator: string, version: string): boolean {
+  if (operator === "==" || operator === "!=") {
+    if (/^v?(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*\.\*$/i.test(version)) return true;
+  }
+  if (!isVersion(version)) return false;
+  if (version.includes("+") && !["==", "!=", "==="].includes(operator)) return false;
+  if (operator === "~=") return /^v?(?:[0-9]+!)?[0-9]+\.[0-9]+/i.test(version);
+  return true;
+}
+
+/** A package name in PEP 503 normal form: lowercase, each run of -, _ and . made one -. */
+function normalizedName(name: string): string {
+  return name.toLowerCase().replace(/[-_.]+/g, "-");
+}
+
+/**
+ * A value of --exclude-newer that uv 0.13.7 takes and that means the same in the cage as on the host:
+ * a date, a time with its zone (without one, uv reads it in the host's zone), or a duration in
+ * seconds to weeks, friendly (`30 days`, `3d`, `2 weeks ago`) or ISO 8601 (`P30D`, `PT12H`). uv refuses
+ * months and years, whose length varies.
+ */
+function isExcludeNewer(value: string): boolean {
+  const moment = /^([0-9]{4})-([0-9]{2})-([0-9]{2})(?:[Tt]([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.[0-9]{1,9})?)?(?:[Zz]|[+-]([0-9]{2}):([0-9]{2})))?$/.exec(value);
+  if (moment !== null) {
+    const [year, month, day, hour = 0, minute = 0, second = 0, zoneHour = 0, zoneMinute = 0] = moment.slice(1).map((part) => (part === undefined ? undefined : Number(part)));
+    const date = new Date(Date.UTC(year!, month! - 1, day!));
+    return date.getUTCFullYear() === year && date.getUTCMonth() === month! - 1 && date.getUTCDate() === day && hour <= 23 && minute <= 59 && second <= 59 && zoneHour <= 23 && zoneMinute <= 59;
+  }
+  if (/^[0-9]{1,5} ?(?:s|secs?|seconds?|min|mins|minutes?|h|hrs?|hours?|d|days?|w|wk|weeks?)(?: ago)?$/.test(value)) return true;
+  return /^P(?=[0-9]|T[0-9])(?:[0-9]{1,5}W)?(?:[0-9]{1,5}D)?(?:T(?=[0-9])(?:[0-9]{1,5}H)?(?:[0-9]{1,5}M)?(?:[0-9]{1,5}S)?)?$/i.test(value);
 }
 
 /**
@@ -154,7 +554,8 @@ export function splitPackageSpec(spec: string): { name: string; range?: string }
 /**
  * Stable id for a server: readable slug plus a short hash of what identifies it. The version is
  * left out on purpose, so upgrading a package keeps the same id and its new tool definitions are
- * checked against the old approved ones instead of being trusted as a new server.
+ * checked against the old approved ones instead of being trusted as a new server. For a PyPI server
+ * the extras, --with and --python are left out too: they change what is installed, as a version does.
  */
 export function serverIdFor(spec: LaunchSpec): string {
   const identity =
@@ -162,13 +563,17 @@ export function serverIdFor(spec: LaunchSpec): string {
       ? { kind: spec.kind, name: spec.packageName || spec.localPath, args: spec.args }
       : spec.kind === "image"
         ? { kind: spec.kind, image: imageRepository(spec.image), args: spec.args }
-        : { kind: spec.kind, command: spec.command, args: spec.args };
+        : spec.kind === "pypi"
+          ? { kind: spec.kind, project: spec.project, command: spec.command, args: spec.args }
+          : { kind: spec.kind, command: spec.command, args: spec.args };
   const label =
     spec.kind === "npm"
       ? spec.packageName || basename(spec.localPath ?? "local")
       : spec.kind === "image"
         ? imageRepository(spec.image)
-        : basename(spec.command);
+        : spec.kind === "pypi"
+          ? spec.project
+          : basename(spec.command);
   return `${slug(label)}-${sha256(canonicalJson(identity)).slice(0, 8)}`;
 }
 

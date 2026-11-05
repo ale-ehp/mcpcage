@@ -3,6 +3,7 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuditLog } from "../src/audit.js";
+import { serverIdFor } from "../src/launch.js";
 import { pinTools } from "../src/manifest.js";
 import { auditDir, checkServerId, serverDir } from "../src/paths.js";
 import { noDocker } from "./fake-programs.js";
@@ -330,6 +331,37 @@ describe("cli", () => {
     const result = mcpcage(home, "run", "--", "python3", "server.py");
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("is not an npx command");
+  });
+
+  it("reads a uvx command line but does not build it yet: run and prepare refuse it, saying so", () => {
+    const home = freshHome();
+    const NOT_BUILT = "uvx servers are not built yet: this version of mcpcage cages npx servers and --image containers only";
+    for (const server of [["uvx", "mcp-server-time"], ["uv", "tool", "run", "--from", "mcp-server-time@2026.1.26", "mcp-server-time"]]) {
+      const run = mcpcage(home, "run", "--", ...server);
+      expect(run.code).toBe(1);
+      expect(run.stderr).toBe(`mcpcage: ${NOT_BUILT}. Pass --no-sandbox to start it on the host, with pinning and audit but no isolation.\n`);
+      const prepare = mcpcage(home, "prepare", "--", ...server);
+      expect(prepare.code).toBe(1);
+      expect(prepare.stderr).toBe(`mcpcage: ${NOT_BUILT}; nothing to prepare\n`);
+    }
+    // A line the cage would refuse says why, never with the value of the flag.
+    const refused = mcpcage(home, "run", "--", "uvx", "--index-url=https://user:s3cret@pypi.example/simple", "mcp-server-time");
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toBe("mcpcage: uvx --index-url: installs from another index than PyPI, and the cage builds from PyPI only\n");
+  });
+
+  it.runIf(process.platform !== "win32")("starts a uvx line with --no-sandbox as the host command it was, under the id it had", () => {
+    const home = freshHome();
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-uvx-"));
+    const uvx = join(dir, "uvx");
+    writeFileSync(uvx, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // Refused in the cage, started on the host as before: --no-sandbox never needed the cage's reading of it.
+    for (const args of [["mcp-server-time"], ["--index-url=https://pypi.example/simple", "mcp-server-time"]]) {
+      const id = serverIdFor({ kind: "host", command: uvx, args });
+      const result = mcpcage(home, "run", "--no-sandbox", "--", uvx, ...args);
+      expect(result.stderr).toContain(`mcpcage: WARNING ${id} runs on the host without isolation (--no-sandbox).`);
+      expect(existsSync(join(home, "audit", id))).toBe(true);
+    }
   });
 });
 

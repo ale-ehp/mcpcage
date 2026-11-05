@@ -489,6 +489,15 @@ describe("wrapping one entry", () => {
     expect(serverType({ command: "npx" })).toBe("npx");
     expect(serverType({ command: "C:\\nodejs\\npx.cmd" })).toBe("npx");
     expect(serverType({ command: "uvx" })).toBe("uvx");
+    // `uvx` "is exactly equivalent" to `uv tool run` (https://docs.astral.sh/uv/guides/tools/); uv's own
+    // flags before it change where it runs, and `uv run` runs a project.
+    expect(serverType({ command: "uv", args: ["tool", "run", "mcp-server-time"] })).toBe("uvx");
+    expect(serverType({ command: "/usr/local/bin/uv", args: ["tool", "run", "--from", "mcp-server-time", "mcp-server-time"] })).toBe("uvx");
+    for (const args of [["--directory", "/x", "tool", "run", "mcp-server-time"], ["run", "--with", "mcp-clickhouse", "mcp-clickhouse"], ["tool", "install", "x"], ["tool"]]) {
+      expect(serverType({ command: "uv", args }), JSON.stringify(args)).toBe("other");
+    }
+    expect(serverType({ command: "uv", args: "tool run x" as unknown as string[] })).toBe("other");
+    expect(wrapEntry({ command: "uv", args: ["tool", "run", "mcp-server-time"] }, { command: "mcpcage" })).toEqual({ skip: "uv: only npx servers can be caged in this version" });
     expect(serverType({ command: "/usr/local/bin/docker" })).toBe("docker");
     expect(serverType({ command: "node" })).toBe("other");
     expect(serverType({ command: "/opt/mcpcage", args: ["run", "--", "npx", "x"] })).toBe("mcpcage");
@@ -515,6 +524,8 @@ describe("wrapping one entry", () => {
       expect(wrapped).toEqual({ entry: { command: "mcpcage", args: ["run", "--", command, "-y", "pkg"] } });
     }
     expect([serverType({ command: "UVX.EXE" }, "win32"), serverType({ command: "C:\\Docker\\Docker.EXE" }, "win32")]).toEqual(["uvx", "docker"]);
+    const uv = { command: "C:\\Users\\me\\.local\\bin\\UV.EXE", args: ["tool", "run", "mcp-server-time"] };
+    expect([serverType(uv, "win32"), serverType(uv, "darwin")]).toEqual(["uvx", "other"]);
     const mcpcage = { command: "C:\\npm\\MCPCAGE.CMD", args: ["run", "--", "npx", "-y", "pkg"] };
     expect([serverType(mcpcage, "win32"), serverType(mcpcage, "darwin")]).toEqual(["mcpcage", "other"]);
     expect([isWrapped(mcpcage, "win32"), isWrapped(mcpcage, "linux")]).toEqual([true, false]);
