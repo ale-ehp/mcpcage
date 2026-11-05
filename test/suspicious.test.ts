@@ -743,6 +743,14 @@ describe("hostile sizes", () => {
   // the runs of zero-width spaces, variation selectors, letters and line breaks, take seconds or run
   // out of memory on the bidi overrides (a finding for every character) and run out of memory on the
   // .ssh/ paths (a path for every five characters): a proxy comparing such a listing would crash.
+  // Each scan is timed by the CPU this process used, not by the clock: on a loaded Mac one took
+  // over 5 s by the clock, past the limit, for 0.6 s of work, the rest spent waiting for a core.
+  /** The CPU time this process used since `since`, a process.cpuUsage(), in milliseconds. */
+  const cpuSince = (since: NodeJS.CpuUsage) => {
+    const { user, system } = process.cpuUsage(since);
+    return (user + system) / 1000;
+  };
+
   it("reads a description of 16 Mi characters quickly and without throwing", () => {
     const cases: Array<[unit: string, highest: Severity | undefined]> = [
       [char(0x200b), "high"],
@@ -753,18 +761,18 @@ describe("hostile sizes", () => {
     ];
     for (const [unit, highest] of cases) {
       const tool = { name: "add_note", description: sixteenMi(unit) };
-      const started = performance.now();
+      const started = process.cpuUsage();
       expect(highestSeverity(scanTool(tool))).toBe(highest);
-      expect(performance.now() - started).toBeLessThan(3000 * SLOWER);
+      expect(cpuSince(started)).toBeLessThan(3000 * SLOWER);
     }
   });
 
   it("reads a result of 16 Mi characters quickly and without throwing", () => {
     for (const unit of [char(0x200b), char(0xfe00), char(0x202e), ".ssh/"]) {
       const text = sixteenMi(unit);
-      const started = performance.now();
+      const started = process.cpuUsage();
       expect(highestSeverity(scanResultText(text))).toBe("high");
-      expect(performance.now() - started).toBeLessThan(3000 * SLOWER);
+      expect(cpuSince(started)).toBeLessThan(3000 * SLOWER);
     }
   });
 });
