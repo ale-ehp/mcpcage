@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { serverType } from "../src/config.js";
-import { cmdNpx, isNpx, npxArgv, parseLaunch, pypiRequirement, serverIdFor, splitPackageSpec, toolRunArgs, type PypiLaunch } from "../src/launch.js";
+import { cmdRunner, isNpx, isUvx, npxArgv, parseLaunch, pypiRequirement, serverIdFor, splitPackageSpec, toolRunArgs, type PypiLaunch } from "../src/launch.js";
 import { anyText, check, TIMEOUT } from "./fuzz.js";
 
 /*
@@ -54,6 +54,14 @@ function expectPypi(spec: PypiLaunch, argv: string[], platform: NodeJS.Platform)
   if (spec.python !== undefined) expect(spec.python).toMatch(/^3\.1[0-5](?:\.[0-9]+)?$/);
   if (spec.resolution.prerelease !== undefined) expect(["disallow", "allow", "if-necessary", "explicit", "if-necessary-or-explicit"]).toContain(spec.resolution.prerelease);
 }
+
+/** The words after /c: half of them start with npx or uvx, which any word may follow. */
+const cmdLine = fc.oneof(
+  fc.array(word, { minLength: 0, maxLength: 5 }),
+  fc
+    .tuple(fc.constantFrom("npx", "NPX", "npx.cmd", "C:\\nodejs\\npx.cmd", "uvx", "UVX.EXE", "uvx.exe", "C:\\Users\\me\\.local\\bin\\uvx.exe"), fc.array(word, { minLength: 0, maxLength: 4 }))
+    .map(([runner, rest]) => [runner, ...rest]),
+);
 
 const CMD = fc.constantFrom("cmd", "cmd.exe", "CMD.EXE", "C:\\Windows\\System32\\cmd.exe", "c:/windows/system32/cmd.exe", ".\\cmd.exe", "cmd.com", "xcmd");
 
@@ -155,19 +163,21 @@ describe("command lines, fuzzed", () => {
   );
 
   it(
-    "take a cmd /c line for plain npx only when cmd would hand npx exactly its words",
+    "take a cmd /c line for plain npx or uvx only when cmd would hand it exactly its words",
     () => {
       check(
-        fc.property(CMD, fc.array(fc.constantFrom("/d", "/s", "/D", "/S", "/q", "/k"), { maxLength: 2 }), fc.constantFrom("/c", "/C", "/k"), fc.array(word, { minLength: 0, maxLength: 5 }), (cmd, switches, c, line) => {
+        fc.property(CMD, fc.array(fc.constantFrom("/d", "/s", "/D", "/S", "/q", "/k"), { maxLength: 2 }), fc.constantFrom("/c", "/C", "/k"), cmdLine, (cmd, switches, c, line) => {
           const argv = [cmd, ...switches, c, ...line];
-          const read = cmdNpx(argv, "win32");
-          expect(cmdNpx(argv, "darwin")).toBeUndefined();
-          if (read === undefined || !("npx" in read)) {
-            expect(serverType({ command: cmd, args: argv.slice(1) }, "win32")).not.toBe("npx");
+          const read = cmdRunner(argv, "win32");
+          expect(cmdRunner(argv, "darwin")).toBeUndefined();
+          const type = serverType({ command: cmd, args: argv.slice(1) }, "win32");
+          if (read === undefined || !("line" in read)) {
+            expect(type).not.toBe("npx");
+            expect(type).not.toBe("uvx");
             return;
           }
-          expect(read.npx).toEqual(line);
-          expect(isNpx(line[0]!, "win32")).toBe(true);
+          expect(read.line).toEqual(line);
+          expect((read.runner === "npx" ? isNpx : isUvx)(line[0]!, "win32")).toBe(true);
           expect(/^\/c$/i.test(c)).toBe(true);
           expect(switches.every((option) => /^\/[ds]$/i.test(option))).toBe(true);
           for (const part of line) {
@@ -176,7 +186,9 @@ describe("command lines, fuzzed", () => {
           }
           // The program cmd starts is the first word whole: nothing in it ends a program's name for cmd.
           expect(line[0]).not.toMatch(/[\s,;=]/);
-          expect(serverType({ command: cmd, args: argv.slice(1) }, "win32")).toBe("npx");
+          expect(type).toBe(read.runner);
+          if (read.runner === "uvx") expect(toolRunArgs(argv, "win32")).toEqual(line.slice(1));
+          else expect(npxArgv(argv, "win32")).toEqual(line);
         }),
         2000,
       );

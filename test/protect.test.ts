@@ -578,6 +578,10 @@ describe("wrapping one entry", () => {
       expect(cmdNpx(argv, "win32")).toBeUndefined();
     }
     expect(cmdNpx(["cmd", "/c", "npx", ...memory], "linux")).toBeUndefined();
+    // cmd /c uvx is a uvx server now, which wrap leaves as it is, with the reason it gave before.
+    const blender = { command: "cmd", args: ["/c", "uvx", "mcp-for-blender"] };
+    expect(serverType(blender, "win32")).toBe("uvx");
+    expect(onWindows(() => wrapEntry(blender, { command: "mcpcage" }))).toEqual({ skip: "cmd: only npx servers can be caged in this version" });
   });
 
   it("writes node.exe with mcpcage's cli.js when given that form, and reads every part of such an entry after the script", () => {

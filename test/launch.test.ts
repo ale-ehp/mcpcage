@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { cmdNpx, imageRepository, isLocalPath, npxArgv, parseLaunch, serverIdFor, splitPackageSpec, type LaunchSpec } from "../src/launch.js";
+import { serverType } from "../src/config.js";
+import { cmdNpx, cmdRunner, imageRepository, isLocalPath, npxArgv, parseLaunch, serverIdFor, splitPackageSpec, type LaunchSpec } from "../src/launch.js";
 
 describe("the server id", () => {
   it("stays the same from one version of mcpcage to the next, for each kind of server", () => {
@@ -83,6 +84,53 @@ describe("cmd /c npx on Windows", () => {
     }
     // Words that all start with / are all switches: there is no command line after /c.
     expect(cmdNpx(["cmd", "/c", "/nodejs/npx"], "win32")).toBeUndefined();
+  });
+});
+
+describe("cmd /c uvx on Windows", () => {
+  it("is read as the uvx line after /c, with the same spec and id, as mcp-for-blender's README configures it", () => {
+    const plain = [
+      ["cmd", "/c", "uvx", "mcp-for-blender"],
+      ["CMD.EXE", "/D", "/S", "/C", "UVX.EXE", "mcp-for-blender"],
+      ["C:\\Windows\\System32\\cmd.exe", "/c", "C:\\Users\\me\\.local\\bin\\uvx.exe", "mcp-for-blender"],
+    ];
+    for (const argv of plain) {
+      const line = argv.slice(argv.findIndex((word) => /uvx/i.test(word)));
+      expect(cmdRunner(argv, "win32")).toEqual({ runner: "uvx", line });
+      expect(parseLaunch(argv, undefined, "win32")).toEqual(parseLaunch(line, undefined, "win32"));
+      expect(parseLaunch(argv, undefined, "win32")).toMatchObject({ kind: "pypi", project: "mcp-for-blender", command: "mcp-for-blender" });
+      expect([serverType({ command: argv[0]!, args: argv.slice(1) }, "win32"), serverType({ command: argv[0]!, args: argv.slice(1) }, "darwin")]).toEqual(["uvx", "other"]);
+      // Only npx lines are npx's.
+      expect(cmdNpx(argv, "win32")).toBeUndefined();
+      expect(npxArgv(argv, "win32")).toBeUndefined();
+      expect(cmdRunner(argv, "linux")).toBeUndefined();
+    }
+    // The uvx rules apply to the line after /c, a refused flag included.
+    const aws = ["cmd", "/c", "uvx", "--from", "awslabs.aws-api-mcp-server@latest", "awslabs.aws-api-mcp-server.exe"];
+    expect(parseLaunch(aws, undefined, "win32")).toMatchObject({ kind: "pypi", requirement: "awslabs.aws-api-mcp-server", command: "awslabs.aws-api-mcp-server" });
+    expect(() => parseLaunch(["cmd", "/c", "uvx", "--index-url", "x", "mcp-for-blender"], undefined, "win32")).toThrow(/^uvx --index-url: installs from another index than PyPI/);
+    expect(cmdRunner(["cmd", "/c", "npx", "-y", "x"], "win32")).toEqual({ runner: "npx", line: ["npx", "-y", "x"] });
+  });
+
+  it("says why a line that runs more than uvx is not plain, with the reasons of cmd /c npx, and leaves it a host command", () => {
+    const blender = ["mcp-for-blender"];
+    const notPlain: Array<[string[], string]> = [
+      [["/c", "uvx", ...blender, "&", "calc"], "an argument after /c has & or |, with which cmd starts another command"],
+      [["/c", "uvx", ...blender, ">", "out.txt"], "an argument after /c has < or >, with which cmd redirects what uvx reads or writes"],
+      [["/c", "uvx", ...blender, "--token=%TOKEN%"], "an argument after /c has %, between two of which cmd fills in a variable"],
+      [["/c", "uvx", ...blender, '"x"'], "an argument after /c has quotes, which cmd reads by rules of its own"],
+      [["/c", "uvx", ...blender, ""], "an argument after /c is empty, which the client can give cmd only in quotes"],
+      [["/q", "/c", "uvx", ...blender], "it gives cmd a switch other than /d and /s before /c"],
+      [["/c", "uvx mcp-for-blender"], "it gives uvx and what follows in one argument, which cmd splits by rules of its own"],
+      [["/c", "C:\\Users\\My Name\\.local\\bin\\uvx.exe", ...blender], "the path of uvx has a space, so the client quotes it, and cmd removes quotes there by rules of its own"],
+    ];
+    for (const [args, why] of notPlain) {
+      expect(cmdRunner(["cmd", ...args], "win32"), JSON.stringify(args)).toEqual({ runner: "uvx", notPlain: why });
+      expect(parseLaunch(["cmd", ...args], undefined, "win32")).toEqual({ kind: "host", command: "cmd", args });
+      expect(serverType({ command: "cmd", args }, "win32")).toBe("other");
+    }
+    // An argument is never quoted in the reason: it may hold a credential.
+    expect(JSON.stringify(cmdRunner(["cmd", "/c", "uvx", ...blender, "--token=%TOKEN%"], "win32"))).not.toContain("TOKEN");
   });
 });
 

@@ -32,9 +32,10 @@ const NPX_FLAGS_WITHOUT_VALUE = new Set(["-y", "--yes", "-q", "--quiet", "-s", "
 
 /**
  * Understands `npx [-y] <package>[@version] [args...]`, the form most MCP servers are configured
- * with, and on Windows the same run by `cmd /c` (see cmdNpx); and `uvx [flags] <requirement> [args]`
- * or `uv tool run ...`, the form of PyPI servers (see parseUvx). Anything else is a plain host
- * command, which only `--no-sandbox` accepts. `platform` is the system the command line was written for.
+ * with, and on Windows the same run by `cmd /c` (see cmdRunner); and `uvx [flags] <requirement>
+ * [args]` or `uv tool run ...`, the form of PyPI servers, `cmd /c uvx` included (see parseUvx).
+ * Anything else is a plain host command, which only `--no-sandbox` accepts. `platform` is the system
+ * the command line was written for.
  */
 export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Platform = process.platform): LaunchSpec {
   if (image) return { kind: "image", image, args: argv };
@@ -72,15 +73,18 @@ export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Pla
 }
 
 /**
- * The words uv's `tool run` reads in a server's command line: what follows `uvx`, or `uv tool run`.
- * Undefined for any other line, `uv` with flags before `tool run` included (see parseLaunch).
+ * The words uv's `tool run` reads in a server's command line: what follows `uvx`, `uv tool run`, or
+ * on Windows the `uvx` of a plain `cmd /c uvx ...`. Undefined for any other line, `uv` with flags
+ * before `tool run` included (see parseLaunch).
  */
 export function toolRunArgs(argv: readonly unknown[], platform: NodeJS.Platform = process.platform): string[] | undefined {
   const [command, ...args] = argv;
   if (typeof command !== "string") return undefined;
   if (isUvx(command, platform)) return args as string[];
   if (isUv(command, platform) && args[0] === "tool" && args[1] === "run") return args.slice(2) as string[];
-  return undefined;
+  // A plain `cmd /c uvx ...` on Windows: the uvx line cmd would start (see cmdRunner).
+  const cmd = cmdRunner(argv, platform);
+  return cmd !== undefined && cmd.runner === "uvx" && "line" in cmd ? cmd.line.slice(1) : undefined;
 }
 
 /**
@@ -445,29 +449,41 @@ function isExcludeNewer(value: string): boolean {
 
 /**
  * The npx command line a server's command line runs: itself when it starts npx, the part after `/c`
- * when it is a plain `cmd /c npx ...` on Windows (see cmdNpx); undefined for any other.
+ * when it is a plain `cmd /c npx ...` on Windows (see cmdRunner); undefined for any other.
  */
 export function npxArgv(argv: readonly unknown[], platform: NodeJS.Platform = process.platform): string[] | undefined {
   const [command] = argv;
   if (typeof command === "string" && isNpx(command, platform)) return argv as string[];
-  const cmd = cmdNpx(argv, platform);
-  return cmd !== undefined && "npx" in cmd ? cmd.npx : undefined;
+  const cmd = cmdRunner(argv, platform);
+  return cmd !== undefined && cmd.runner === "npx" && "line" in cmd ? cmd.line : undefined;
+}
+
+/** cmdRunner for npx lines only, as protect and wrap read them: a `cmd /c uvx` line is not one. */
+export function cmdNpx(argv: readonly unknown[], platform: NodeJS.Platform = process.platform): { npx: string[] } | { notPlain: string } | undefined {
+  const cmd = cmdRunner(argv, platform);
+  if (cmd === undefined || cmd.runner !== "npx") return undefined;
+  return "line" in cmd ? { npx: cmd.line } : { notPlain: cmd.notPlain };
 }
 
 /**
- * The npx command line that `cmd /c npx ...` runs on Windows, where many configurations start npx so,
- * because some clients cannot start npx.cmd themselves: `cmd` or `cmd.exe` in any case, bare or a
- * full path, then `/c` (any case), after `/d` or `/s` at most. Undefined for a command line that is
- * not one. Such entries were "cmd, not npx" in the report, and wrap and --fix left them on the host.
- * cmd reads what follows `/c` itself: `&`, `|`, `<`, `>`, `^`, `%`, `!`, quotes and parentheses can
- * start another command, redirect, or change what npx is given, and a control character can end the
- * line. Only a line with none of them runs npx with exactly the arguments the cage gives it; for any
- * other, `notPlain` says why (never quoting an argument, which may hold a credential), and it stays a
- * program mcpcage does not cage. An argument with a space is accepted after the first: the client
- * quotes it, cmd passes the quotes on, and npx reads them away. In the first, npx's path, the quotes
- * open the line, where cmd removes them by rules of its own.
+ * The npx or uvx command line that `cmd /c npx ...` or `cmd /c uvx ...` runs on Windows, where many
+ * configurations start npx so, because some clients cannot start npx.cmd themselves, and some READMEs
+ * start uvx so too (mcp-for-blender's: `"command": "cmd", "args": ["/c", "uvx", "mcp-for-blender"]`):
+ * `cmd` or `cmd.exe` in any case, bare or a full path, then `/c` (any case), after `/d` or `/s` at
+ * most. Undefined for a command line that is not one. Such entries were "cmd, not npx" in the report,
+ * and wrap and --fix left them on the host. cmd reads what follows `/c` itself: `&`, `|`, `<`, `>`,
+ * `^`, `%`, `!`, quotes and parentheses can start another command, redirect, or change what the
+ * runner is given, and a control character can end the line. Only a line with none of them runs npx
+ * or uvx with exactly the arguments the cage gives it; for any other, `notPlain` says why (never
+ * quoting an argument, which may hold a credential), and it stays a program mcpcage does not cage. An
+ * argument with a space is accepted after the first: the client quotes it, cmd passes the quotes on,
+ * and the runner reads them away. In the first, the runner's path, the quotes open the line, where
+ * cmd removes them by rules of its own.
  */
-export function cmdNpx(argv: readonly unknown[], platform: NodeJS.Platform = process.platform): { npx: string[] } | { notPlain: string } | undefined {
+export function cmdRunner(
+  argv: readonly unknown[],
+  platform: NodeJS.Platform = process.platform,
+): { runner: Runner; line: string[] } | { runner: Runner; notPlain: string } | undefined {
   if (platform !== "win32") return undefined;
   const [command, ...args] = argv;
   if (typeof command !== "string" || !isCmd(command) || args.some((arg) => typeof arg !== "string")) return undefined;
@@ -478,29 +494,43 @@ export function cmdNpx(argv: readonly unknown[], platform: NodeJS.Platform = pro
   const line = words.slice(switches.length);
   // The program cmd starts: the line up to the first character that ends a program's name for it.
   const program = /^[^\s"&|<>^%!(),;=]*/.exec(line.join(" "))![0];
-  if (!isNpx(program, platform) && !isNpx(line[0] ?? "", platform)) return undefined;
-  if (switches.slice(0, -1).some((option) => !/^\/[ds]$/i.test(option))) return { notPlain: "it gives cmd a switch other than /d and /s before /c" };
+  const runner = runnerOf(program, platform) ?? runnerOf(line[0] ?? "", platform);
+  if (runner === undefined) return undefined;
+  if (switches.slice(0, -1).some((option) => !/^\/[ds]$/i.test(option))) return { runner, notPlain: "it gives cmd a switch other than /d and /s before /c" };
   for (const word of line) {
-    if (word === "") return { notPlain: "an argument after /c is empty, which the client can give cmd only in quotes" };
-    const read = cmdWouldRead([word]);
-    if (read !== undefined) return { notPlain: `an argument after /c has ${read}` };
+    if (word === "") return { runner, notPlain: "an argument after /c is empty, which the client can give cmd only in quotes" };
+    const read = cmdWouldRead([word], runner);
+    if (read !== undefined) return { runner, notPlain: `an argument after /c has ${read}` };
   }
   if (line[0] !== program) {
-    return { notPlain: isNpx(line[0]!, platform) ? "the path of npx has a space, so the client quotes it, and cmd removes quotes there by rules of its own" : "it gives npx and what follows in one argument, which cmd splits by rules of its own" };
+    return {
+      runner,
+      notPlain: runnerOf(line[0]!, platform) === runner
+        ? `the path of ${runner} has a space, so the client quotes it, and cmd removes quotes there by rules of its own`
+        : `it gives ${runner} and what follows in one argument, which cmd splits by rules of its own`,
+    };
   }
-  return { npx: line };
+  return { runner, line };
+}
+
+/** The programs that cmdRunner finds after `cmd /c`. */
+type Runner = "npx" | "uvx";
+
+function runnerOf(command: string, platform: NodeJS.Platform): Runner | undefined {
+  return isNpx(command, platform) ? "npx" : isUvx(command, platform) ? "uvx" : undefined;
 }
 
 /**
  * What cmd would read itself in `words` when it re-reads them as a command line (the `%*` of npm's
  * .cmd shim, or the line after `cmd /c`): the first such character's description, or undefined for
- * words it would pass on unchanged. An argument that holds one cannot be given to npx, or to the
- * server mcpcage starts for a .cmd entry, as written.
+ * words it would pass on unchanged. An argument that holds one cannot be given to npx, uvx, or the
+ * server mcpcage starts for a .cmd entry, as written. `program` is what the description names as
+ * reading the redirected input and output.
  */
-export function cmdWouldRead(words: readonly string[]): string | undefined {
+export function cmdWouldRead(words: readonly string[], program = "npx"): string | undefined {
   for (const word of words) {
     const read = CMD_READS.find(([characters]) => characters.test(word));
-    if (read !== undefined) return read[1];
+    if (read !== undefined) return read[1].replace("{program}", program);
   }
   return undefined;
 }
@@ -508,7 +538,7 @@ export function cmdWouldRead(words: readonly string[]): string | undefined {
 /** What cmd reads itself in the line after `/c`, with what it does. */
 const CMD_READS: ReadonlyArray<[RegExp, string]> = [
   [/[&|]/, "& or |, with which cmd starts another command"],
-  [/[<>]/, "< or >, with which cmd redirects what npx reads or writes"],
+  [/[<>]/, "< or >, with which cmd redirects what {program} reads or writes"],
   [/\^/, "^, which cmd removes as an escape"],
   [/%/, "%, between two of which cmd fills in a variable"],
   [/!/, "!, between two of which cmd fills in a variable when delayed expansion is on"],

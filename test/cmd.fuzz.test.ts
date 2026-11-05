@@ -1,18 +1,19 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { copyFileSync, linkSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import fc from "fast-check";
 import { beforeAll, describe, expect, it } from "vitest";
-import { cmdNpx } from "../src/launch.js";
+import { cmdRunner } from "../src/launch.js";
 import { checkAsync, TIMEOUT } from "./fuzz.js";
 
 /*
- * cmdNpx says which `cmd /c npx ...` lines run npx with exactly the words after /c, so that mcpcage can
- * run npx without cmd. Only cmd.exe itself can say whether that holds: this test starts each line
- * as a client does (child_process.spawn, no shell), with an npx.cmd that ends as npm's does
- * (`"%NODE_EXE%" "%NPX_CLI_JS%" %*`) and prints the arguments node gives it, and compares them with
- * what cmdNpx says npx is given. Windows only: elsewhere there is no cmd.exe to ask.
+ * cmdRunner says which `cmd /c npx ...` and `cmd /c uvx ...` lines run npx or uvx with exactly the
+ * words after /c, so that mcpcage can run them without cmd. Only cmd.exe itself can say whether that
+ * holds: this test starts each line as a client does (child_process.spawn, no shell), with an npx.cmd
+ * that ends as npm's does (`"%NODE_EXE%" "%NPX_CLI_JS%" %*`) and prints the arguments node gives it,
+ * and a uvx.exe, and compares them with what cmdRunner says the runner is given. Windows only:
+ * elsewhere there is no cmd.exe to ask.
  */
 
 let probe: string;
@@ -34,6 +35,14 @@ beforeAll(() => {
       "",
     ].join("\r\n"),
   );
+  // uv's uvx.exe is a program, not a batch file: cmd starts it with the line as it is, and the
+  // program splits it into arguments. The node running the tests, under that name and given
+  // probe.js first, splits it by the same rules of Windows' C runtime and prints what it got.
+  try {
+    linkSync(process.execPath, join(probe, "uvx.exe"));
+  } catch {
+    copyFileSync(process.execPath, join(probe, "uvx.exe"));
+  }
 });
 
 /** Runs `argv` as a client does, from the probe's directory with it first on the PATH, and returns what npx printed. */
@@ -64,24 +73,26 @@ const line = fc.record({
   cmd: fc.constantFrom("cmd", "cmd.exe", "CMD", "C:\\Windows\\System32\\cmd.exe"),
   switches: fc.subarray(["/d", "/s"]),
   c: fc.constantFrom("/c", "/C"),
-  npx: fc.constantFrom("npx", "npx.cmd", "NPX", "Npx.Cmd"),
+  runner: fc.constantFrom("npx", "npx.cmd", "NPX", "Npx.Cmd", "uvx", "uvx.exe", "UVX", "Uvx.Exe"),
   args: fc.array(argument, { maxLength: 5 }),
 });
 
-describe.runIf(process.platform === "win32")("cmd /c npx, against cmd.exe", () => {
+describe.runIf(process.platform === "win32")("cmd /c npx and cmd /c uvx, against cmd.exe", () => {
   it(
-    "gives npx exactly the words cmdNpx says, for every line cmdNpx takes for plain npx",
+    "gives npx or uvx exactly the words cmdRunner says, for every line cmdRunner takes for a plain one",
     async () => {
       let compared = 0;
       await checkAsync(
-        fc.asyncProperty(line, async ({ cmd, switches, c, npx, args }) => {
-          const argv = [cmd, ...switches, c, npx, ...args];
-          const read = cmdNpx(argv, "win32");
-          if (read === undefined || !("npx" in read)) return;
+        fc.asyncProperty(line, async ({ cmd, switches, c, runner, args }) => {
+          const uvx = /^uvx/i.test(runner);
+          const argv = [cmd, ...switches, c, runner, ...(uvx ? ["probe.js"] : []), ...args];
+          const read = cmdRunner(argv, "win32");
+          if (read === undefined || !("line" in read)) return;
           compared++;
+          expect(read.runner).toBe(uvx ? "uvx" : "npx");
           const answer = await run(argv);
           expect(answer.code, `${JSON.stringify(argv)}: ${answer.stderr}`).toBe(0);
-          expect(JSON.parse(answer.stdout), JSON.stringify(argv)).toEqual(read.npx.slice(1));
+          expect(JSON.parse(answer.stdout), JSON.stringify(argv)).toEqual(read.line.slice(uvx ? 2 : 1));
         }),
         150,
         20,
