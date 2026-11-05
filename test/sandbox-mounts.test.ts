@@ -138,6 +138,10 @@ describe("the settings kept read-only in a writable mount, at their edges", () =
     expect(settings([rw(dir), ro(dir)], "win32")).toEqual([rw(dir), ro(dir)]);
   });
 
+  it("looks through 100,000 entries in one writable mount, and adds 1,000 mounts in all, at most", () => {
+    expect(SETTINGS_LIMITS).toEqual({ entries: 100_000, mounts: 1_000 });
+  });
+
   it("looks through as many entries as the limit allows, and refuses one more", () => {
     const dir = layout({ a: "", b: "", c: "" });
     expect(withSettingsReadOnly([rw(dir)], { entries: 3, mounts: 10 }, "linux")).toEqual([rw(dir)]);

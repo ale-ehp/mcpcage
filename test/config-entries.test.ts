@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { cageCheck, hostVariable, unwrapEntry, wrapEntry, type ServerEntry } from "../src/config.js";
+import { parseArgs } from "node:util";
+import { cageCheck, hostVariable, RUN_OPTIONS, unwrapEntry, wrapEntry, type ServerEntry } from "../src/config.js";
 import { idleProgram, onWindows } from "./fake-programs.js";
 
 describe("the variables of an entry that act on the host", () => {
@@ -38,6 +39,16 @@ describe("the variables of an entry that act on the host", () => {
     for (const [name, value, expected] of table) expect(hostVariable(name, value), `${name}=${JSON.stringify(value)}`).toEqual(expected);
   });
 
+  it("are matched by their whole names, not by a name inside another", () => {
+    for (const name of ["MY_NODE_OPTIONS", "XLD_PRELOAD", "MY_DYLD_INSERT_LIBRARIES", "MY_GCONV_PATH", "PS4_X", "MY_BASH_FUNC_x%%", "MY_DOCKER_HOST", "MY_npm_config_registry", "MY_HOME", "MY_MCPCAGE_HOME", "MCPCAGE_HOME_X"]) {
+      expect(hostVariable(name, "x"), name).toBeUndefined();
+    }
+    onWindows(() => {
+      expect(hostVariable("GODEBUG", "execerrdot=0")).toEqual({ to: "container", what: "can make docker on your machine start a program it finds in the current directory, the project's" });
+      for (const name of ["MY_GODEBUG", "GODEBUG_X"]) expect(hostVariable(name, "x"), name).toBeUndefined();
+    });
+  });
+
   it("on Windows also include the places Windows keeps its own code and settings", () => {
     onWindows(() => {
       expect(hostVariable("SystemRoot", "C:\\x")).toEqual({ to: "container", what: "is where Windows keeps its own code, which node loads from there as it starts mcpcage, before the cage starts" });
@@ -46,8 +57,29 @@ describe("the variables of an entry that act on the host", () => {
   });
 });
 
+describe("the options of run", () => {
+  it("have the defaults of a closed cage", () => {
+    expect(parseArgs({ args: [], options: RUN_OPTIONS, strict: true }).values).toEqual({
+      mount: [],
+      "allow-sensitive-mount": false,
+      env: [],
+      "allow-net": false,
+      "allow-server-requests": false,
+      strict: false,
+      memory: "512m",
+      cpus: "1",
+      "keep-image-user": false,
+      rebuild: false,
+      "no-sandbox": false,
+    });
+  });
+});
+
 describe("an entry wrap cannot cage", () => {
   it("says why, for each kind of entry", () => {
+    for (const type of ["http", "SSE", "ws", "streamable-http"]) {
+      expect(wrapEntry({ type, command: "npx", args: ["-y", "x"] }, { command: "mcpcage" }), type).toEqual({ skip: "remote server: nothing runs locally to cage" });
+    }
     expect(wrapEntry({ args: ["-y", "x"] }, { command: "mcpcage" })).toEqual({ skip: "no command" });
     expect(wrapEntry({ command: "", args: ["-y", "x"] }, { command: "mcpcage" })).toEqual({ skip: "no command" });
     expect(wrapEntry({ command: "uvx", args: ["mcp-server-time"] }, { command: "mcpcage" })).toEqual({ skip: "uvx: only npx servers can be caged in this version" });

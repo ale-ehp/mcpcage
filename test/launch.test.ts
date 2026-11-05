@@ -35,6 +35,10 @@ describe("the server id", () => {
 });
 
 describe("the command line after --", () => {
+  it("takes the npx flags that only set npm's log level or say yes", () => {
+    expect(parseLaunch(["npx", "-y", "--yes", "-q", "--quiet", "-s", "--silent", "--no-install=false", "notes"], undefined, "linux")).toEqual({ kind: "npm", packageName: "notes", versionRange: undefined, args: [] });
+  });
+
   it("says what is missing or not supported, by name", () => {
     expect(() => parseLaunch([])).toThrow(/^missing the server command after `--`$/);
     expect(() => parseLaunch(["npx", "-y"])).toThrow(/^npx needs a package name$/);

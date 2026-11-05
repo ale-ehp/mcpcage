@@ -305,16 +305,22 @@ describe("what the server sends", () => {
     s.reply({ id: "p", method: "ping" });
     s.reply({ id: "r", method: "roots/list" });
     s.reply({ id: "s", method: "sampling/createMessage", params: {} });
+    s.reply({ id: "e", method: "elicitation/create", params: {} });
+    s.reply({ id: "u", method: "x/unknown" });
     s.reply({ method: "notifications/tools/list_changed" });
     s.reply({ method: "notifications/message", params: {} });
     expect(s.output.map((line) => JSON.parse(line).id ?? JSON.parse(line).method)).toEqual(["p", "r", "notifications/tools/list_changed", "notifications/message"]);
     expect(s.server.received.map((line) => JSON.parse(line))).toEqual([
-      { jsonrpc: "2.0", id: "s", error: { code: BLOCKED, message: "mcpcage blocked sampling/createMessage: the server asked your client to run the model. Pass --allow-server-requests to allow it." } },
+      { jsonrpc: "2.0", id: "s", error: { code: -32001, message: "mcpcage blocked sampling/createMessage: the server asked your client to run the model. Pass --allow-server-requests to allow it." } },
+      { jsonrpc: "2.0", id: "e", error: { code: -32001, message: "mcpcage blocked elicitation/create: the server asked your client to put a question to you. Pass --allow-server-requests to allow it." } },
+      { jsonrpc: "2.0", id: "u", error: { code: -32001, message: "mcpcage blocked x/unknown: the server sent a request that mcpcage does not know. Pass --allow-server-requests to allow it." } },
     ]);
     expect(recorded(s).slice(1)).toEqual([
       { event: "server-request", id: "p", method: "ping" },
       { event: "server-request", id: "r", method: "roots/list" },
       { event: "server-request-blocked", id: "s", method: "sampling/createMessage" },
+      { event: "server-request-blocked", id: "e", method: "elicitation/create" },
+      { event: "server-request-blocked", id: "u", method: "x/unknown" },
       { event: "tools-changed-notice" },
     ]);
   });

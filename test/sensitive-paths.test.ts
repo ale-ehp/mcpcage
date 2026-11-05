@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { accountHome, clientPlaces, sensitivePath } from "../src/sensitive.js";
+import { literal } from "./helpers.js";
 
 // An account the user database does not know, as in some containers: userInfo() throws.
 const database = vi.hoisted(() => ({ knows: true }));
@@ -86,6 +87,144 @@ describe("paths mcpcage will not mount, in more detail", () => {
     symlinkSync(home, link);
     const options = { home, platform: "linux" as const, clients: [{ path: link, what: "the settings of a client" }], path: link };
     expect(sensitivePath(join(home, "Projects"), options)).toBeUndefined();
+  });
+});
+
+describe("each place mcpcage will not mount", () => {
+  /** Every place in the home directory, what it holds, and the one system it is on (none: every system). */
+  const places: Array<[path: string, what: string, platform: string]> = [
+      [".ssh", "your SSH keys", ""],
+      [".aws", "your AWS credentials", ""],
+      [".gnupg", "your GnuPG keys", ""],
+      [".kube", "your Kubernetes credentials", ""],
+      [".docker", "your Docker credentials", ""],
+      [".config/gcloud", "your Google Cloud credentials", ""],
+      [".azure", "your Azure credentials", ""],
+      [".npmrc", "your npm token", ""],
+      [".netrc", "your saved logins", ""],
+      [".git-credentials", "your Git credentials", ""],
+      [".password-store", "your passwords", ""],
+      ["Library/Keychains", "your keychains", "darwin"],
+      [".colima", "the Docker socket of Colima", ""],
+      [".orbstack", "the Docker socket of OrbStack", ""],
+      [".mcpcage", "mcpcage's own pins and audit logs", ""],
+      [".claude.json", "your MCP configurations and their tokens", ""],
+      [".cursor", "the MCP servers, settings and extensions of Cursor", ""],
+      [".vscode", "the settings and extensions of VS Code", ""],
+      [".vscode-insiders", "the settings and extensions of VS Code Insiders", ""],
+      [".claude", "the settings and hooks of Claude Code", ""],
+      [".codeium", "the MCP servers and settings of Windsurf", ""],
+      [".copilot", "the MCP servers and settings of GitHub Copilot", ""],
+      [".config/devin", "the MCP servers and settings of Devin", ""],
+      [".gemini", "the MCP servers and settings of Gemini CLI", ""],
+      [".codex", "the MCP servers and settings of Codex", ""],
+      [".continue", "the MCP servers and settings of Continue", ""],
+      [".config/zed", "the MCP servers and settings of Zed", ""],
+      ["Library/Application Support/Claude", "the MCP servers and settings of Claude Desktop", "darwin"],
+      ["Library/Application Support/Code", "the MCP servers and settings of VS Code", "darwin"],
+      ["Library/Application Support/Code - Insiders", "the MCP servers and settings of VS Code Insiders", "darwin"],
+      ["Library/Application Support/Cursor", "the MCP servers and settings of Cursor", "darwin"],
+      ["Library/Application Support/Windsurf", "the MCP servers and settings of Windsurf", "darwin"],
+      ["Library/Application Support/Zed", "the MCP servers and settings of Zed", "darwin"],
+      [".config/Code", "the MCP servers and settings of VS Code", "linux"],
+      [".config/Code - Insiders", "the MCP servers and settings of VS Code Insiders", "linux"],
+      [".config/Cursor", "the MCP servers and settings of Cursor", "linux"],
+      [".config/Windsurf", "the MCP servers and settings of Windsurf", "linux"],
+      ["AppData/Roaming/Claude", "the MCP servers and settings of Claude Desktop", "win32"],
+      ["AppData/Local/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude", "the MCP servers and settings of Claude Desktop", "win32"],
+      ["AppData/Roaming/Code", "the MCP servers and settings of VS Code", "win32"],
+      ["AppData/Roaming/Code - Insiders", "the MCP servers and settings of VS Code Insiders", "win32"],
+      ["AppData/Roaming/Cursor", "the MCP servers and settings of Cursor", "win32"],
+      ["AppData/Roaming/devin", "the MCP servers and settings of Devin", "win32"],
+      ["Library/LaunchAgents", "the programs that start at login", "darwin"],
+      [".config/autostart", "the programs that start at login", "linux"],
+      [".config/systemd", "your systemd services", "linux"],
+      ["AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup", "the programs that start at login", "win32"],
+      [".gitconfig", "your Git configuration", ""],
+      [".config/git", "your Git configuration", ""],
+      [".config/gh", "your GitHub CLI token", ""],
+      [".config/hub", "your GitHub token", ""],
+      [".pypirc", "your PyPI token", ""],
+      [".cargo/credentials", "your crates.io token", ""],
+      [".cargo/credentials.toml", "your crates.io token", ""],
+      [".gem/credentials", "your RubyGems token", ""],
+      [".terraform.d", "your Terraform tokens", ""],
+      [".vault-token", "your Vault token", ""],
+      [".boto", "your cloud storage credentials", ""],
+      [".s3cfg", "your S3 credentials", ""],
+      [".yarnrc.yml", "your Yarn token", ""],
+      [".config/op", "your 1Password CLI accounts", ""],
+      [".local/bin", "the programs you run", ""],
+      ["bin", "the programs you run", ""],
+      [".npm", "the packages npx runs", ""],
+      [".nvm", "the programs nvm installs", ""],
+      [".volta", "the programs Volta installs", ""],
+      [".bun", "the programs Bun installs", ""],
+      [".deno", "the programs Deno installs", ""],
+      [".cargo/bin", "the programs Cargo installs", ""],
+      ["go/bin", "the programs Go installs", ""],
+      [".pyenv", "the programs pyenv installs", ""],
+      [".rbenv", "the programs rbenv installs", ""],
+      [".asdf", "the programs asdf installs", ""],
+      ["Library/pnpm", "the programs pnpm installs", "darwin"],
+      ["Applications", "your applications", "darwin"],
+      [".local/share/pnpm", "the programs pnpm installs", "linux"],
+      [".rd", "the Docker socket of Rancher Desktop", ""],
+      [".lima", "the Docker socket of Lima", ""],
+      ["Library/Containers/com.docker.docker", "the Docker socket of Docker Desktop", "darwin"],
+      [".zshrc", "the commands your shell runs", ""],
+      [".zshenv", "the commands your shell runs", ""],
+      [".zprofile", "the commands your shell runs", ""],
+      [".zlogin", "the commands your shell runs", ""],
+      [".zlogout", "the commands your shell runs", ""],
+      [".bashrc", "the commands your shell runs", ""],
+      [".bash_profile", "the commands your shell runs", ""],
+      [".bash_login", "the commands your shell runs", ""],
+      [".bash_logout", "the commands your shell runs", ""],
+      [".profile", "the commands your shell runs", ""],
+      [".config/fish", "the commands your shell runs", ""],
+      [".oh-my-zsh", "the commands your shell runs", ""],
+  ];
+
+  it("is named with what it holds, from the home directory, on the systems where it is", () => {
+    const homes = { darwin: "/Users/me", linux: "/home/me", win32: "C:\\Users\\me" } as const;
+    for (const platform of ["darwin", "linux", "win32"] as const) {
+      const windows = platform === "win32";
+      const at = (path: string) => (windows ? path.split("/").join("\\") : path);
+      const home = homes[platform];
+      for (const [path, what, only] of places) {
+        if (only !== "" && only !== platform) continue;
+        const separator = windows ? "\\" : "/";
+        expect(sensitivePath(`${home}${separator}${at(path)}${separator}x`, { home, platform }), `${platform} ${path}`).toBe(`${what} in ~${separator}${at(path)}`);
+      }
+    }
+  });
+
+  it("outside the home directory, is named with what it holds on macOS and Linux", () => {
+    const system: Array<[path: string, what: string, only?: NodeJS.Platform]> = [
+      ["/etc", "the system configuration"],
+      ["/private/etc", "the system configuration"],
+      ["/var/run", "the Docker socket"],
+      ["/private/var/run", "the Docker socket"],
+      ["/usr/bin", "the system's programs"],
+      ["/bin", "the system's programs"],
+      ["/usr/sbin", "the system's programs"],
+      ["/sbin", "the system's programs"],
+      ["/usr/local", "the programs you run"],
+      ["/opt/homebrew", "the programs Homebrew installs"],
+      ["/Applications", "your applications", "darwin"],
+      ["/Library", "the programs and settings of every user", "darwin"],
+    ];
+    for (const [platform, home] of [["darwin", "/Users/me"], ["linux", "/home/me"]] as const) {
+      for (const [path, what, only] of system) {
+        if (only !== undefined && only !== platform) continue;
+        // Named as written or where a link leads (/bin is /usr/bin on some Linux systems): what it holds is the same.
+        expect(sensitivePath(`${path}/mcpcage-nothing-here`, { home, platform }), `${platform} ${path}`).toMatch(new RegExp(`^${literal(what)} in /`));
+      }
+    }
+    // The directories that hold every user's home directory, wherever this one is.
+    expect(sensitivePath("/Users", { home: "/var/me", platform: "darwin" })).toBe("your whole home directory and more");
+    expect(sensitivePath("/home", { home: "/var/me", platform: "linux" })).toBe("your whole home directory and more");
   });
 });
 

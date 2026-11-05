@@ -69,6 +69,13 @@ describe("a batch file on Windows", () => {
 });
 
 describe("a temporary place", () => {
+  it("is the cache of npx or pnpm dlx wherever it is, its node_modules included", () => {
+    expect(inTemporaryPlace("_npx/0a1b/node_modules/mcpcage")).toBe(true);
+    expect(inTemporaryPlace("/Users/me/.npm/_npx/0a1b/node_modules")).toBe(true);
+    expect(inTemporaryPlace("/Users/me/Library/Caches/pnpm/dlx/0123456789abcdef0123456789abcdef/x/node_modules/.bin")).toBe(true);
+    expect(inTemporaryPlace("/Users/me/my_npx/0a1b/node_modules")).toBe(false);
+  });
+
   it("is never a relative path, wherever the current directory is", () => {
     vi.spyOn(process, "cwd").mockReturnValue(tmpdir());
     expect(inTemporaryPlace(join(tmpdir(), "mcpcage"))).toBe(true);
@@ -133,10 +140,15 @@ describe.skipIf(windowsHost)("the mcpcage that runs from a package runner", () =
     const mine = idleProgram(user, "mcpcage");
     const temporary = moveTemporaryDirectory();
     idleProgram(join(temporary, "xfs-1234"), "mcpcage");
-    vi.stubEnv("PATH", [projectBin, join(temporary, "xfs-1234"), "relative", user].join(delimiter));
+    // Not a runner's: a directory whose name only starts like one.
+    const tools = join(project, "node_modules", ".bin-tools");
+    const theirs = idleProgram(tools, "mcpcage");
+    vi.stubEnv("PATH", [projectBin, `${projectBin}/`, join(temporary, "xfs-1234"), "relative", tools, user].join(delimiter));
     // Not run from a runner: the user's PATH as it is.
     expect(commandOnPath("mcpcage")).toBe(join(projectBin, "mcpcage"));
     process.argv[1] = join(temporary, "bunx-501-mcpcage", "node_modules", "mcpcage", "dist", "cli.js");
+    expect(commandOnPath("mcpcage")).toBe(theirs);
+    vi.stubEnv("PATH", [projectBin, `${projectBin}/`, join(temporary, "xfs-1234"), "relative", user].join(delimiter));
     expect(commandOnPath("mcpcage")).toBe(mine);
   });
 });
@@ -238,7 +250,7 @@ describe.skipIf(windowsHost)("the variables of an entry that move the clients' c
   it("are those that move them for this system, under their own names, or that are not strings", () => {
     expect(movedPlaces({ COPILOT_HOME: "/elsewhere/copilot", API_KEY: "x" })).toEqual(["COPILOT_HOME"]);
     expect(movedPlaces({ copilot_home: "/elsewhere/copilot" })).toEqual([]);
-    expect(movedPlaces({ APPDATA: 5 })).toEqual(["APPDATA"]);
+    expect(movedPlaces({ APPDATA: 5, LOCALAPPDATA: 5, XDG_CONFIG_HOME: 5, COPILOT_HOME: 5, OTHER: 5 })).toEqual(["APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "COPILOT_HOME"]);
     expect(movedPlaces({ XDG_CONFIG_HOME: "/elsewhere/config" })).toEqual(process.platform === "linux" ? ["XDG_CONFIG_HOME"] : []);
     expect(movedPlaces("COPILOT_HOME=/x")).toEqual([]);
   });
