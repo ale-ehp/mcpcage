@@ -29,7 +29,8 @@ mutation testing.
   mcpcage compared a listing with the pin only when every entry was a tool definition. Such an
   answer is now refused whole: the client gets an error, nothing is pinned, the session is locked,
   and the audit log records `list-blocked` with reason `not-tools`. Every published version up to
-  0.6.1 is affected.
+  0.6.1 is affected. Advisory:
+  [GHSA-74mf-wvqp-v23q](https://github.com/ale-ehp/mcpcage/security/advisories/GHSA-74mf-wvqp-v23q).
 - A `tools/call` sent without an id (a JSON-RPC notification) skipped the call filter and the
   audit log, so a call to a tool nobody approved reached the server. Every `tools/call` is now
   filtered; a refused one without an id gets no answer, as JSON-RPC requires, and is recorded as
@@ -43,18 +44,22 @@ mutation testing.
   with a `docker-buildx.exe` of its own, `GODEBUG`, or, when a client leaves those variables out, a
   project folder holding Docker plugins. mcpcage now moves Windows' place variables and `GODEBUG`
   from an entry's `env` into the cage, and gives docker and npm the places Windows itself reports
-  (the registry, the account's home, `SystemRoot`), not the ones it was started with.
+  (the registry, the account's home, `SystemRoot`), not the ones it was started with. Advisory:
+  [GHSA-3c82-r9w3-6r23](https://github.com/ale-ehp/mcpcage/security/advisories/GHSA-3c82-r9w3-6r23).
 - Windows: an `env` that sets one variable twice in two cases (`Path` and `PATH`) is counted as not
-  caged. Windows keeps only one of them, and which one depends on the client.
+  caged. Windows keeps only one of them, and which one depends on the client. Advisory:
+  [GHSA-3c82-r9w3-6r23](https://github.com/ale-ehp/mcpcage/security/advisories/GHSA-3c82-r9w3-6r23).
 - Windows: an entry that starts mcpcage through `mcpcage.cmd` with arguments that `cmd.exe` reads
   again (a quote, `&`, `|`, ...) is counted as not caged: cmd runs them as commands before mcpcage
-  starts (CVE-2024-27980). `--fix` rewrites it as node with mcpcage's `cli.js`.
+  starts (CVE-2024-27980). `--fix` rewrites it as node with mcpcage's `cli.js`. Advisory:
+  [GHSA-3c82-r9w3-6r23](https://github.com/ale-ehp/mcpcage/security/advisories/GHSA-3c82-r9w3-6r23).
 - macOS and Linux: a writable mount whose path has `..` after a symlink
   (`/x/link/../proj:rw`) got no read-only `.git`, and a server in the cage could write
   `.git/config` on the host, which git then runs. mcpcage looked through the directory the system
   finds (the `..` taken from where the symlink leads) while Docker mounted the one the path spells.
   A mount's path is now read as Docker reads it before mcpcage checks and looks through it. Affects
-  0.5.0 to 0.6.1.
+  0.5.0 to 0.6.1. Advisory:
+  [GHSA-hcmg-22g9-584r](https://github.com/ale-ehp/mcpcage/security/advisories/GHSA-hcmg-22g9-584r).
 
 ### Fixed
 
