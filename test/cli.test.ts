@@ -330,21 +330,27 @@ describe("cli", () => {
     const home = freshHome();
     const result = mcpcage(home, "run", "--", "python3", "server.py");
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain("is not an npx command");
+    expect(result.stderr).toBe(
+      'mcpcage: "python3" is not an npx or uvx command. Use `mcpcage run -- npx -y <package>`, `mcpcage run -- uvx <package>`, `--image <image>` for containerized servers, or --no-sandbox.\n',
+    );
+    const prepare = mcpcage(home, "prepare", "--", "python3", "server.py");
+    expect(prepare.code).toBe(1);
+    expect(prepare.stderr).toBe('mcpcage: "python3" is not an npx or uvx command; nothing to prepare\n');
   });
 
-  it("reads a uvx command line but does not build it yet: run and prepare refuse it, saying so", () => {
-    const home = freshHome();
-    const NOT_BUILT = "uvx servers are not built yet: this version of mcpcage cages npx servers and --image containers only";
+  it("takes a uvx command line to the cage: run and prepare go on to build it, and stop where Docker is needed", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cli-"));
+    const env = fakeUserEnv(join(top, "home"), join(top, "cage"), noDocker(top));
     for (const server of [["uvx", "mcp-server-time"], ["uv", "tool", "run", "--from", "mcp-server-time@2026.1.26", "mcp-server-time"]]) {
-      const run = mcpcage(home, "run", "--", ...server);
+      const run = mcpcageWithEnv(env, "run", "--", ...server);
       expect(run.code).toBe(1);
-      expect(run.stderr).toBe(`mcpcage: ${NOT_BUILT}. Pass --no-sandbox to start it on the host, with pinning and audit but no isolation.\n`);
-      const prepare = mcpcage(home, "prepare", "--", ...server);
+      expect(run.stderr).toMatch(/^mcpcage: Docker is required to cage a server \(.*\)\. Start Docker, or use --no-sandbox to run on the host with pinning and audit only\.\n$/);
+      const prepare = mcpcageWithEnv(env, "prepare", "--", ...server);
       expect(prepare.code).toBe(1);
-      expect(prepare.stderr).toBe(`mcpcage: ${NOT_BUILT}; nothing to prepare\n`);
+      expect(prepare.stderr).toMatch(/^mcpcage: Docker is required to cage a server /);
     }
     // A line the cage would refuse says why, never with the value of the flag.
+    const home = freshHome();
     const refused = mcpcage(home, "run", "--", "uvx", "--index-url=https://user:s3cret@pypi.example/simple", "mcp-server-time");
     expect(refused.code).toBe(1);
     expect(refused.stderr).toBe("mcpcage: uvx --index-url: installs from another index than PyPI, and the cage builds from PyPI only\n");
@@ -460,7 +466,7 @@ describe("what run prints from an entry's arguments", () => {
     const refused = mcpcage(home, "run", "--", `server${HOSTILE}`);
     expect(refused.code).toBe(1);
     expect(refused.stderr).not.toMatch(RAW_CONTROL);
-    expect(refused.stderr).toContain(`mcpcage: "server${SPELLED}" is not an npx command.`);
+    expect(refused.stderr).toContain(`mcpcage: "server${SPELLED}" is not an npx or uvx command.`);
     const unknown = mcpcage(home, `wrap${HOSTILE}`);
     expect(unknown.code).toBe(2);
     expect(unknown.stderr).not.toMatch(RAW_CONTROL);

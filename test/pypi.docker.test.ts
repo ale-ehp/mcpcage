@@ -9,7 +9,7 @@ import { parseLaunch, type PypiLaunch } from "../src/launch.js";
 import { buildPypiImage, checkLock, lockPypi, MANAGED_PYTHON, managedPython, preparePypiImage, pypiDockerfile, realDocker, wheelPlatform, type DockerRunner } from "../src/pypi.js";
 import { dockerAvailable, prepareSandbox, PYPI_RESOLVE_BASE, type SandboxOptions } from "../src/sandbox.js";
 import { builtImages } from "./docker-images.js";
-import { freshHome } from "./helpers.js";
+import { connect, freshHome, mcpcage } from "./helpers.js";
 
 const docker = dockerAvailable();
 const home = freshHome();
@@ -206,6 +206,23 @@ describe.skipIf(!docker.ok)("building PyPI servers (real Docker, PyPI)", () => {
     // Bytecode for the server's package and for the standard library, which the read-only root keeps Python from writing.
     const compiled = dockerOut(["run", "--rm", "--network", "none", "--entrypoint", "/app/venv/bin/python", record.imageId, "-I", "-S", "-c", "import glob; print(len(glob.glob('/opt/python/cpython-3.13.18-*/lib/python3.13/__pycache__/os.cpython-313.pyc')), len(glob.glob('/app/venv/lib/python3.13/site-packages/mcp_server_time/__pycache__/*.cpython-313.pyc')) > 0)"]);
     expect(compiled.stdout.trim()).toBe("1 True");
+  }, 600_000);
+
+  it("starts mcp-server-time through `mcpcage run` after `mcpcage prepare`, and records its Python in the audit log", async () => {
+    const prepared = images.track(mcpcage(home, "prepare", "--id", "time-cli", "--", "uvx", "mcp-server-time"), home);
+    expect(prepared.code, prepared.stderr).toBe(0);
+    expect(prepared.stdout).toMatch(new RegExp(`^time-cli: mcp-server-time@[0-9.]+ -> mcpcage/time-cli:[0-9a-f]{12}\n  python 3\.13\.18, wheels for ${wheelPlatform()}\n$`));
+    const session = await connect({ home, runArgs: ["--id", "time-cli"], server: ["uvx", "mcp-server-time"] });
+    const { tools } = await session.client.listTools();
+    expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["get_current_time", "convert_time"]));
+    const result = await session.client.callTool({ name: "get_current_time", arguments: { timezone: "UTC" } });
+    expect(JSON.stringify(result.content)).toContain("UTC");
+    await session.close();
+    expect(mcpcage(home, "audit", "verify", "time-cli").code).toBe(0);
+    const shown = mcpcage(home, "audit", "show", "time-cli", "--lines", "200").stdout;
+    for (const field of ['"mode":"docker"', '"network":"none"', '"package":"mcp-server-time"', '"python":"3.13.18"', `"platform":"${wheelPlatform()}"`, '"uvVersion":"0.13.7"']) {
+      expect(shown).toContain(field);
+    }
   }, 600_000);
 
   // uv checks each download against the sha256 it ships with; the table must follow the pinned uv.

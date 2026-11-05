@@ -31,8 +31,10 @@ const HELP = `mcpcage ${VERSION}: run any MCP server in a cage.
 
 Usage:
   mcpcage run [options] -- npx -y <package> [args...]   start a stdio server through the cage
+  mcpcage run [options] -- uvx <package> [args...]       start a PyPI server through the cage, from its wheels
   mcpcage run --image <image> [options] -- [args...]     cage an already containerized server
   mcpcage prepare [options] -- npx -y <package> [args]   build and pin the sandbox image without starting it
+  mcpcage prepare [options] -- uvx <package> [args]      the same for a PyPI server
   mcpcage wrap <config.json> [--dry-run] [--no-build]    route a client's npx servers through mcpcage
   mcpcage unwrap <config.json> [--dry-run]               restore the original commands
   mcpcage protect [--inspect] [--fix] [options]          find every MCP configuration and show what is exposed
@@ -137,10 +139,10 @@ function parseRun(argv: string[]) {
 }
 
 /**
- * What the server's command line starts. Until mcpcage builds uvx servers, `--no-sandbox` starts a
- * line of uv's as the host command it always was: read as a PyPI server, it would get another id,
- * under which its approved tools would be trusted again as a new server's, and a flag the cage
- * refuses would stop a line that runs on the host anyway.
+ * What the server's command line starts. `--no-sandbox` starts a line of uv's as the host command it
+ * always was, as uv itself runs it, under the id it had before mcpcage built uvx servers: read as a
+ * PyPI server, it would get another id, under which its approved tools would be trusted again as a
+ * new server's, and a flag the cage refuses would stop a line that runs on the host anyway.
  */
 function launchSpec(server: string[], image: string | undefined, noSandbox: boolean): LaunchSpec {
   const [command] = server;
@@ -148,14 +150,10 @@ function launchSpec(server: string[], image: string | undefined, noSandbox: bool
   return parseLaunch(server, image);
 }
 
-/** Why `run` and `prepare` refuse a uvx server, which parseLaunch reads but nothing builds yet. */
-const PYPI_NOT_BUILT = "uvx servers are not built yet: this version of mcpcage cages npx servers and --image containers only";
-
 /** Builds and pins the sandbox image without starting the server (wrap does this for every server). */
 async function prepare(argv: string[]): Promise<number> {
   const { values, spec, serverId } = parseRun(argv);
-  if (spec.kind === "host") throw new Error(`"${spec.command}" is not an npx command; nothing to prepare`);
-  if (spec.kind === "pypi") throw new Error(`${PYPI_NOT_BUILT}; nothing to prepare`);
+  if (spec.kind === "host") throw new Error(`"${spec.command}" is not an npx or uvx command; nothing to prepare`);
   const prepared = prepareSandbox({
     serverId, spec, mounts: [], env: [], allowNet: false, memory: values.memory, cpus: values.cpus,
     keepImageUser: values["keep-image-user"], rebuild: values.rebuild, log: (message) => console.error(message),
@@ -164,6 +162,7 @@ async function prepare(argv: string[]): Promise<number> {
   // The name and version come from the installed package's metadata, which the package author wrote.
   console.log(terminalSafe(`${serverId}: ${record.packageName ? `${record.packageName}@${record.version} ` : ""}-> ${record.image}`));
   if (record.integrity) console.log(`  integrity ${record.integrity}`);
+  if (record.python) console.log(`  python ${record.python}, wheels for ${record.platform}`);
   return 0;
 }
 
@@ -188,9 +187,8 @@ async function run(argv: string[]): Promise<number> {
     auditLog.write("sandbox", { mode: "none", command: [command, ...args] });
   } else {
     if (spec.kind === "host") {
-      throw new Error(`"${spec.command}" is not an npx command. Use \`mcpcage run -- npx -y <package>\`, \`--image <image>\` for containerized servers, or --no-sandbox.`);
+      throw new Error(`"${spec.command}" is not an npx or uvx command. Use \`mcpcage run -- npx -y <package>\`, \`mcpcage run -- uvx <package>\`, \`--image <image>\` for containerized servers, or --no-sandbox.`);
     }
-    if (spec.kind === "pypi") throw new Error(`${PYPI_NOT_BUILT}. Pass --no-sandbox to start it on the host, with pinning and audit but no isolation.`);
     // Said before Docker is needed: what the cage leaves open is said even when Docker is missing or the build fails.
     if (values["allow-net"]) log(`mcpcage: WARNING ${serverId} has network access (--allow-net).`);
     // The path is the entry's argument; the server id is a plain name (checkServerId, serverIdFor).
@@ -302,7 +300,7 @@ function buildImages(changes: Array<{ name: string; after: ServerEntry }>): numb
   for (const change of changes) {
     const args = change.after.args ?? [];
     const spec = parseLaunch(args.slice(args.indexOf("--") + 1));
-    if (spec.kind !== "npm") continue;
+    if (spec.kind !== "npm" && spec.kind !== "pypi") continue;
     try {
       const prepared = prepareSandbox({
         serverId: serverIdFor(spec), spec, mounts: [], env: [], allowNet: false, memory: "512m", cpus: "1",
