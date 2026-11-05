@@ -237,9 +237,25 @@ function noSolution(stderr: string): string | undefined {
   return clip(reason === "" ? "uv gives no reason" : reason, 2000);
 }
 
-/** The refusal for a server uv finds no wheels for: its name, the Python, and uv's own reason. */
-function unsolvable(project: string, python: string, reason: string): Error {
-  return new Error(terminalSafe(`${project} cannot be installed from PyPI wheels on Python ${python}, and the cage never builds a package from source: ${reason}`));
+/**
+ * The refusal for a server uv finds no solution for from PyPI's wheels (a dependency with no wheel,
+ * a version PyPI does not have): its name, the Python, and uv's own reason, which `reason` keeps
+ * alone. A server so refused is refused again at every start, unlike a resolve that failed for want
+ * of Docker or the network: wrap and --fix leave its entry as it is (see checkPypi), and --inspect
+ * names a package that ships no wheel (see noWheel).
+ */
+export class PypiUnsolvable extends Error {
+  constructor(
+    project: string,
+    python: string,
+    readonly reason: string,
+  ) {
+    super(terminalSafe(`${project} cannot be installed from PyPI wheels on Python ${python}, and the cage never builds a package from source: ${reason}`));
+  }
+}
+
+function unsolvable(project: string, python: string, reason: string): PypiUnsolvable {
+  return new PypiUnsolvable(project, python, reason);
 }
 
 /**
@@ -370,24 +386,14 @@ function versionKey(version: string): number[] | undefined {
  */
 export function preparePypiImage(options: SandboxOptions, runner: DockerRunner = realDocker): ServerRecord {
   const spec = options.spec as PypiLaunch;
-  const dir = serverDir(options.serverId);
-  const previous = readJson<ServerRecord>(join(dir, "server.json"));
+  const previous = readJson<ServerRecord>(join(serverDir(options.serverId), "server.json"));
   const platform = wheelPlatform(runner);
-  const lockfile = join(dir, "requirements.lock");
-  const kept = existsSync(lockfile) ? readFileSync(lockfile, "utf8") : undefined;
-  const reuse =
-    !options.rebuild &&
-    previous?.spec.kind === "pypi" &&
-    canonicalJson(installed(previous.spec)) === canonicalJson(installed(spec)) &&
-    previous.platform === platform &&
-    previous.python !== undefined &&
-    previous.packageName !== undefined &&
-    previous.version !== undefined &&
-    kept !== undefined &&
-    sha256(kept) === previous.lockfileSha256;
-  const locked = reuse
-    ? { packageName: previous.packageName!, version: previous.version!, python: previous.python!, lock: kept }
-    : lockPypi(options.serverId, spec, { log: options.log, runner, platform });
+  const kept = options.rebuild ? undefined : keptLock(options.serverId, spec, platform);
+  const reuse = kept !== undefined && previous !== undefined;
+  // A lock wrap or --fix made a moment ago (see checkPypi), for this very spec and platform: the
+  // image is built from it, not from a second resolve.
+  const fresh = options.pypiLock !== undefined && sameInstall(options.pypiLock.spec, spec) && options.pypiLock.platform === platform ? options.pypiLock : undefined;
+  const locked = kept ?? fresh ?? lockPypi(options.serverId, spec, { log: options.log, runner, platform });
   const python = managedPython(locked.python);
   const dockerfile = pypiDockerfile({ command: spec.command, python });
   // The image is a function of the lock and the Dockerfile, which names the Python, the bases and the
@@ -419,6 +425,58 @@ export function preparePypiImage(options: SandboxOptions, runner: DockerRunner =
 /** What of a PyPI spec decides what is installed: a change in any of it is a new resolve. */
 function installed(spec: PypiLaunch): unknown {
   return { requirement: spec.requirement, with: spec.with, python: spec.python ?? null, resolution: spec.resolution };
+}
+
+/** Whether two PyPI specs install the same: the same requirement, --with, Python and resolution options. */
+function sameInstall(left: PypiLaunch, right: PypiLaunch): boolean {
+  return canonicalJson(installed(left)) === canonicalJson(installed(right));
+}
+
+/**
+ * The lock kept for a server, when it can be reused for `spec` on `platform` (see preparePypiImage):
+ * the server's record is for the same install, the same platform, and names the lock on disk by its
+ * sha256. Undefined when it cannot, and the server is resolved again.
+ */
+function keptLock(serverId: string, spec: PypiLaunch, platform: string): { packageName: string; version: string; python: string; lock: string } | undefined {
+  const dir = serverDir(serverId);
+  const previous = readJson<ServerRecord>(join(dir, "server.json"));
+  const lockfile = join(dir, "requirements.lock");
+  const kept = existsSync(lockfile) ? readFileSync(lockfile, "utf8") : undefined;
+  if (previous?.spec.kind !== "pypi" || !sameInstall(previous.spec, spec) || previous.platform !== platform) return undefined;
+  if (previous.python === undefined || previous.packageName === undefined || previous.version === undefined) return undefined;
+  if (kept === undefined || sha256(kept) !== previous.lockfileSha256) return undefined;
+  return { packageName: previous.packageName, version: previous.version, python: previous.python, lock: kept };
+}
+
+/** A lock made for a spec (see lockPypi), which the image of that spec can be built from. */
+export type PypiLock = PypiResolution & { lockfileSha256: string; spec: PypiLaunch };
+
+/** What a resolve gave wrap and --fix (see checkPypi): the lock, uv's reason for none, or another failure. */
+export type PypiCheck = { locked: PypiLock } | { unsolvable: string } | { failed: string };
+
+/** The resolve wrap and --fix ask for each uvx server they are about to write; tests give their own. */
+export type PypiResolver = (serverId: string, spec: PypiLaunch) => PypiCheck;
+
+/**
+ * The resolve of a uvx server that wrap and protect --fix run before they write its entry: seconds,
+ * no build. A lock that `run` would reuse is reused, so that an entry caged again does not move to
+ * a newer release; otherwise the server is resolved and its lock kept (see lockPypi), for the build
+ * that follows. uv's "No solution found" is `unsolvable`, with mcpcage's words and uv's reason: such
+ * a server would fail at every start of the client, and its entry is left as it is. Any other
+ * failure (Docker stopped, no network) is `failed`: the entry is written, and resolved and built at
+ * its first start, as an npx server whose build failed is.
+ */
+export function checkPypi(serverId: string, spec: PypiLaunch, options: { log: (message: string) => void; runner?: DockerRunner }): PypiCheck {
+  const runner = options.runner ?? realDocker;
+  try {
+    const platform = wheelPlatform(runner);
+    const kept = keptLock(serverId, spec, platform);
+    if (kept !== undefined) return { locked: { ...kept, platform, lockfileSha256: sha256(kept.lock), spec } };
+    return { locked: { ...lockPypi(serverId, spec, { log: options.log, runner, platform }), spec } };
+  } catch (error) {
+    if (error instanceof PypiUnsolvable) return { unsolvable: error.message };
+    return { failed: error instanceof Error ? error.message : "an unexpected error" };
+  }
 }
 
 /**

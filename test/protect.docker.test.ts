@@ -1,11 +1,11 @@
 // Runs only with `npm run test:docker`: builds the notes server of test/fixtures into a cage and lists its tools there.
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { dockerAvailable } from "../src/sandbox.js";
 import { builtImages } from "./docker-images.js";
-import { fakeUserEnv, mcpcageWithEnv, root } from "./helpers.js";
+import { cli, connect, fakeUserEnv, mcpcageWithEnv, root } from "./helpers.js";
 
 const docker = dockerAvailable();
 const images = builtImages();
@@ -83,5 +83,61 @@ describe.skipIf(!docker.ok)("mcpcage protect --inspect (real Docker)", () => {
     } finally {
       rmSync(marker, { force: true });
     }
+  }, 600_000);
+});
+
+/** A fake home whose only configuration is Cursor's, holding `servers`; the user's environment there, with this machine's Docker. */
+function uvxMachine(servers: Record<string, unknown>) {
+  const top = mkdtempSync(join(tmpdir(), "mcpcage-uvx-fix-"));
+  const home = join(top, "home");
+  const project = join(top, "work");
+  const cage = join(top, "cage");
+  for (const dir of [home, project, cage]) mkdirSync(dir, { recursive: true });
+  const cursor = join(home, ".cursor", "mcp.json");
+  mkdirSync(dirname(cursor), { recursive: true });
+  writeFileSync(cursor, `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`);
+  const env = fakeUserEnv(home, cage, { CLAUDECODE: "1", DOCKER_CONFIG: process.env.DOCKER_CONFIG ?? join(homedir(), ".docker") });
+  for (const name of Object.keys(env)) if (/^UV_/i.test(name)) delete env[name];
+  // An installed mcpcage, as --fix writes it: named mcpcage, this repository's cli.js.
+  const mcpcage = join(top, "bin", "mcpcage");
+  mkdirSync(dirname(mcpcage));
+  symlinkSync(cli, mcpcage);
+  return { top, home, project, cage, cursor, env, mcpcage };
+}
+
+describe.skipIf(!docker.ok)("mcpcage protect --fix with uvx servers (real Docker, PyPI)", () => {
+  afterAll(() => images.remove(), 120_000);
+
+  it("resolves mcp-server-time while making the plan, builds it from that lock after yes, and the entry it writes starts in the cage", async () => {
+    const machine = uvxMachine({ time: { command: "uvx", args: ["mcp-server-time", "--local-timezone", "UTC"] } });
+    const fix = images.track(mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--command", machine.mcpcage), machine.cage);
+    expect(fix.stdout, fix.stderr).toContain("\nPlan\n  cage time in ~/.cursor/mcp.json\n");
+    expect(fix.stdout).toMatch(/ {2}built time: mcp-server-time@\d+(\.\d+)+ -> mcpcage\/mcp-server-time-[0-9a-f]{8}:[0-9a-f]{12}\n/);
+    // Resolved once, while the plan was made: the build reads that lock.
+    expect(fix.stderr.match(/mcpcage: resolving mcp-server-time from PyPI, wheels only/g)).toHaveLength(1);
+    expect(fix.code).toBe(0);
+    const entry = JSON.parse(readFileSync(machine.cursor, "utf8")).mcpServers.time as { command: string; args: string[] };
+    expect(entry).toEqual({ command: machine.mcpcage, args: ["run", "--", "uvx", "mcp-server-time", "--local-timezone", "UTC"] });
+    // Started as the client starts it: the image is the one --fix built, and nothing is resolved again.
+    const separator = entry.args.indexOf("--");
+    const session = await connect({ home: machine.cage, runArgs: entry.args.slice(1, separator), server: entry.args.slice(separator + 1) });
+    try {
+      const { tools } = await session.client.listTools();
+      expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["get_current_time", "convert_time"]));
+      expect(session.stderr()).not.toContain("resolving");
+    } finally {
+      await session.close();
+    }
+  }, 600_000);
+
+  it("leaves dbt-mcp 2.10.1 as it is, with uv's reason: its uuid dependency ships no wheel", () => {
+    const dbt = { command: "uvx", args: ["dbt-mcp==2.10.1"] };
+    const machine = uvxMachine({ dbt });
+    const fix = images.track(mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--command", machine.mcpcage), machine.cage);
+    expect(fix.stdout, fix.stderr).toMatch(
+      /\nPlan\n {2}not changed: dbt in ~\/\.cursor\/mcp\.json: dbt-mcp cannot be installed from PyPI wheels on Python 3\.13, and the cage never builds a package from source: Because uuid==1\.30 has no usable wheels[^\n]*\n {2}nothing that mcpcage can change by itself\.\n/,
+    );
+    expect(JSON.parse(readFileSync(machine.cursor, "utf8")).mcpServers.dbt).toEqual(dbt);
+    expect(fix.code).toBe(1);
   }, 600_000);
 });

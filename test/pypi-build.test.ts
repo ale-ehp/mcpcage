@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
 import { parseLaunch, type PypiLaunch } from "../src/launch.js";
-import { managedPython, preparePypiImage, pypiDockerfile, uvVersion, type DockerResult, type DockerRunner } from "../src/pypi.js";
+import { checkPypi, managedPython, preparePypiImage, pypiDockerfile, uvVersion, type DockerResult, type DockerRunner } from "../src/pypi.js";
 import { PYPI_INSTALL_BASE, PYPI_RUNTIME_BASE, UV_BASE, type SandboxOptions, type ServerRecord } from "../src/sandbox.js";
 
 /*
@@ -127,6 +127,65 @@ describe("the Dockerfile of a PyPI server", () => {
 
   it.each(["mcp-server-time", "awslabs.aws-api-mcp-server", "mcp_for_unity", "python", "x2"])("writes the command %s as the entry point", (command) => {
     expect(pypiDockerfile({ command, python: "3.13" })).toContain(`ENTRYPOINT ["/app/venv/bin/${command}"]`);
+  });
+});
+
+describe("the resolve wrap and --fix run before they write a uvx entry", () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "mcpcage-pypi-check-"));
+    vi.stubEnv("MCPCAGE_HOME", home);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+  const options = (spec: PypiLaunch, more: Partial<SandboxOptions> = {}): SandboxOptions => ({
+    serverId: "time", spec, mounts: [], env: [], allowNet: false, memory: "512m", cpus: "1", keepImageUser: false, rebuild: false, log: () => {}, ...more,
+  });
+
+  it("locks the server without building it, and the build that follows starts from that lock, not from a second resolve", () => {
+    const state = { arch: "arm64", version: "2026.11.4" };
+    const engine = fakeEngine(state);
+    const spec = pypi("uvx", "mcp-server-time");
+    const answer = checkPypi("time", spec, { log: () => {}, runner: engine.runner });
+    expect(answer).toEqual({
+      locked: { packageName: "mcp-server-time", version: "2026.11.4", python: "3.13", platform: "aarch64-manylinux_2_40", lock: lockOf("2026.11.4"), lockfileSha256: sha256(lockOf("2026.11.4")), spec },
+    });
+    expect(engine.builds()).toEqual([]);
+    expect(readFileSync(join(home, "servers", "time", "requirements.lock"), "utf8")).toBe(lockOf("2026.11.4"));
+    // PyPI moves on before the user says yes: the image is still the one of the plan's lock.
+    state.version = "2026.12.1";
+    engine.reset();
+    const record = preparePypiImage(options(spec, { pypiLock: (answer as { locked: never }).locked }), engine.runner);
+    expect(record.version).toBe("2026.11.4");
+    expect(engine.resolves()).toBe(0);
+    expect(engine.builds()).toHaveLength(1);
+    // Kept as run keeps it: the next resolve of the same spec, by --fix again, reuses it.
+    writeFileSync(join(home, "servers", "time", "server.json"), JSON.stringify(record));
+    engine.reset();
+    expect(checkPypi("time", spec, { log: () => {}, runner: engine.runner })).toMatchObject({ locked: { version: "2026.11.4", lock: lockOf("2026.11.4") } });
+    expect(engine.resolves()).toBe(0);
+  });
+
+  it("does not build from a lock made for another spec or another platform", () => {
+    const engine = fakeEngine({ arch: "arm64", version: "2026.11.4" });
+    const answer = checkPypi("time", pypi("uvx", "mcp-server-time"), { log: () => {}, runner: engine.runner }) as { locked: NonNullable<SandboxOptions["pypiLock"]> };
+    for (const pypiLock of [{ ...answer.locked, spec: pypi("uvx", "--python", "3.12", "mcp-server-time") }, { ...answer.locked, platform: "x86_64-manylinux_2_40" }]) {
+      engine.reset();
+      preparePypiImage(options(pypi("uvx", "mcp-server-time"), { pypiLock }), engine.runner);
+      expect(engine.resolves()).toBeGreaterThan(0);
+    }
+  });
+
+  it("gives uv's reason when it finds no solution from wheels, and any other failure as one", () => {
+    const uv = "  x No solution found when resolving dependencies:\n  `-> Because uuid==1.30 has no usable wheels and all versions of dbtlabs-vortex depend on uuid==1.30, we can conclude that all versions of dbtlabs-vortex cannot be used.\n";
+    const unsolvable: DockerRunner = (args) => (args[0] === "version" ? { status: 0, stdout: "arm64\n", stderr: "" } : { status: 1, stdout: "", stderr: uv });
+    const answer = checkPypi("dbt", pypi("uvx", "dbt-mcp==2.10.1"), { log: () => {}, runner: unsolvable });
+    expect(answer).toEqual({ unsolvable: expect.stringMatching(/^dbt-mcp cannot be installed from PyPI wheels on Python 3\.13, and the cage never builds a package from source: .*Because uuid==1\.30 has no usable wheels/) });
+    const stopped: DockerRunner = () => ({ status: 1, stdout: "", stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" });
+    expect(checkPypi("time", pypi("uvx", "mcp-server-time"), { log: () => {}, runner: stopped })).toEqual({ failed: expect.stringMatching(/^docker version failed: Cannot connect to the Docker daemon/) });
+    const offline: DockerRunner = (args) => (args[0] === "version" ? { status: 0, stdout: "arm64\n", stderr: "" } : { status: 2, stdout: "", stderr: "error: Failed to fetch: `https://pypi.org/simple/mcp-server-time/`" });
+    expect(checkPypi("time", pypi("uvx", "mcp-server-time"), { log: () => {}, runner: offline })).toEqual({ failed: expect.stringMatching(/^the resolve of mcp-server-time failed \(exit code 2\): error: Failed to fetch/) });
   });
 });
 

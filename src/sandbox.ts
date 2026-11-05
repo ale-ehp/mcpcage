@@ -9,7 +9,7 @@ import { hostEnvName } from "./config.js";
 import type { LaunchSpec } from "./launch.js";
 import { cageHome, serverDir } from "./paths.js";
 import { readJson, writeJson } from "./pinstore.js";
-import { preparePypiImage } from "./pypi.js";
+import { preparePypiImage, type PypiLock } from "./pypi.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
 import { uvSettingsReason } from "./uv-settings.js";
@@ -52,6 +52,8 @@ export interface SandboxOptions {
   keepImageUser: boolean;
   rebuild: boolean;
   log: (message: string) => void;
+  /** For a PyPI server: the lock wrap or --fix just made for it (see checkPypi), built from instead of resolving again. */
+  pypiLock?: PypiLock;
 }
 
 /** What `mcpcage` remembers about how a server is built, next to its pin. */

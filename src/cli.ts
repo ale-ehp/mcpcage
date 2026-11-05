@@ -8,6 +8,7 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { AuditLog, auditFiles, verifyAuditFile, type AuditEntry } from "./audit.js";
+import { canonicalJson } from "./canonical.js";
 import { banner } from "./banner.js";
 import { discoverConfigs } from "./clients.js";
 import { RUN_OPTIONS, unwrapConfig, uvxEnvironment, withoutEnvValues, wrapConfig, type ServerEntry, type WrapOutcome } from "./config.js";
@@ -19,6 +20,7 @@ import { cageHome, checkServerId, serverDir } from "./paths.js";
 import { approvePending, listServers, loadPending, loadPin, pendingDefinitions, readJson, refuseTooMany, type Pending } from "./pinstore.js";
 import { envFileNote, fixConfigs, inspectionSandbox, isUncaged, renderReport, scanConfigs, uncheckedFiles, writableMounts, writableWarning, type Inspector } from "./protect.js";
 import { runProxy } from "./proxy.js";
+import { checkPypi, type PypiCheck, type PypiLock, type PypiResolver } from "./pypi.js";
 import { claudeCodeIsRunning } from "./running.js";
 import { dockerAvailable, INSTALL_BASE, npxProgram, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
@@ -66,7 +68,7 @@ Protect options:
   --offline             do not ask the npm registry; use what was looked up before
   --fix                 route every npx and uvx server through mcpcage, after showing the plan (backups are kept)
   --yes                 with --fix: change the files without asking
-  --no-build            with --fix: do not build the sandbox images now
+  --no-build            with --fix: do not resolve the uvx servers or build the sandbox images now
   --command <path>      the mcpcage command written into configurations (default: mcpcage's full path;
                         on Windows, node.exe with mcpcage's cli.js)
   --writable            with --fix, and with wrap: mount the paths servers are given writable, not read-only
@@ -289,29 +291,69 @@ async function wrap(command: "wrap" | "unwrap", argv: string[]): Promise<number>
   const written = command === "wrap" ? (values.command ?? (process.platform === "win32" ? installedCommand() : undefined)) : undefined;
   if (written !== undefined) refuseTemporary(written, "wrap");
   let status = 0;
+  // uvx servers are resolved before they are written, unless --no-build, and built from those locks.
+  const pypi = pypiResolver();
   for (const file of positionals) {
     const outcome =
       command === "wrap"
-        ? wrapConfig(file, { dryRun: values["dry-run"], command: written, writable: values.writable })
+        ? wrapConfig(file, { dryRun: values["dry-run"], command: written, writable: values.writable, ...(values["no-build"] ? {} : { resolve: pypi.resolve }) })
         : unwrapConfig(file, { dryRun: values["dry-run"] });
     report(outcome, command, values["dry-run"]);
-    if (command === "wrap" && !values["dry-run"] && !values["no-build"]) status = Math.max(status, buildImages(outcome.changed));
+    if (command === "wrap" && values["no-build"] && cagesUvx(outcome.changed)) console.log(`  ${NOT_RESOLVED}`);
+    if (command === "wrap" && !values["dry-run"] && !values["no-build"]) status = Math.max(status, buildImages(outcome.changed, pypi.locks));
   }
   return status;
 }
 
-/** Builds the images now, so the client's first start does not wait for an image build and time out. */
-function buildImages(changes: Array<{ name: string; after: ServerEntry }>): number {
+/** What --no-build says when it cages uvx servers, whose resolve it skips with the build. */
+const NOT_RESOLVED = "--no-build: the packages of the uvx servers were not resolved, so one whose dependencies ship no wheel is caged anyway and will fail when it first starts";
+
+/** Whether any of the changes cages a uvx server: one that now starts a line of uv's after `--`. */
+function cagesUvx(changes: Array<{ after: ServerEntry; alreadyCaged?: boolean }>): boolean {
+  return changes.some((change) => {
+    const args = (change.after.args ?? []).filter((arg): arg is string => typeof arg === "string");
+    return !change.alreadyCaged && args.includes("--") && startsUv(args.slice(args.indexOf("--") + 1));
+  });
+}
+
+/**
+ * The resolve of each uvx server wrap and protect --fix are about to write (see checkPypi), run once
+ * per server and spec: the plan and the rewrite that follows it ask for the same server, and
+ * buildImages then builds from the locks it made (`locks`, by server id).
+ */
+function pypiResolver(): { resolve: PypiResolver; locks: Map<string, PypiLock> } {
+  const answers = new Map<string, PypiCheck>();
+  const locks = new Map<string, PypiLock>();
+  const resolve: PypiResolver = (serverId, spec) => {
+    const key = canonicalJson({ serverId, spec });
+    let answer = answers.get(key);
+    if (answer === undefined) {
+      answer = checkPypi(serverId, spec, { log: (message) => console.error(terminalSafe(message)) });
+      answers.set(key, answer);
+      if ("locked" in answer) locks.set(serverId, answer.locked);
+    }
+    return answer;
+  };
+  return { resolve, locks };
+}
+
+/**
+ * Builds the images now, so the client's first start does not wait for an image build and time out.
+ * A uvx server is built from the lock its resolve made a moment ago (`locks`, see pypiResolver).
+ */
+function buildImages(changes: Array<{ name: string; after: ServerEntry }>, locks: ReadonlyMap<string, PypiLock> = new Map()): number {
   let status = 0;
   for (const change of changes) {
     const args = change.after.args ?? [];
     // With the env the client gives mcpcage, as wrap read it: its UV_PYTHON is the Python `run` builds for.
     const spec = parseLaunch(args.slice(args.indexOf("--") + 1), undefined, process.platform, uvxEnvironment(change.after));
     if (spec.kind !== "npm" && spec.kind !== "pypi") continue;
+    const serverId = serverIdFor(spec);
+    const pypiLock = spec.kind === "pypi" ? locks.get(serverId) : undefined;
     try {
       const prepared = prepareSandbox({
-        serverId: serverIdFor(spec), spec, mounts: [], env: [], allowNet: false, memory: "512m", cpus: "1",
-        keepImageUser: false, rebuild: false, log: (message) => console.error(message),
+        serverId, spec, mounts: [], env: [], allowNet: false, memory: "512m", cpus: "1",
+        keepImageUser: false, rebuild: false, log: (message) => console.error(message), ...(pypiLock === undefined ? {} : { pypiLock }),
       });
       // The name is the configuration's, the package name and version its author's metadata.
       console.log(terminalSafe(`  built ${change.name}: ${prepared.record.packageName}@${prepared.record.version} -> ${prepared.record.image}`));
@@ -359,13 +401,17 @@ async function protect(argv: string[]): Promise<number> {
   if (!values.fix) return uncaged > 0 || unchecked > 0 ? 1 : 0;
 
   const claudeCodeRunning = claudeCodeIsRunning();
+  // uvx servers are resolved while the plan is made, unless --no-build, and built from those locks after yes.
+  const pypi = pypiResolver();
+  const resolving = values["no-build"] ? {} : { resolve: pypi.resolve };
   console.log("\nPlan");
   const planned: string[] = [];
   const logPlan = (line: string) => {
     planned.push(line);
     console.log(line);
   };
-  const plan = fixConfigs({ report, command, claudeCodeRunning, dryRun: true, home, log: logPlan, writable: values.writable });
+  const plan = fixConfigs({ report, command, claudeCodeRunning, dryRun: true, home, log: logPlan, writable: values.writable, ...resolving });
+  if (values["no-build"] && cagesUvx(plan.files.flatMap((file) => file.changed))) logPlan(`  ${NOT_RESOLVED}`);
   const servers = plan.files.reduce((total, file) => total + file.changed.length, 0);
   const files = plan.files.filter((file) => file.changed.length > 0).length;
   if (servers === 0) {
@@ -387,12 +433,12 @@ async function protect(argv: string[]): Promise<number> {
   const logNew = (line: string) => {
     if (!planned.includes(line)) console.log(line);
   };
-  const outcome = fixConfigs({ report, command, claudeCodeRunning, dryRun: false, home, log: logNew, writable: values.writable });
+  const outcome = fixConfigs({ report, command, claudeCodeRunning, dryRun: false, home, log: logNew, writable: values.writable, ...resolving });
   const changed = outcome.files.flatMap((file) => file.changed);
   const status = changed.length < uncaged || unchecked > 0 ? 1 : 0;
   // A failed build is reported and leaves the configuration caged: the image is built at the next start.
   // An entry that was caged already, and only had its env or its launcher changed, keeps the image it has.
-  return values["no-build"] ? status : Math.max(status, buildImages(changed.filter((change) => !change.alreadyCaged)));
+  return values["no-build"] ? status : Math.max(status, buildImages(changed.filter((change) => !change.alreadyCaged), pypi.locks));
 }
 
 /** `--inspect`: the server starts in its cage (no network, its paths read-only) only to list its tools. */
@@ -460,6 +506,7 @@ function report(outcome: WrapOutcome, command: string, dryRun: boolean): void {
     print(`  ${command === "wrap" ? "caged" : "restored"} ${change.name}: ${[change.after.command, ...(command === "wrap" ? withoutEnvValues(args) : args)].join(" ")}`);
     // Only --writable makes wrap write :rw: what that lets the server change is said for each mount.
     if (command === "wrap") for (const path of writableMounts(change.after)) print(`    ${writableWarning(change.name, path)}`);
+    if (change.note !== undefined) print(`    ${change.note}`);
     // VS Code loads an envFile as it is, now for mcpcage: said for each entry that keeps one.
     const note = command === "wrap" ? envFileNote(change.after) : undefined;
     if (note !== undefined) print(`    ${note}`);

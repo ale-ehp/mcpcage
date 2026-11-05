@@ -5,7 +5,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
 import { batchFile, envFileOf, foreignPath, mcpcageAt, movedPlaces, nodeScript, type ForeignPath, type McpcageCommand } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
-import { cmdRunner, isNpx, npxArgv, parseLaunch, toolRunArgs, type UvEnvironment } from "./launch.js";
+import { cmdRunner, isNpx, npxArgv, parseLaunch, serverIdFor, toolRunArgs, type UvEnvironment } from "./launch.js";
+import type { PypiResolver } from "./pypi.js";
 import { NOT_ON_A_DRIVE, offDrive } from "./sandbox.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
@@ -53,7 +54,8 @@ export interface WrapOutcome {
   file: string;
   /** `mcpServers` (Claude Desktop, Claude Code, Cursor) or `servers` (VS Code). */
   key: "mcpServers" | "servers";
-  changed: Array<{ name: string; before: ServerEntry; after: ServerEntry }>;
+  /** `note`: what the user should know of a change, such as a uvx server whose packages could not be resolved now. */
+  changed: Array<{ name: string; before: ServerEntry; after: ServerEntry; note?: string }>;
   skipped: Array<{ name: string; reason: string }>;
   backup?: string;
 }
@@ -63,9 +65,10 @@ export interface WrapOutcome {
  * whose command is only named mcpcage (see mcpcageAt) is no cage: what it would start is wrapped as
  * an npx entry is, as `protect --fix` does. It was skipped as "already wrapped" for its name alone.
  * `writable` mounts the paths the servers are given writable (see wrapEntry). An entry that would
- * still not count as caged once rewritten stays as it is, with the reason (see cageCheck).
+ * still not count as caged once rewritten stays as it is, with the reason (see cageCheck), and so does
+ * a uvx server whose packages uv finds no wheels for, when `resolve` is given (see resolveBeforeWrite).
  */
-export function wrapConfig(file: string, options: { dryRun: boolean; command?: McpcageCommand; writable?: boolean; uv?: UserUv }): WrapOutcome {
+export function wrapConfig(file: string, options: { dryRun: boolean; command?: McpcageCommand; writable?: boolean; uv?: UserUv; resolve?: PypiResolver }): WrapOutcome {
   const command = options.command ?? "mcpcage";
   // The user's uv setup, looked up once, at the first uvx entry.
   let uv = options.uv;
@@ -76,8 +79,34 @@ export function wrapConfig(file: string, options: { dryRun: boolean; command?: M
     const wrapped = wrapEntry(original.entry, { command, writable: options.writable, ...(uv === undefined ? {} : { uv }) });
     if ("skip" in wrapped) return skip(name, wrapped.skip);
     const reason = cageCheck(wrapped.entry, { command, configFile: file });
-    return reason === undefined ? wrapped.entry : skip(name, reason);
+    if (reason !== undefined) return skip(name, reason);
+    const resolved = resolveBeforeWrite(wrapped.entry, options.resolve, uv?.environment);
+    if (resolved !== undefined && "skip" in resolved) return skip(name, resolved.skip);
+    return { after: wrapped.entry, ...(resolved === undefined ? {} : { note: resolved.note }) };
   });
+}
+
+/**
+ * For a uvx server that wrap or --fix is about to write (`wrapped`, a wrapped entry): the resolve of
+ * its packages, which takes seconds and builds nothing (see checkPypi). One that uv finds no solution
+ * for from PyPI's wheels (a dependency without one, a version PyPI does not have) stays as it is,
+ * with uv's reason: written, it would fail at every start of the client, where npx's failed builds
+ * are usually passing. One whose resolve fails otherwise (Docker stopped, no network) is written,
+ * with a note, and resolved at its first start. Undefined for any other entry, and without `resolve`
+ * (--no-build). `environment` is the user's, which the line is read with (see uvxEnvironment).
+ */
+export function resolveBeforeWrite(wrapped: ServerEntry, resolve: PypiResolver | undefined, environment: unknown = process.env): { skip: string } | { note: string } | undefined {
+  // The entry wrapEntry wrote, whatever --command names mcpcage: the server's line follows the first `--`.
+  if (resolve === undefined || !Array.isArray(wrapped.args)) return undefined;
+  const args = wrapped.args.filter((arg): arg is string => typeof arg === "string");
+  const separator = args.indexOf("--");
+  if (separator === -1) return undefined;
+  const spec = parseLaunch(args.slice(separator + 1), undefined, process.platform, uvxEnvironment(wrapped, environment));
+  if (spec.kind !== "pypi") return undefined;
+  const answer = resolve(serverIdFor(spec), spec);
+  if ("unsolvable" in answer) return { skip: answer.unsolvable };
+  if ("failed" in answer) return { note: `its packages could not be resolved now (${answer.failed}): they are resolved, and the image built, at its first start` };
+  return undefined;
 }
 
 /**
@@ -585,7 +614,7 @@ function programName(command: string, platform: NodeJS.Platform): string {
 export function unwrapConfig(file: string, options: { dryRun: boolean }): WrapOutcome {
   return transform(file, options.dryRun, (name, entry, skip) => {
     const restored = unwrapEntry(entry);
-    return "skip" in restored ? skip(name, restored.skip) : restored.entry;
+    return "skip" in restored ? skip(name, restored.skip) : { after: restored.entry };
   });
 }
 
@@ -620,11 +649,12 @@ export function mcpcageArgs(entry: ServerEntry & { args: unknown[] }): unknown[]
   return nodeScript(entry) === undefined ? entry.args : entry.args.slice(1);
 }
 
+/** The entry rewritten, with what the user should know of it, or undefined once `skip` has said why it stays. */
 type Rewrite = (
   name: string,
   entry: ServerEntry,
   skip: (name: string, reason: string) => undefined,
-) => ServerEntry | undefined;
+) => { after: ServerEntry; note?: string } | undefined;
 
 function transform(file: string, dryRun: boolean, rewrite: Rewrite): WrapOutcome {
   // Read first and explain a missing file from the error: a look before the read would leave a
@@ -656,15 +686,15 @@ function transform(file: string, dryRun: boolean, rewrite: Rewrite): WrapOutcome
     // Configuration files are not type-checked, and one entry that trips its rewrite up is left as it
     // is, with the reason, while the others are rewritten: a null entry, or one whose args were an
     // object, stopped wrap or unwrap with a TypeError and left every server of the file as it was.
-    let after: ServerEntry | undefined;
+    let rewritten: ReturnType<Rewrite>;
     try {
-      after = isJsonObject(entry) ? rewrite(name, entry, skip) : skip(name, "it is not an object");
+      rewritten = isJsonObject(entry) ? rewrite(name, entry, skip) : skip(name, "it is not an object");
     } catch (error) {
-      after = skip(name, `could not rewrite it: ${error instanceof Error ? error.message : "an unexpected error"}`);
+      rewritten = skip(name, `could not rewrite it: ${error instanceof Error ? error.message : "an unexpected error"}`);
     }
-    if (after) {
-      outcome.changed.push({ name, before: entry, after });
-      servers[name] = after;
+    if (rewritten) {
+      outcome.changed.push({ name, before: entry, after: rewritten.after, ...(rewritten.note === undefined ? {} : { note: rewritten.note }) });
+      servers[name] = rewritten.after;
     }
   }
 

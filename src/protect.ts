@@ -3,7 +3,7 @@ import { posix, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { claudeCodeSections, readConfigFile, type ClientId, type ConfigLocation } from "./clients.js";
 import {
-  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, mcpcageArgs, moveHostEnv, relaunch, replaceFile, RUN_OPTIONS, serverType, unwrapEntry, userUvHere, uvxEnvironment, wrapEntry,
+  actsOnHost, cageCheck, envEffects, envValues, hostPath, isWrapped, mcpcageArgs, moveHostEnv, relaunch, replaceFile, resolveBeforeWrite, RUN_OPTIONS, serverType, unwrapEntry, userUvHere, uvxEnvironment, wrapEntry,
   type EnvEffects, type ServerEntry, type ServerType, type UserUv,
 } from "./config.js";
 import { batchFile, envFileOf, mcpcageAt, nodeScript, type ForeignPath, type McpcageCommand, type McpcageKind } from "./installed.js";
@@ -13,6 +13,7 @@ import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./man
 import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
+import type { PypiResolver } from "./pypi.js";
 import { hostMount, NOT_ON_A_DRIVE, offDrive, type SandboxOptions } from "./sandbox.js";
 import { accountHome, clientPlaces, sensitivePath, thisMachine } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
@@ -748,9 +749,10 @@ export interface FixedFile {
   file: string;
   /**
    * `alreadyCaged`: an entry caged already, whose env moved off the host, or whose batch file became
-   * node with mcpcage's cli.js on Windows (see relaunch); its image stays the same.
+   * node with mcpcage's cli.js on Windows (see relaunch); its image stays the same. `note`: what the
+   * user should know of the change, such as a uvx server whose packages could not be resolved now.
    */
-  changed: Array<{ name: string; label?: string; after: ServerEntry; alreadyCaged?: boolean }>;
+  changed: Array<{ name: string; label?: string; after: ServerEntry; alreadyCaged?: boolean; note?: string }>;
   skipped: Array<{ name: string; label?: string; reason: string }>;
   /** Why the whole file was left as it is. */
   refused?: string;
@@ -775,6 +777,11 @@ export interface FixOptions {
   writable?: boolean;
   /** The user's uv setup that uvx entries are read with (see UserUv): this machine's, looked up at the first uvx entry, when not given. */
   uv?: UserUv;
+  /**
+   * The resolve of each uvx server about to be caged (see resolveBeforeWrite): one uv finds no wheels
+   * for stays as it is, with uv's reason. Not given with --no-build, which resolves nothing.
+   */
+  resolve?: PypiResolver;
 }
 
 /**
@@ -840,13 +847,15 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const server of targets) {
     const servers = valueAt(config, server.label === undefined ? [file.key] : ["projects", server.label, "mcpServers"]);
     const entry = isJsonObject(servers) && Object.hasOwn(servers, server.name) ? servers[server.name] : undefined;
-    const wrapped = !isJsonObject(servers) || !isJsonObject(entry) ? { skip: "it is no longer in the file" } : rewrite(entry as ServerEntry, options.command, options.writable === true, file.file, userUv);
+    const wrapped = !isJsonObject(servers) || !isJsonObject(entry) ? { skip: "it is no longer in the file" } : rewrite(entry as ServerEntry, options, file.file, userUv);
     if ("skip" in wrapped) {
       fixed.skipped.push({ name: server.name, label: server.label, reason: wrapped.skip });
       continue;
     }
     (servers as Record<string, unknown>)[server.name] = wrapped.entry;
-    fixed.changed.push({ name: server.name, label: server.label, after: wrapped.entry, ...(wrapped.alreadyCaged ? { alreadyCaged: true } : {}) });
+    fixed.changed.push({
+      name: server.name, label: server.label, after: wrapped.entry, ...(wrapped.alreadyCaged ? { alreadyCaged: true } : {}), ...(wrapped.note === undefined ? {} : { note: wrapped.note }),
+    });
     const before = isJsonObject((entry as ServerEntry).env) ? Object.keys((entry as ServerEntry).env!) : [];
     removed.set(wrapped.entry, before.filter((name) => !Object.hasOwn(wrapped.entry.env ?? {}, name)));
   }
@@ -898,6 +907,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   if (!options.dryRun) fixed.backup = replaceFile(file.file, bytes, serialize(config, text));
   for (const change of fixed.changed) {
     options.log(`  ${options.dryRun ? "cage" : "caged"} ${terminalSafe(change.name)} in ${where(change.label)}`);
+    if (change.note !== undefined) options.log(`    ${terminalSafe(change.note)}`);
     for (const warning of warnings(change)) options.log(`    ${warning}`);
     const note = envFileNote(change.after);
     if (note !== undefined) options.log(`    ${note}`);
@@ -913,14 +923,20 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
  * What the command is, is looked at again: the file may have changed since the scan. The result is
  * checked as the report will check it (see cageCheck): one that would still not count as caged,
  * because of a PATH, a client place or an envFile that only the user can change, stays as it is,
- * with what to do, instead of being called caged.
+ * with what to do, instead of being called caged. A uvx server about to be caged is resolved first
+ * (see resolveBeforeWrite), and stays as it is when uv finds no wheels for it.
  */
-function rewrite(entry: ServerEntry, command: McpcageCommand, writable: boolean, configFile: string, userUv: () => UserUv): { entry: ServerEntry; alreadyCaged?: boolean } | { skip: string } {
-  const rewritten = rewriteEntry(entry, command, writable, userUv);
+function rewrite(entry: ServerEntry, options: FixOptions, configFile: string, userUv: () => UserUv): { entry: ServerEntry; alreadyCaged?: boolean; note?: string } | { skip: string } {
+  const { command } = options;
+  const rewritten = rewriteEntry(entry, command, options.writable === true, userUv);
   if ("skip" in rewritten) return rewritten;
   const reason = cageCheck(rewritten.entry, { command, configFile });
   if (reason !== undefined) return { skip: reason };
-  return rewritten.entry === entry ? { skip: "its env no longer runs on your machine" } : rewritten;
+  if (rewritten.entry === entry) return { skip: "its env no longer runs on your machine" };
+  // An entry caged already keeps the image it has: nothing to resolve.
+  const resolved = rewritten.alreadyCaged ? undefined : resolveBeforeWrite(rewritten.entry, options.resolve, options.uv?.environment);
+  if (resolved !== undefined && "skip" in resolved) return resolved;
+  return resolved === undefined ? rewritten : { ...rewritten, note: resolved.note };
 }
 
 function rewriteEntry(entry: ServerEntry, command: McpcageCommand, writable: boolean, userUv: () => UserUv): { entry: ServerEntry; alreadyCaged?: boolean } | { skip: string } {

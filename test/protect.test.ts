@@ -11,13 +11,14 @@ import { isWrapped, moveHostEnv, serverType, unwrapEntry, wrapConfig, wrapEntry,
 import { listTools } from "../src/inspect.js";
 import { mcpcageAt, type McpcageCommand } from "../src/installed.js";
 import { hasComments, parseJsonc } from "../src/jsonc.js";
-import { cmdNpx, parseLaunch, serverIdFor } from "../src/launch.js";
+import { cmdNpx, parseLaunch, serverIdFor, type PypiLaunch } from "../src/launch.js";
 import { tooDeep } from "../src/manifest.js";
 import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs, writableMounts } from "../src/protect.js";
+import type { PypiResolver } from "../src/pypi.js";
 import { offDrive, parseMount, runArgs } from "../src/sandbox.js";
-import { idleProgram, onWindows, onWindowsUntilDone } from "./fake-programs.js";
+import { idleProgram, noDocker, onWindows, onWindowsUntilDone } from "./fake-programs.js";
 import { asStored, cli, fakeServer, fakeUserEnv, hostileServer, literal, mcpcageWithEnv, native, root, stubHome, written, writtenEntry } from "./helpers.js";
 
 const TOKEN = "ghp_realLookingValue123456";
@@ -2428,7 +2429,8 @@ describe("mcpcage protect", () => {
     const machine = fakeMachine();
     cachedLookups(machine.cage, machine.packages);
     const before = snapshot(machine.top, machine.cage);
-    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--command", "/opt/mcpcage");
+    // No Docker: the plan resolves the machine's uvx server, which is not this test's business.
+    const result = mcpcageWithEnv({ ...machine.env, ...noDocker(machine.top) }, "protect", "--project", machine.project, "--offline", "--fix", "--command", "/opt/mcpcage");
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("--yes");
     expect(result.stdout).toContain("\nPlan\n");
@@ -4054,6 +4056,73 @@ describe("uvx servers in protect", () => {
     const again = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--command", installed.command);
     expect(lineOf(again.stdout, "time")).toMatch(/ {2}caged$/);
     expect(again.stdout).toContain("  2 run on your machine with your permissions and no cage.");
+  });
+
+  it("resolves each uvx server --fix and wrap are about to write: uv's no solution leaves it with uv's reason, another failure writes it with a note", async () => {
+    const machine = uvxHome({
+      time: servers.time,
+      dbt: { command: "uvx", args: ["dbt-mcp==2.10.1"], env: { UV_PYTHON: "3.12" } },
+      offline: { command: "uvx", args: ["mcp-server-fetch"] },
+      notes: { command: "npx", args: ["-y", "@acme/notes-mcp"] },
+    });
+    const asked: Array<{ serverId: string; spec: PypiLaunch }> = [];
+    const why = "dbt-mcp cannot be installed from PyPI wheels on Python 3.12, and the cage never builds a package from source: Because uuid==1.30 has no usable wheels and all versions of dbtlabs-vortex depend on uuid==1.30, we can conclude that all versions of dbtlabs-vortex cannot be used.";
+    const resolve: PypiResolver = (serverId, spec) => {
+      asked.push({ serverId, spec });
+      if (spec.project === "dbt-mcp") return { unsolvable: why };
+      if (spec.project === "mcp-server-fetch") return { failed: "docker version failed: Cannot connect to the Docker daemon" };
+      return { locked: { packageName: spec.project, version: "1", python: "3.13", platform: "aarch64-manylinux_2_40", lock: "", lockfileSha256: "", spec } };
+    };
+    const uv = { environment: {}, settings: undefined };
+    const report = await scanConfigs({ locations: discoverConfigs({ platform: process.platform, home: machine.home, env: {}, project: machine.project }), home: machine.home, offline: true, cacheDir: join(machine.top, "cache"), npmRunner: noNpm, uv });
+    const planned: string[] = [];
+    const plan = fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: false, dryRun: true, log: (line) => planned.push(line), home: machine.home, uv, resolve });
+    const where = tilde(machine.cursor, machine.home);
+    expect(planned).toEqual([
+      `  not changed: dbt in ${where}: ${why}`,
+      `  cage time in ${where}`,
+      `  cage offline in ${where}`,
+      "    its packages could not be resolved now (docker version failed: Cannot connect to the Docker daemon): they are resolved, and the image built, at its first start",
+      `  cage notes in ${where}`,
+    ]);
+    expect(plan.files[0]!.changed.map((change) => change.name)).toEqual(["time", "offline", "notes"]);
+    // The uvx servers only, by the id and the spec `run` gives them: the entry's UV_PYTHON is its Python.
+    expect(asked.map((ask) => ask.serverId)).toEqual([serverIdFor(parseLaunch(["uvx", ...servers.time.args])), serverIdFor(parseLaunch(["uvx", "dbt-mcp==2.10.1"])), serverIdFor(parseLaunch(["uvx", "mcp-server-fetch"]))]);
+    expect(asked[1]!.spec).toMatchObject({ project: "dbt-mcp", requirement: "dbt-mcp==2.10.1", python: "3.12" });
+    // Without a resolver (--no-build) every one is written, and none is asked for.
+    asked.length = 0;
+    const unchecked = fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: false, dryRun: true, log: () => {}, home: machine.home, uv });
+    expect(unchecked.files[0]!.changed.map((change) => change.name)).toEqual(["time", "dbt", "offline", "notes"]);
+    expect(asked).toEqual([]);
+    // wrap the same.
+    const wrapped = wrapConfig(machine.cursor, { dryRun: true, command: "/opt/mcpcage", uv, resolve });
+    expect(wrapped.skipped).toEqual([{ name: "dbt", reason: why }]);
+    expect(wrapped.changed.map((change) => [change.name, change.note])).toEqual([
+      ["time", undefined],
+      ["offline", "its packages could not be resolved now (docker version failed: Cannot connect to the Docker daemon): they are resolved, and the image built, at its first start"],
+      ["notes", undefined],
+    ]);
+    // An entry caged already, whose env moves off the host, keeps its image: nothing is resolved for it.
+    asked.length = 0;
+    const installed = fakeMcpcage();
+    writeJsonFile(machine.cursor, { mcpServers: { moved: { command: installed.command, args: ["run", "--", "uvx", "mcp-server-time"], env: { NODE_OPTIONS: "--x" } } } });
+    const caged = await scanConfigs({ locations: discoverConfigs({ platform: process.platform, home: machine.home, env: {}, project: machine.project }), home: machine.home, offline: true, cacheDir: join(machine.top, "cache"), npmRunner: noNpm, uv, ownCommand: installed.command });
+    const again = fixConfigs({ report: caged, command: installed.command, claudeCodeRunning: false, dryRun: true, log: () => {}, home: machine.home, uv, resolve });
+    expect(again.files[0]!.changed).toMatchObject([{ name: "moved", alreadyCaged: true }]);
+    expect(asked).toEqual([]);
+  });
+
+  it("--no-build says it resolves nothing when it cages a uvx server", () => {
+    const machine = uvxHome({ time: servers.time });
+    const installed = fakeMcpcage();
+    const fix = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    expect(fix.stdout).toContain(
+      `\nPlan\n  cage time in ${tilde(machine.cursor, machine.home)}\n  --no-build: the packages of the uvx servers were not resolved, so one whose dependencies ship no wheel is caged anyway and will fail when it first starts\n`,
+    );
+    const npxOnly = uvxHome({ notes: { command: "npx", args: ["-y", "@acme/notes-mcp"] } });
+    expect(mcpcageWithEnv(npxOnly.env, "protect", "--project", npxOnly.project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command).stdout).not.toContain("--no-build:");
+    const wrap = mcpcageWithEnv(uvxHome({ time: servers.time }).env, "wrap", "--dry-run", "--no-build", uvxHome({ time: servers.time }).cursor);
+    expect(wrap.stdout).toContain("  --no-build: the packages of the uvx servers were not resolved");
   });
 
   it.skipIf(process.platform === "win32")("leaves every uvx server uncaged while your uv settings name an index, and run refuses it too", () => {
