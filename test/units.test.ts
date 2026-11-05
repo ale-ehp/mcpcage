@@ -1130,6 +1130,21 @@ describe("server line splitting", () => {
     expect(heads).toEqual([`${"a".repeat(1024)} (1500 bytes)`, `${"b".repeat(1000)}${"c".repeat(24)} (2000 bytes)`]);
   });
 
+  it("looks for each kind of line ending from where it last found one, never from each line again", () => {
+    // A chunk of many lines that end one way, and no or one ending of the other kind: had the
+    // search for the other kind started again after every line, it would have read to the end of the
+    // chunk each time, its square in all.
+    for (const text of ["\r".repeat(1000), "\n".repeat(1000), `${"\r".repeat(1000)}\n`, `${"\n".repeat(1000)}\r`]) {
+      const chunk = Buffer.from(text);
+      const search = vi.spyOn(chunk, "indexOf");
+      let lines = 0;
+      new LineSplitter(MAX_LINE_BYTES, () => lines++, () => {}).push(chunk);
+      expect(lines).toBe(text.endsWith("\n\r") ? 1001 : 1000);
+      // One search for each line it ends, and one for each kind of ending that finds none or is found once.
+      expect(search.mock.calls.length, JSON.stringify(text.slice(-2))).toBeLessThanOrEqual(1002);
+    }
+  });
+
   it("keeps its memory bounded while a server streams a line of 1 GiB", () => {
     const chunk = Buffer.alloc(64 * 1024, "a");
     const lines: string[] = [];
