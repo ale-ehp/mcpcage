@@ -344,8 +344,12 @@ function note(result) {
   return parts.join("; ");
 }
 
+/**
+ * A server's text as one cell of a Markdown table: `|` escaped so that it does not end the cell, and
+ * `\` escaped before it, or the `\` of a text such as `a\|b` became part of the escape and was lost.
+ */
 function cell(text) {
-  const line = text.replace(/\|/g, "\\|");
+  const line = text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
   return line.length > 600 ? `${line.slice(0, 597)}...` : line;
 }
 
