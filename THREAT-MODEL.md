@@ -184,6 +184,15 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   list while the server runs.
 - **`--no-sandbox`.** It keeps pinning and audit but provides no isolation at all. `protect` counts
   such entries as exposed.
+- **A `.cmd`/`.bat` mcpcage entry whose arguments cmd re-reads.** On Windows an entry that starts
+  mcpcage through npm's `mcpcage.cmd`, as mcpcage 0.5.0's `--fix` wrote it, whose arguments hold a
+  character `cmd.exe` reads (`&`, `|`, `<`, `>`, `^`, `%`, `!`, a quote, parentheses, a control
+  character) runs a command on the host: a client that can start a `.cmd` (the MCP SDK's cross-spawn)
+  makes `cmd.exe` re-read the shim's `%*` (CVE-2024-27980), so a quote and an `&` in an argument
+  start another command before mcpcage runs. Such an entry is exactly what 0.5.0's `--fix` produced
+  from a SANDWORM-poisoned `npx` entry whose server arguments held `cmd` metacharacters. `protect`
+  counts it as running on the host, not as a plain `.cmd` entry, and `--fix` gives it `node.exe` with
+  `cli.js`, which hands each argument to the server whole, so the injection reaches no shell.
 - **Configuration files mcpcage will not rewrite.** A file with comments (VS Code's `mcp.json`) is
   left for the user to edit by hand, and `~/.claude.json` is left alone while Claude Code is
   running, because Claude Code rewrites it while it runs. `protect` prints the exact command to

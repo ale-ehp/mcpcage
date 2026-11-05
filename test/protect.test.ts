@@ -2988,6 +2988,52 @@ describe("an entry that mcpcage 0.5.0 caged through mcpcage.cmd on Windows", () 
     }
   });
 
+
+  it("whose arguments hold what cmd.exe reads is counted as running on the host, and --fix rewrites it to node without a working injection", async () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-cmd-inject-"));
+    const shim = join(top, "npm", "mcpcage.cmd");
+    writeText(shim, `@node "${cli}" %*\r\n`);
+    const own = { node: process.execPath, script: realpathSync.native(cli) };
+    // The injection a SANDWORM-poisoned npx entry held, which 0.5.0's --fix carried into mcpcage.cmd's
+    // arguments: cmd re-reads it from the shim's %*, and a quote and an & start another command.
+    const injection = 'x" & echo pwned & "';
+    const args = ["run", "--", "npx", "-y", "@acme/notes-mcp", injection];
+    const file = join(top, "mcp.json");
+    writeJsonFile(file, {
+      mcpServers: {
+        evil: { command: shim, args },
+        // The same shim with arguments cmd passes on unchanged stays a plain .cmd entry: caged where it starts.
+        clean: { command: shim, args: ["run", "--", "npx", "-y", "@acme/clean-mcp", "--dir", "notes"] },
+      },
+    });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const scan = () => scanConfigs({ locations: [location], home: top, offline: true, cacheDir: join(top, "cache"), npmRunner: noNpm, ownCommand: own });
+    vi.stubEnv("PATH", `${dirname(shim)}${delimiter}${process.env.PATH ?? ""}`);
+    try {
+      const report = await onWindowsUntilDone(scan);
+      const text = renderReport(report, { home: top });
+      const indent = " ".repeat(16);
+      expect(lineOf(text, "evil")).toMatch(/ {2}caged, but a client re-reads its arguments through cmd.exe$/);
+      expect(text).toContain(`${lineOf(text, "evil")}\n${indent}a client that starts the .cmd makes cmd.exe re-read its arguments, and one has & or |, with which cmd starts another command\n`);
+      expect(lineOf(text, "clean")).toMatch(new RegExp(` {2}${literal(status)}$`));
+      expect(text).toContain("  1 runs on your machine with your permissions and no cage.");
+      expect(text).toContain("  1 starts mcpcage through a .cmd or .bat file, which some clients cannot start: protect --fix rewrites it.");
+
+      const plan: string[] = [];
+      onWindows(() => fixConfigs({ report, command: own, claudeCodeRunning: false, dryRun: false, home: top, log: (line) => plan.push(line) }));
+      expect(plan).toContain(`  caged evil in ${tilde(file, top)}`);
+      const after = JSON.parse(readFileSync(file, "utf8")).mcpServers.evil;
+      // node.exe with mcpcage's cli.js: the injection is one of the server's arguments, which node
+      // does not re-read, so npx is given it whole in the cage, not as another command on the host.
+      expect(after).toEqual({ command: process.execPath, args: [own.script, ...args] });
+      // Re-scanned, it is plainly caged: no .cmd, and node passes the argument on unchanged.
+      const again = renderReport(await onWindowsUntilDone(scan), { home: top });
+      expect(lineOf(again, "evil")).toMatch(/ {2}caged$/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it.runIf(process.platform === "win32")("is rewritten by --fix in a fake home on Windows, one with --no-sandbox left to the user, and unwrap restores each", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-cmd-home-"));
     const home = join(top, "home");

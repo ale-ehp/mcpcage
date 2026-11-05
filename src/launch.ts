@@ -82,13 +82,27 @@ export function cmdNpx(argv: readonly unknown[], platform: NodeJS.Platform = pro
   if (switches.slice(0, -1).some((option) => !/^\/[ds]$/i.test(option))) return { notPlain: "it gives cmd a switch other than /d and /s before /c" };
   for (const word of line) {
     if (word === "") return { notPlain: "an argument after /c is empty, which the client can give cmd only in quotes" };
-    const read = CMD_READS.find(([characters]) => characters.test(word));
-    if (read !== undefined) return { notPlain: `an argument after /c has ${read[1]}` };
+    const read = cmdWouldRead([word]);
+    if (read !== undefined) return { notPlain: `an argument after /c has ${read}` };
   }
   if (line[0] !== program) {
     return { notPlain: isNpx(line[0]!, platform) ? "the path of npx has a space, so the client quotes it, and cmd removes quotes there by rules of its own" : "it gives npx and what follows in one argument, which cmd splits by rules of its own" };
   }
   return { npx: line };
+}
+
+/**
+ * What cmd would read itself in `words` when it re-reads them as a command line (the `%*` of npm's
+ * .cmd shim, or the line after `cmd /c`): the first such character's description, or undefined for
+ * words it would pass on unchanged. An argument that holds one cannot be given to npx, or to the
+ * server mcpcage starts for a .cmd entry, as written.
+ */
+export function cmdWouldRead(words: readonly string[]): string | undefined {
+  for (const word of words) {
+    const read = CMD_READS.find(([characters]) => characters.test(word));
+    if (read !== undefined) return read[1];
+  }
+  return undefined;
 }
 
 /** What cmd reads itself in the line after `/c`, with what it does. */

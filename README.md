@@ -220,8 +220,13 @@ only through `cmd.exe`: since the fix of CVE-2024-27980, Node refuses a plain sp
 (`EINVAL`), so a client that starts servers that way could not start it. A bare `mcpcage` is never
 written, nor counted as caged, because Windows looks for a bare name in the client's current
 directory first. An entry that mcpcage 0.5.0 caged with `mcpcage.cmd` is reported as one that some
-clients cannot start, and `--fix` gives it `node.exe` with `cli.js`, its options kept. Run from a
-temporary place, mcpcage takes the `cli.js` of the mcpcage on your `PATH` as npm installs it, next
+clients cannot start, and `--fix` gives it `node.exe` with `cli.js`, its options kept. One whose
+arguments hold a character `cmd.exe` reads (`&`, `|`, `%`, a quote...) is counted as running on your
+machine instead: a client that can start a `.cmd` (cross-spawn) makes `cmd.exe` re-read the shim's
+`%*`, so a quote and an `&` in an argument start another command. `--fix` gives it `node.exe` with
+`cli.js`, which passes each argument on unchanged, so the server is given it whole in the cage and
+nothing runs on the host. Run from a temporary place, mcpcage takes the `cli.js` of the mcpcage on
+your `PATH` as npm installs it, next
 to its `mcpcage.cmd` in `node_modules\mcpcage\dist` (after `npm link`, the clone's).
 
 **What docker and npm are given.** docker finds its plugins (`docker build` is buildx) through

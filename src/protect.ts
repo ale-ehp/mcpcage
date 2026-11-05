@@ -8,7 +8,7 @@ import {
 } from "./config.js";
 import { batchFile, envFileOf, mcpcageAt, nodeScript, type ForeignPath, type McpcageCommand, type McpcageKind } from "./installed.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
-import { cmdNpx, npxArgv, parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
+import { cmdNpx, cmdWouldRead, npxArgv, parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
 import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
@@ -56,6 +56,12 @@ export interface ServerReport {
    * --fix rewrites it (see relaunch). Not set when the command --fix writes is a batch file itself.
    */
   batch?: string;
+  /**
+   * For a batch entry (see batch) on Windows whose arguments hold a character cmd.exe reads as a
+   * command (see cmdWouldRead): what it reads. A client that can start a .cmd (cross-spawn) makes
+   * cmd re-read the shim's `%*`, so a quote and an & in an argument start a command on the host.
+   */
+  cmdInjection?: string;
   /** For a caged entry: each run option that opens its cage, in plain words. */
   opened: string[];
   /** For a caged entry on Windows, a path it mounts that is not on a drive (see offDrive), so it cannot start. */
@@ -201,6 +207,11 @@ async function describeServer(
     server.protectedByMcpcage = server.mcpcage === "installed" && !withoutSandbox(entry);
     const batch = server.mcpcage === "installed" && batchFile(options.ownCommand) === undefined ? batchFile(entry.command) : undefined;
     if (batch !== undefined) server.batch = batch;
+    // cmd.exe re-reads the shim's `%*`: an argument with a quote and an & runs a command on the host.
+    if (batch !== undefined && Array.isArray(entry.args)) {
+      const read = cmdWouldRead(entry.args.filter((arg): arg is string => typeof arg === "string"));
+      if (read !== undefined) server.cmdInjection = read;
+    }
     if (server.protectedByMcpcage) {
       server.opened = openedBy(entry);
       const unmountable = offDriveMount(entry);
@@ -368,7 +379,8 @@ export function isUncaged(server: ServerReport): boolean {
   // A wrapped entry that could not be described is not known to be caged.
   if (server.error !== undefined) return true;
   if (server.mcpcage === "not found") return false;
-  return !server.protectedByMcpcage || actsOnHost(server) || envFileActs(server);
+  // A batch entry whose arguments cmd re-reads runs a command on the host at a cross-spawn client's start.
+  return !server.protectedByMcpcage || actsOnHost(server) || envFileActs(server) || server.cmdInjection !== undefined;
 }
 
 /**
@@ -536,6 +548,9 @@ function serverLines(server: ServerReport, home: string): string[] {
   if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(terminalSafe).join(", ")}`);
   if (server.installScripts) details.push(installLine(server.installScripts));
   // Before what --inspect found, whose signs belong under its own line.
+  if (server.cmdInjection !== undefined) {
+    details.push(`a client that starts the ${server.batch} makes cmd.exe re-read its arguments, and one has ${terminalSafe(server.cmdInjection)}`);
+  }
   details.push(...effectLines("env", server));
   if (server.envFile?.effects !== undefined) details.push(...effectLines("envFile", server.envFile.effects));
   else if (server.envFile !== undefined) {
@@ -586,6 +601,7 @@ function status(server: ServerReport): string {
       if (server.twice !== undefined || fromFile?.twice !== undefined) return "caged, but its env sets one variable twice";
       if (server.foreignPath !== undefined || fromFile?.foreignPath !== undefined) return "caged, but its PATH picks other programs";
       if (server.movedPlaces.length > 0 || (fromFile?.movedPlaces.length ?? 0) > 0) return "caged, but its env moves what run refuses to mount";
+      if (server.cmdInjection !== undefined) return "caged, but a client re-reads its arguments through cmd.exe";
       if (server.batch !== undefined) return `some clients cannot start a ${server.batch}: --fix rewrites it as node with mcpcage's cli.js`;
       return server.opened.length > 0 ? "caged, with the cage opened" : "caged";
     }
