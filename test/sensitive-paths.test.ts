@@ -96,6 +96,14 @@ describe("paths mcpcage will not mount, in more detail", () => {
 });
 
 describe("each place mcpcage will not mount", () => {
+  // The Linux home directory of these checks is not under /home. Places are also looked up where
+  // their symlinks lead on the machine running the test, and on macOS /home is an automount: each
+  // question about a path in /home/<name> waits for the automounter, about 12 ms on an idle Mac and
+  // more on a busy one. With /home/me the Linux checks asked it some 650 times, and the first test
+  // below went past its 30 seconds on a loaded Mac, where on Linux it takes milliseconds. Places are
+  // named from ~, wherever the home directory is.
+  const linuxHome = "/nowhere-mcpcage/home/me";
+
   /** Every place in the home directory, what it holds, and the one system it is on (none: every system). */
   const places: Array<[path: string, what: string, platform: string]> = [
       [".ssh", "your SSH keys", ""],
@@ -192,7 +200,7 @@ describe("each place mcpcage will not mount", () => {
   ];
 
   it("is named with what it holds, from the home directory, on the systems where it is", () => {
-    const homes = { darwin: "/Users/me", linux: "/home/me", win32: "C:\\Users\\me" } as const;
+    const homes = { darwin: "/Users/me", linux: linuxHome, win32: "C:\\Users\\me" } as const;
     for (const platform of ["darwin", "linux", "win32"] as const) {
       const windows = platform === "win32";
       const at = (path: string) => (windows ? path.split("/").join("\\") : path);
@@ -220,7 +228,7 @@ describe("each place mcpcage will not mount", () => {
       ["/Applications", "your applications", "darwin"],
       ["/Library", "the programs and settings of every user", "darwin"],
     ];
-    for (const [platform, home] of [["darwin", "/Users/me"], ["linux", "/home/me"]] as const) {
+    for (const [platform, home] of [["darwin", "/Users/me"], ["linux", linuxHome]] as const) {
       for (const [path, what, only] of system) {
         if (only !== undefined && only !== platform) continue;
         // Named as written or where a link leads (/bin is /usr/bin on some Linux systems): what it holds is the same.
