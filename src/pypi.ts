@@ -254,6 +254,20 @@ export class PypiUnsolvable extends Error {
   }
 }
 
+/**
+ * The package uv's reason says ships no wheel for the cage's Python and platform, as the report names
+ * it: `uuid 1.30` for "Because uuid==1.30 has no usable wheels", `pyyaml` for "Because pyyaml>=5.1 has
+ * no usable wheels" or "all of: pyyaml<=5.1b5 pyyaml>=5.1 have no usable wheels". uvx builds such a
+ * package from its source distribution on the host, running its build code. Undefined when the reason
+ * is another one (a version PyPI does not have).
+ */
+export function noWheel(reason: string): string | undefined {
+  const name = "([A-Za-z0-9][A-Za-z0-9._-]*)";
+  const one = new RegExp(`(?:^|\\s)${name}(?:\\{[^}]*\\})?(?:==([^\\s,]+)|(?:===|!=|<=|>=|~=|<|>)[^\\s,]+)? has no usable wheels`).exec(reason);
+  if (one !== null) return one[2] === undefined ? one[1] : `${one[1]} ${one[2]}`;
+  return new RegExp(`(?:all versions of |all of: )${name}\\S* .*?have no usable wheels`).exec(reason)?.[1];
+}
+
 function unsolvable(project: string, python: string, reason: string): PypiUnsolvable {
   return new PypiUnsolvable(project, python, reason);
 }

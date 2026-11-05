@@ -64,7 +64,7 @@ Run options:
 
 Protect options:
   --project <dir>       also check this project's .mcp.json, .cursor/, .vscode/ and .devin/ (default: current directory)
-  --inspect             start each npx server in the cage and look for hidden instructions in its tools
+  --inspect             start each npx and uvx server in the cage and look for hidden instructions in its tools
   --offline             do not ask the npm registry; use what was looked up before
   --fix                 route every npx and uvx server through mcpcage, after showing the plan (backups are kept)
   --yes                 with --fix: change the files without asking

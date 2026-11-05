@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseLaunch, type PypiLaunch } from "../src/launch.js";
-import { checkLock, comparePypiVersions, lockPypi, resolveArgs, resolvePypi, wheelPlatform, type DockerResult, type DockerRunner } from "../src/pypi.js";
+import { checkLock, comparePypiVersions, lockPypi, noWheel, resolveArgs, resolvePypi, wheelPlatform, type DockerResult, type DockerRunner } from "../src/pypi.js";
 import { PYPI_RESOLVE_BASE } from "../src/sandbox.js";
 
 /*
@@ -356,5 +356,22 @@ describe("comparePypiVersions", () => {
   it("never takes a version it cannot read for the newest", () => {
     expect(comparePypiVersions("not-a-version", "0.0.1")).toBeLessThan(0);
     expect(comparePypiVersions("0.0.1", "not-a-version")).toBeGreaterThan(0);
+  });
+});
+
+describe("the package uv's reason says ships no wheel", () => {
+  it("is named with its version when uv pins it, by name otherwise, from each form of uv 0.13.7's reasons", () => {
+    const table: Array<[string, string | undefined]> = [
+      ["Because uuid==1.30 has no usable wheels and all versions of dbtlabs-vortex depend on uuid==1.30, we can conclude that all versions of dbtlabs-vortex cannot be used.", "uuid 1.30"],
+      ["Because pybars3==0.9.7 has no usable wheels and only pybars3<=0.9.7 is available, we can conclude that pybars3>=0.9.7 cannot be used.", "pybars3 0.9.7"],
+      ["Because cffi{platform_python_implementation != 'PyPy'}==2.0.0 has no usable wheels and all versions of mcp-proxy-for-aws-cli depend on cffi", "cffi 2.0.0"],
+      ["Because orjson>=3.10.13 has no usable wheels and leanclient>=0.1.7,<=0.2.0 depends on orjson>=3.10.13, we can conclude ...", "orjson"],
+      ["Because all of: pyyaml<=5.1b5 pyyaml>=5.1 have no usable wheels and only the following versions of pyyaml are available: ...", "pyyaml"],
+      ["Because all versions of proxy-tools have no usable wheels and pywebview==6.2 depends on proxy-tools, ...", "proxy-tools"],
+      // Another reason: there is no wheel to name.
+      ["Because there is no version of pglast==7.2.0 and postgres-mcp>=0.3.0 depends on pglast==7.2.0, we can conclude ...", undefined],
+      ["uv gives no reason", undefined],
+    ];
+    for (const [reason, named] of table) expect(noWheel(reason), reason).toBe(named);
   });
 });

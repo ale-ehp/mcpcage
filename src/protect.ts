@@ -8,12 +8,12 @@ import {
 } from "./config.js";
 import { batchFile, envFileOf, mcpcageAt, nodeScript, type ForeignPath, type McpcageCommand, type McpcageKind } from "./installed.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
-import { cmdRunner, cmdWouldRead, npxArgv, parseLaunch, serverIdFor, type LaunchSpec } from "./launch.js";
+import { cmdRunner, cmdWouldRead, npxArgv, parseLaunch, serverIdFor, toolRunArgs, type LaunchSpec } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
 import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
-import type { PypiResolver } from "./pypi.js";
+import { noWheel, PypiUnsolvable, type PypiResolver } from "./pypi.js";
 import { hostMount, NOT_ON_A_DRIVE, offDrive, type SandboxOptions } from "./sandbox.js";
 import { accountHome, clientPlaces, sensitivePath, thisMachine } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
@@ -102,8 +102,12 @@ export interface ServerReport {
   /** Why the entry could not be described whole: the report says so on its lines and goes on. */
   error?: string;
   installScripts?: InstallScripts;
-  /** `skipped`: the path arguments the inspection did not mount, because they are sensitive (see sensitive.ts). */
-  inspection?: { tools: number; findings: Finding[]; error?: string; skipped?: SkippedPath[] };
+  /**
+   * `skipped`: the path arguments the inspection did not mount, because they are sensitive (see
+   * sensitive.ts). `noWheel`: for a uvx server, the package uv found no wheel of, so it was not built
+   * and not inspected (see noWheel): uvx builds that package from source on the host.
+   */
+  inspection?: { tools: number; findings: Finding[]; error?: string; skipped?: SkippedPath[]; noWheel?: string };
 }
 
 export interface SkippedPath {
@@ -119,9 +123,10 @@ export interface ProtectReport {
 }
 
 /**
- * Starts one npx server in the cage and lists its tools: `argv` is its npx command line, `env` its
- * environment, and `redact` hides the values it was given in what an error quotes of it, before the
- * error cuts it (listTools).
+ * Starts one npx or uvx server in the cage and lists its tools: `argv` is its npx or uvx command
+ * line, `env` its environment, and `redact` hides the values it was given in what an error quotes
+ * of it, before the error cuts it (listTools). A uvx server whose packages ship no wheel throws
+ * PypiUnsolvable, as `run` would.
  */
 export type Inspector = (launch: { argv: string[]; env: Record<string, string>; redact: Redact }) => Promise<ToolDefinition[]>;
 
@@ -242,7 +247,8 @@ async function describeServer(
     if (type === "uvx") Object.assign(server, pypiOf(entry, userUv()));
     const odd = Array.isArray(entry.args) ? entry.args.filter((arg) => typeof arg !== "string").length : 0;
     if (odd > 0) server.problems.push(`args: ${odd === 1 ? "an argument that is not a string" : `${odd} arguments that are not strings`}`);
-    const launch = npxCommand(entry, type);
+    // A uvx server that cannot be caged is not inspected: the cage would build another package than uvx runs.
+    const launch = server.cannotCage === undefined ? launchCommand(entry, type) : undefined;
     const npm = launch ? npmPackage(launch) : undefined;
     if (npm) server.packageSpec = npm.local ? `local package ${npm.spec}` : npm.spec;
     // Install scripts matter where they would run: an npx server outside the cage. A caged one whose
@@ -270,8 +276,8 @@ async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEn
   const moved = isWrapped(entry) ? envValues(stringArgs(entry)) : [];
   const env = { ...stringValues(entry.env), ...Object.fromEntries(moved.map((variable) => [variable.name, variable.value])) };
   // Reported whether the server lists its tools or not: one that needs the path left out may not start.
-  const npm = npmLaunch(argv);
-  const skipped = npm ? inspectionPlan(npm).skipped : [];
+  const spec = cageableLaunch(argv, env);
+  const skipped = spec ? inspectionPlan(spec).skipped : [];
   const left = skipped.length > 0 ? { skipped } : {};
   // The server may repeat a value it was given, in its error output or in its tools: no value reaches the report.
   const values = [...Object.values(env), ...hidden];
@@ -290,6 +296,9 @@ async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEn
     const findings = findingsIn(shown).map((finding) => ({ ...finding, snippet: redact(finding.snippet) }));
     return { tools: tools.length, findings, ...left };
   } catch (error) {
+    // uvx would build that package from source on the host, running its code; the cage refuses it.
+    const wheel = error instanceof PypiUnsolvable ? noWheel(error.reason) : undefined;
+    if (wheel !== undefined) return { tools: 0, findings: [], noWheel: wheel, ...left };
     // Hidden before the message is put on one line: a private key printed on stderr, its line breaks
     // made spaces, was no longer the value, and was printed.
     return { tools: 0, findings: [], error: oneLine(redact((error as Error).message)), ...left };
@@ -315,17 +324,18 @@ function findingsIn(tools: ToolDefinition[]): Finding[] {
 }
 
 /**
- * How `--inspect` starts one npx server: in its cage, without network, with its existing path
+ * How `--inspect` starts one npx or uvx server: in its cage, without network, with its existing path
  * arguments mounted READ-ONLY at the same place and given as absolute paths, because some servers
  * (server-filesystem) check their directories at start. Nothing in the cage is writable. A path is
  * mounted as it is written: parseMount would read a final `:rw` as an option, and a server given a
  * directory named `.ssh:rw` was inspected with the real ~/.ssh mounted writable. Otherwise it is
  * mounted as `run` mounts it (hostMount), so the server sees what it will see once caged: on Windows
- * the folder as the system spells it on disk, at /c/... (cagePath).
+ * the folder as the system spells it on disk, at /c/... (cagePath). A uvx line is read with the
+ * user's environment and the entry's env, as `run` will read it (its UV_PYTHON is its Python).
  */
 export function inspectionSandbox(launch: { argv: string[]; env: Record<string, string> }): Omit<SandboxOptions, "log"> {
-  const spec = parseLaunch(launch.argv);
-  if (spec.kind !== "npm") throw new Error("only npx servers can be inspected");
+  const spec = parseLaunch(launch.argv, undefined, process.platform, uvxEnvironment({ env: launch.env }));
+  if (spec.kind !== "npm" && spec.kind !== "pypi") throw new Error("only npx and uvx servers can be inspected");
   const plan = inspectionPlan(spec);
   // docker's --mount takes comma-separated fields: hostMount refuses such a path, as `mcpcage run` does.
   const mounts = plan.mounted.map((path) => hostMount(path, true));
@@ -351,7 +361,7 @@ export function inspectionSandbox(launch: { argv: string[]; env: Record<string, 
  * on Windows those off any drive (offDrive), which have no place in the cage. The server is still
  * given the argument.
  */
-function inspectionPlan(spec: NpmLaunch): { spec: NpmLaunch; mounted: string[]; skipped: SkippedPath[] } {
+function inspectionPlan<Spec extends CageableLaunch>(spec: Spec): { spec: Spec; mounted: string[]; skipped: SkippedPath[] } {
   const paths = spec.args.map((arg) => hostPath(arg));
   const mounted: string[] = [];
   const skipped: SkippedPath[] = [];
@@ -365,13 +375,13 @@ function inspectionPlan(spec: NpmLaunch): { spec: NpmLaunch; mounted: string[]; 
   return { spec: { ...spec, args: spec.args.map((arg, index) => paths[index] ?? arg) }, mounted, skipped };
 }
 
-type NpmLaunch = Extract<LaunchSpec, { kind: "npm" }>;
+type CageableLaunch = Extract<LaunchSpec, { kind: "npm" | "pypi" }>;
 
-/** The npx launch of a command line, or undefined for one that `mcpcage run` would not start. */
-function npmLaunch(argv: string[]): NpmLaunch | undefined {
+/** The npx or uvx launch of a command line started with `env`, or undefined for one that `mcpcage run` would not start. */
+function cageableLaunch(argv: string[], env: Record<string, string>): CageableLaunch | undefined {
   try {
-    const spec = parseLaunch(argv);
-    return spec.kind === "npm" ? spec : undefined;
+    const spec = parseLaunch(argv, undefined, process.platform, uvxEnvironment({ env }));
+    return spec.kind === "npm" || spec.kind === "pypi" ? spec : undefined;
   } catch {
     return undefined;
   }
@@ -589,7 +599,9 @@ function serverLines(server: ServerReport, home: string): string[] {
   details.push(...server.opened);
   for (const skipped of server.inspection?.skipped ?? []) details.push(`inspected without ${terminalSafe(tilde(skipped.path, home))}: ${terminalSafe(skipped.reason)}`);
   const findings: string[] = [];
-  if (server.inspection?.error !== undefined) {
+  if (server.inspection?.noWheel !== undefined) {
+    details.push(`builds from source: ${terminalSafe(server.inspection.noWheel)} ships no wheel (uvx runs its build code with your permissions when it installs it); mcpcage installs wheels only`);
+  } else if (server.inspection?.error !== undefined) {
     details.push(`could not inspect: ${terminalSafe(server.inspection.error)}`);
   } else if (server.inspection) {
     details.push(`tools: ${server.inspection.tools}, ${signs(server.inspection.findings)}`);
@@ -723,6 +735,8 @@ function summary(report: ProtectReport): string[] {
     `  ${count((server) => server.broadAccess.length > 0)} can reach your whole home directory, the disk or a directory with credentials.`,
     `  ${many(scripts, "uses", "use")} a package with install scripts.`,
   ];
+  // Known only from the resolve, which only --inspect runs.
+  if (servers.some((server) => server.inspection)) lines.push(`  ${many(count((server) => server.inspection?.noWheel !== undefined), "uses", "use")} a package that ships no wheel.`);
   if (servers.some((server) => server.inspection)) {
     const poisoned = count((server) => server.inspection?.findings.some((finding) => finding.severity === "high") ?? false);
     const failed = count((server) => server.inspection?.error !== undefined);
@@ -1207,13 +1221,13 @@ function normalizePath(path: string): string | undefined {
 // ---------------------------------------------------------------------------------------------
 // Small helpers.
 
-/** The npx command line of an npx entry, or of the server a wrapped entry starts after `--`. */
-function npxCommand(entry: ServerEntry, type: ServerType): string[] | undefined {
+/** The npx or uvx command line of an npx or uvx entry, or of the server a wrapped entry starts after `--`. */
+function launchCommand(entry: ServerEntry, type: ServerType): string[] | undefined {
   const args = stringArgs(entry);
-  if (type === "npx") return [entry.command as string, ...args];
+  if (type === "npx" || type === "uvx") return [entry.command as string, ...args];
   if (type !== "mcpcage" || !args.includes("--")) return undefined;
   const inner = args.slice(args.indexOf("--") + 1);
-  return npxArgv(inner) === undefined ? undefined : inner;
+  return npxArgv(inner) === undefined && toolRunArgs(inner) === undefined ? undefined : inner;
 }
 
 function npmPackage(argv: string[]): { spec: string; local: boolean } | undefined {

@@ -130,6 +130,20 @@ describe.skipIf(!docker.ok)("mcpcage protect --fix with uvx servers (real Docker
     }
   }, 600_000);
 
+  it("--inspect starts mcp-server-time in its cage and lists its tools, and names uuid 1.30 for dbt-mcp 2.10.1, which it does not build", () => {
+    const machine = uvxMachine({ time: { command: "uvx", args: ["mcp-server-time"] }, dbt: { command: "uvx", args: ["dbt-mcp==2.10.1"] } });
+    const result = images.track(mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--inspect", "--offline"), machine.cage);
+    const lines = result.stdout.split("\n");
+    const after = (name: string) => lines.slice(lines.findIndex((line) => line.startsWith(`  ${name} `)) + 1).filter((line) => line.startsWith(" ".repeat(16)));
+    expect(after("time")[1], result.stderr).toMatch(/^ {16}tools: [2-9], no signs of hidden instructions$/);
+    expect(after("dbt")[1]).toBe(
+      "                builds from source: uuid 1.30 ships no wheel (uvx runs its build code with your permissions when it installs it); mcpcage installs wheels only",
+    );
+    expect(result.stdout).toContain("  0 use a package with install scripts.\n  1 uses a package that ships no wheel.\n");
+    // Both still run uncaged, as the configuration starts them.
+    expect(result.code).toBe(1);
+  }, 600_000);
+
   it("leaves dbt-mcp 2.10.1 as it is, with uv's reason: its uuid dependency ships no wheel", () => {
     const dbt = { command: "uvx", args: ["dbt-mcp==2.10.1"] };
     const machine = uvxMachine({ dbt });

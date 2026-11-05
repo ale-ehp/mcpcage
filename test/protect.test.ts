@@ -15,8 +15,8 @@ import { cmdNpx, parseLaunch, serverIdFor, type PypiLaunch } from "../src/launch
 import { tooDeep } from "../src/manifest.js";
 import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
-import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs, writableMounts } from "../src/protect.js";
-import type { PypiResolver } from "../src/pypi.js";
+import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs, writableMounts, type Inspector } from "../src/protect.js";
+import { PypiUnsolvable, type PypiResolver } from "../src/pypi.js";
 import { offDrive, parseMount, runArgs } from "../src/sandbox.js";
 import { idleProgram, noDocker, onWindows, onWindowsUntilDone } from "./fake-programs.js";
 import { asStored, cli, fakeServer, fakeUserEnv, hostileServer, literal, mcpcageWithEnv, native, root, stubHome, written, writtenEntry } from "./helpers.js";
@@ -1481,7 +1481,22 @@ describe("inspection sandbox", () => {
     } finally {
       vi.unstubAllEnvs();
     }
-    expect(() => inspectionSandbox({ argv: ["uvx", "mcp-server-time"], env: {} })).toThrow("only npx servers can be inspected");
+    expect(() => inspectionSandbox({ argv: ["python3", "server.py"], env: {} })).toThrow("only npx and uvx servers can be inspected");
+  });
+
+  it("starts a uvx server as `run` will once caged: the same id, its paths read-only, its env's UV_PYTHON its Python, no network", () => {
+    const data = mkdtempSync(join(tmpdir(), "mcpcage-data-"));
+    const entry = { command: "uvx", args: ["--from", "mcp-server-git==2026.1.14", "mcp-server-git", "--repository", data], env: { UV_PYTHON: "3.12", GIT_TOKEN: "t0k3n-value-123" } };
+    const options = inspectionSandbox({ argv: [entry.command, ...entry.args], env: entry.env });
+    expect(options.spec).toMatchObject({ kind: "pypi", project: "mcp-server-git", command: "mcp-server-git", python: "3.12", args: ["--repository", data] });
+    expect(options.mounts).toEqual([{ source: onDisk(data), target: onDisk(data), readOnly: true }]);
+    expect(options.allowNet).toBe(false);
+    const caged = wrapEntry(entry, { command: "mcpcage", uv: { environment: {}, settings: undefined } });
+    const after = "entry" in caged ? caged.entry.args! : [];
+    expect(options.serverId).toBe(serverIdFor(parseLaunch(after.slice(after.indexOf("--") + 1), undefined, process.platform, [{ where: "its env", variables: entry.env }])));
+    expect(runArgs(options, "image")).toContain("GIT_TOKEN=t0k3n-value-123");
+    // A line that cannot be caged cannot be inspected either, with the reason run would give.
+    expect(() => inspectionSandbox({ argv: ["uvx", "corp-mcp"], env: { UV_INDEX_URL: "https://pypi.corp.example/simple" } })).toThrow(new Error("its env sets UV_INDEX_URL: uvx installs from another index there"));
   });
 
   it("starts the server with the mounts and the arguments `run` gives it once caged", () => {
@@ -4110,6 +4125,40 @@ describe("uvx servers in protect", () => {
     const again = fixConfigs({ report: caged, command: installed.command, claudeCodeRunning: false, dryRun: true, log: () => {}, home: machine.home, uv, resolve });
     expect(again.files[0]!.changed).toMatchObject([{ name: "moved", alreadyCaged: true }]);
     expect(asked).toEqual([]);
+  });
+
+  it("--inspect starts the uvx servers it can cage, and names a package that ships no wheel on its own line, counted in the summary", async () => {
+    const machine = uvxHome({
+      time: servers.time,
+      dbt: { command: "uvx", args: ["dbt-mcp==2.10.1"] },
+      git: servers.git,
+      corp: servers.corp,
+      wrapped: { command: "mcpcage", args: ["run", "--", "uvx", "mcp-server-fetch"] },
+    });
+    const uv = "Because uuid==1.30 has no usable wheels and all versions of dbtlabs-vortex depend on uuid==1.30, we can conclude that all versions of dbtlabs-vortex cannot be used.";
+    const started: string[][] = [];
+    const inspect: Inspector = async (launch) => {
+      started.push(launch.argv);
+      // The id and the cage of each, as inspectInCage starts them.
+      inspectionSandbox(launch);
+      if (launch.argv.includes("dbt-mcp==2.10.1")) throw new PypiUnsolvable("dbt-mcp", "3.13", uv);
+      return [{ name: "get_current_time", description: "Get the current time in a timezone.", inputSchema: { type: "object" } }];
+    };
+    const settings = { environment: {}, settings: undefined };
+    const report = await scanConfigs({ locations: discoverConfigs({ platform: process.platform, home: machine.home, env: {}, project: machine.project }), home: machine.home, offline: true, cacheDir: join(machine.top, "cache"), npmRunner: noNpm, inspect, uv: settings });
+    // The two that cannot be caged are not started: the cage would build another package than uvx runs.
+    expect(started).toEqual([["uvx", ...servers.time.args], ["uvx", "dbt-mcp==2.10.1"], ["uvx", "mcp-server-fetch"]]);
+    const out = renderReport(report, { home: machine.home });
+    expect(detailsOf(out, "time")).toEqual(["package: mcp-server-time (PyPI)", "tools: 1, no signs of hidden instructions"]);
+    expect(detailsOf(out, "dbt")).toEqual([
+      "package: dbt-mcp==2.10.1 (PyPI)",
+      "builds from source: uuid 1.30 ships no wheel (uvx runs its build code with your permissions when it installs it); mcpcage installs wheels only",
+    ]);
+    expect(out).toContain(["  0 use a package with install scripts.", "  1 uses a package that ships no wheel.", "  0 have tools with high-severity signs of hidden instructions."].join("\n"));
+    expect(out).not.toContain("could not be inspected");
+    // Without --inspect nothing is resolved, and the summary does not count what it does not know.
+    const plain = await scanConfigs({ locations: discoverConfigs({ platform: process.platform, home: machine.home, env: {}, project: machine.project }), home: machine.home, offline: true, cacheDir: join(machine.top, "cache"), npmRunner: noNpm, uv: settings });
+    expect(renderReport(plain, { home: machine.home })).not.toContain("ships no wheel");
   });
 
   it("--no-build says it resolves nothing when it cages a uvx server", () => {
