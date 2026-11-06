@@ -2,9 +2,12 @@
 // The compatibility run: each MCP server of servers.json started through `mcpcage run`, as a client
 // would start it, with the cage's defaults, then asked to initialize, to list its tools and, where
 // servers.json names one, to answer one harmless call. It is not part of the unit suite: it needs
-// Docker, and the network to build each image from npm. `npm run compat` builds mcpcage first.
+// Docker, and the network to build each image from npm or PyPI. `npm run compat` builds mcpcage first.
 //
-//   node test/compat/run.mjs [--only name,name] [--out dir] [--system label] [--keep-images]
+//   node test/compat/run.mjs [--only name,name] [--runner npx|uvx] [--out dir] [--system label] [--keep-images]
+//
+// --runner keeps the servers started with that runner (npx when servers.json names none); with
+// --only, those of the named ones.
 //
 // It writes <out>/compat.json and <out>/compat.md (default out: compat-out), and what each build and
 // each start wrote on stderr in <out>/logs, and prints the table.
@@ -35,6 +38,7 @@ const REQUEST_TIMEOUT_MS = 60_000;
 const { values } = parseArgs({
   options: {
     only: { type: "string" },
+    runner: { type: "string" },
     out: { type: "string", default: "compat-out" },
     system: { type: "string" },
     "keep-images": { type: "boolean", default: false },
@@ -42,11 +46,19 @@ const { values } = parseArgs({
   strict: true,
 });
 
+const RUNNERS = ["npx", "uvx"];
 const all = JSON.parse(readFileSync(join(here, "servers.json"), "utf8")).servers;
+// Each server's id, its images and its logs are named after it: two rows of one name would share them.
+const twice = all.map((server) => server.name).filter((name, index, names) => names.indexOf(name) !== index);
+if (twice.length > 0) fail(`servers.json names ${[...new Set(twice)].join(", ")} more than once`);
+const badRunner = all.filter((server) => !RUNNERS.includes(runnerOf(server)));
+if (badRunner.length > 0) fail(`servers.json: ${badRunner.map((server) => server.name).join(", ")} has a runner other than ${RUNNERS.join(" or ")}`);
+if (values.runner !== undefined && !RUNNERS.includes(values.runner)) fail(`--runner: give ${RUNNERS.join(" or ")}`);
 const wanted = values.only?.split(",").map((name) => name.trim()).filter(Boolean);
 const unknown = (wanted ?? []).filter((name) => !all.some((server) => server.name === name));
 if (unknown.length > 0) fail(`--only: no server named ${unknown.join(", ")} in servers.json`);
-const servers = wanted ? all.filter((server) => wanted.includes(server.name)) : all;
+const servers = all.filter((server) => (wanted === undefined || wanted.includes(server.name)) && (values.runner === undefined || runnerOf(server) === values.runner));
+if (servers.length === 0) fail(`no server of ${wanted === undefined ? "servers.json" : "--only"} is started with ${values.runner}`);
 
 const docker = dockerInfo();
 if (!docker.ok) fail(`Docker is not available: ${docker.error}`);
@@ -110,25 +122,48 @@ async function check(server) {
   writeFileSync(join(dir, "hello.txt"), "hello from the mcpcage compatibility run\n");
   for (const [file, content] of Object.entries(server.files ?? {})) writeFileSync(join(dir, file), content);
   const fill = (text) => text.replaceAll("{dir}", dir).replaceAll("{base}", basename(dir));
-  const npx = ["npx", ...(server.npx ?? ["-y"]), server.package, ...(server.args ?? []).map(fill)];
+  const line = commandLine(server, fill);
   const own = ["--id", id, ...(server.mounts ?? []).flatMap((mount) => ["--mount", fill(mount)])];
   for (const name of Object.keys(server.env ?? {})) own.push("--env", name);
   const env = { ...process.env, MCPCAGE_HOME: store, ...(server.env ?? {}) };
-  const result = { name: server.name, package: server.package, expected: server.expected ?? "ok", command: redact(npx.join(" ")), env: Object.keys(server.env ?? {}), notes: server.notes ?? "" };
+  const result = { name: server.name, runner: runnerOf(server), package: server.package, expected: server.expected ?? "ok", command: redact(line.join(" ")), env: Object.keys(server.env ?? {}), notes: server.notes ?? "" };
 
-  const build = await prepare(server, [...own, "--", ...npx], env);
+  const build = await prepare(server, [...own, "--", ...line], env);
   result.buildSeconds = seconds(build.ms);
   if (!build.ok) {
     return { ...result, status: "build fails", reason: build.reason, output: build.output };
   }
   result.version = build.version;
 
-  const caged = await start(server, [...own, "--", ...npx], env, fill);
+  const caged = await start(server, [...own, "--", ...line], env, fill);
   result.cage = caged;
   if (caged.ok) return { ...result, status: "ok" };
-  const withNet = await start(server, ["--allow-net", ...own, "--", ...npx], env, fill);
+  const withNet = await start(server, ["--allow-net", ...own, "--", ...line], env, fill);
   result.withNet = withNet;
   return { ...result, status: withNet.ok ? "needs network" : "fails" };
+}
+
+function runnerOf(server) {
+  return server.runner ?? "npx";
+}
+
+/**
+ * The command line a client starts the server with, as servers.json describes it: `npx <npx flags>
+ * <package> <args>`, `uvx <uvx flags> <package> <args>`, or `uvx <uvx flags> --from <package>
+ * <command> <args>` for a package whose program has another name. On Windows, the row's own line
+ * where its README writes another one for Windows (`cmd /c uvx ...`, `uv tool run --from ... x.exe`).
+ */
+function commandLine(server, fill) {
+  if (process.platform === "win32" && server.windows !== undefined) return server.windows.map(fill);
+  const args = (server.args ?? []).map(fill);
+  if (runnerOf(server) === "npx") return ["npx", ...(server.npx ?? ["-y"]), server.package, ...args];
+  const flags = server.uvx ?? [];
+  return server.command === undefined ? ["uvx", ...flags, server.package, ...args] : ["uvx", ...flags, "--from", server.package, server.command, ...args];
+}
+
+/** The program a uvx row starts: its command, or the name its package is written with, as uvx takes it. */
+function uvxCommand(server) {
+  return server.command ?? /^[A-Za-z0-9][A-Za-z0-9._-]*/.exec(server.package)?.[0];
 }
 
 /** `mcpcage prepare`: builds and pins the image, as wrap and protect --fix do before a client starts it. */
@@ -215,28 +250,36 @@ async function leftoverContainers(id) {
 
 /**
  * The images this run built: those labeled with one of its ids and, with Docker's classic builder,
- * the image of the install stage that each build leaves untagged and unlabeled, told by the npm
- * install of one of its packages; then, for the classic builder, the intermediate images each of
- * them was built from. Only images that were not there before the run are removed, children first
- * and with --no-prune: Docker's own pruning of parents could take an older build's image with them.
+ * the image of the install stage that each build leaves untagged and unlabeled. An npm build's is
+ * told by the npm install of one of its packages; a PyPI build's by its last step, which checks
+ * that the venv has the server's program and names it (`/app/venv/bin/python -I -S -c <check>
+ * <command>`, see pypiDockerfile): the steps before it are the same in every PyPI build, and come
+ * from Docker's build cache when an older build made them. Then, for the classic builder, the
+ * intermediate images each of them was built from, up to the first one that has a name: a base
+ * pulled for the build (node, the distroless images) is kept, as the resolve image uv runs in is.
+ * Only images that were not there before the run are removed, children first and with --no-prune:
+ * Docker's own pruning of parents could take an older build's image with them.
  */
 function removeImages(ids) {
   const mine = new Set(ids);
-  const installs = servers.map((server) => `npm install --ignore-scripts --omit=dev ${server.package}@latest`);
+  const installs = servers.filter((server) => runnerOf(server) === "npx").map((server) => `npm install --ignore-scripts --omit=dev ${server.package}@latest`);
+  const commands = servers.filter((server) => runnerOf(server) === "uvx").map((server) => ` ${uvxCommand(server)}`);
   const created = new Set(images().filter((image) => !imagesBefore.has(image)));
   const built = [...created].filter((image) => {
     const label = dockerOut(["image", "inspect", "--format", '{{index .Config.Labels "mcpcage.server"}}', image]).trim();
     if (mine.has(label)) return true;
     if (label !== "" && label !== "<no value>") return false;
     const history = dockerOut(["history", "--no-trunc", "--format", "{{.CreatedBy}}", image]);
-    return installs.some((install) => history.includes(install));
+    if (installs.some((install) => history.includes(install))) return true;
+    return history.split("\n").some((step) => step.startsWith("/app/venv/bin/python -I -S -c ") && commands.some((command) => step.trimEnd().endsWith(command)));
   });
-  // Each image's parents, as far as they are new too.
-  const remove = new Set();
-  for (let image of built) {
-    while (image && created.has(image) && !remove.has(image)) {
-      remove.add(image);
-      image = dockerOut(["image", "inspect", "--format", "{{.Parent}}", image]).trim();
+  // Each image's parents, as far as they are new too and have no name.
+  const remove = new Set(built);
+  for (const image of built) {
+    let parent = dockerOut(["image", "inspect", "--format", "{{.Parent}}", image]).trim();
+    while (parent && created.has(parent) && !remove.has(parent) && !named(parent)) {
+      remove.add(parent);
+      parent = dockerOut(["image", "inspect", "--format", "{{.Parent}}", parent]).trim();
     }
   }
   // Children first: a child is newer than its parent. A second pass takes a parent made in the
@@ -256,6 +299,11 @@ function removeImages(ids) {
 
 function images() {
   return dockerOut(["images", "-a", "-q", "--no-trunc"]).split("\n").filter(Boolean);
+}
+
+/** Whether an image has a tag or a digest name: a base that was pulled, not a step of a build. */
+function named(image) {
+  return dockerOut(["image", "inspect", "--format", "{{len .RepoTags}} {{len .RepoDigests}}", image]).trim() !== "0 0";
 }
 
 function dockerOut(args) {
@@ -307,9 +355,20 @@ function why(lines, id) {
   return own.find((line) => /error|required|please|cannot|can't|missing|not set|not found|denied|EROFS|EACCES|ENOENT|EAI_AGAIN|ECONNREFUSED|unhandled/i.test(line)) ?? own.at(-1) ?? lines.at(-1);
 }
 
-/** The line of a failed build that says why: npm's error, or mcpcage's own. */
+/**
+ * The line of a failed build that says why: npm's error, or mcpcage's own, which for a PyPI server
+ * uv finds no solution for quotes uv's reason. When mcpcage says only that docker build failed, the
+ * build's line that says why: uv's `error:` in the install stage, or the check that found no such
+ * program in the package.
+ */
 function firstError(lines) {
-  return lines.find((line) => /npm (error|ERR!)/.test(line) && !/A complete log|^\s*npm error\s*$/.test(line)) ?? lines.findLast((line) => /^mcpcage:/.test(line));
+  const npm = lines.find((line) => /npm (error|ERR!)/.test(line) && !/A complete log|^\s*npm error\s*$/.test(line));
+  if (npm !== undefined) return npm;
+  const own = lines.findLast((line) => /^mcpcage:/.test(line));
+  if (own === undefined || !/^mcpcage: docker build failed/.test(own)) return own;
+  // The classic builder colors what a step writes on stderr.
+  const plain = lines.map((line) => line.replace(/\u001b\[[0-9;]*m/g, "").trim());
+  return plain.find((line) => /(?:^|\s)error: |no \S+ in the package; it has: /.test(line)) ?? own;
 }
 
 function markdown(report) {

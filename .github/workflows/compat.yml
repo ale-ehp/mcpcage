@@ -1,8 +1,8 @@
 name: compat
 
-# The compatibility run (test/compat/run.mjs): the MCP servers people start most with npx, each
-# built from npm and started in the cage. It needs the network to build the images and takes a
-# while, so it runs weekly and by hand, not on every push.
+# The compatibility run (test/compat/run.mjs): the MCP servers people start most with npx and with
+# uvx, each built from npm or PyPI and started in the cage. It needs the network to build the images
+# and takes a while, so it runs weekly and by hand, not on every push.
 on:
   schedule:
     - cron: "41 5 * * 2" # Tuesdays
