@@ -4143,7 +4143,7 @@ describe("uvx servers in protect", () => {
       started.push(launch.argv);
       // The id and the cage of each, as inspectInCage starts them.
       inspectionSandbox(launch);
-      if (launch.argv.includes("dbt-mcp==2.10.1")) throw new PypiUnsolvable("dbt-mcp", "3.13", uv);
+      if (launch.argv.includes("dbt-mcp==2.10.1")) throw new PypiUnsolvable("dbt-mcp", "3.13", uv, "aarch64-manylinux_2_40");
       return [{ name: "get_current_time", description: "Get the current time in a timezone.", inputSchema: { type: "object" } }];
     };
     const settings = { environment: {}, settings: undefined };

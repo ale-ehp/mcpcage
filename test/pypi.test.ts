@@ -170,16 +170,28 @@ describe("resolving a PyPI server", () => {
     const docker = fakeDocker({ roots: { "3.13": ok("dbt-mcp==2.10.1\n"), "3.15": ok("dbt-mcp==2.10.1\n") }, lock: () => noSolution(DBT_NO_SOLUTION) });
     const refused = () => resolvePypi(pypi("uvx", "dbt-mcp==2.10.1"), { log: () => {}, runner: docker.runner });
     expect(refused).toThrow(
-      "dbt-mcp cannot be installed from PyPI wheels on Python 3.13, and the cage never builds a package from source: Because uuid==1.30 has no usable wheels and all versions of dbtlabs-vortex depend on uuid==1.30, " +
+      "dbt-mcp cannot be installed from PyPI wheels on Python 3.13 for Linux on ARM (linux/arm64), and the cage never builds a package from source: Because uuid==1.30 has no usable wheels and all versions of dbtlabs-vortex depend on uuid==1.30, " +
         "we can conclude that all versions of dbtlabs-vortex cannot be used. And because dbt-mcp>=2.10.1 depends on dbtlabs-vortex and you require dbt-mcp==2.10.1, we can conclude that your requirements are unsatisfiable. " +
         "hint: Wheels are required for `uuid` because building from source is disabled for all packages (i.e., with `--no-build`)",
     );
   });
 
+  it("names the platform the wheels were looked for, the engine's: another machine may have them", () => {
+    // guardpycfn 0.1.0 ships a wheel for Linux on x86_64 and none for Linux on ARM, which is what
+    // Docker runs on Apple silicon: awslabs.aws-iac-mcp-server 1.0.26 is refused there only.
+    const reason = "error: No solution found when resolving dependencies\n  cause: Because guardpycfn==0.1.0 has no usable wheels, nope.\n";
+    for (const [arch, words] of [["arm64", "Linux on ARM (linux/arm64)"], ["amd64", "Linux on x86_64 (linux/amd64)"]]) {
+      const docker = fakeDocker({ arch, roots: { "3.13": ok("awslabs-aws-iac-mcp-server==1.0.26\n"), "3.15": ok("awslabs-aws-iac-mcp-server==1.0.26\n") }, lock: () => noSolution(reason) });
+      expect(() => resolvePypi(pypi("uvx", "awslabs.aws-iac-mcp-server"), { log: () => {}, runner: docker.runner }), arch).toThrow(
+        `awslabs-aws-iac-mcp-server cannot be installed from PyPI wheels on Python 3.13 for ${words}, and the cage never builds a package from source: Because guardpycfn==0.1.0 has no usable wheels, nope.`,
+      );
+    }
+  });
+
   it("refuses a server that has no release with a wheel for the Python --python names", () => {
     const docker = fakeDocker({ roots: { "3.12": noSolution("error: No solution found when resolving dependencies\n  ╰─▶ Because windows-mcp>=0.8.6 depends on Python>=3.14, nope.\n") } });
     expect(() => resolvePypi(pypi("uvx", "--python", "3.12", "windows-mcp==0.8.8"), { log: () => {}, runner: docker.runner })).toThrow(
-      "windows-mcp cannot be installed from PyPI wheels on Python 3.12, and the cage never builds a package from source: Because windows-mcp>=0.8.6 depends on Python>=3.14, nope.",
+      "windows-mcp cannot be installed from PyPI wheels on Python 3.12 for Linux on ARM (linux/arm64), and the cage never builds a package from source: Because windows-mcp>=0.8.6 depends on Python>=3.14, nope.",
     );
     expect(docker.compiles().map((call) => flag(call.args, "--python-version"))).toEqual(["3.12"]);
   });
@@ -309,7 +321,7 @@ describe("the Python a PyPI server is resolved for", () => {
 
   it("refuses with the reason uv gives on 3.13 when no Python has a release", () => {
     const docker = windows({});
-    expect(() => resolvePypi(pypi("uvx", "windows-mcp"), { log: () => {}, runner: docker.runner })).toThrow("windows-mcp cannot be installed from PyPI wheels on Python 3.13, and the cage never builds a package from source: nothing on 3.13");
+    expect(() => resolvePypi(pypi("uvx", "windows-mcp"), { log: () => {}, runner: docker.runner })).toThrow("windows-mcp cannot be installed from PyPI wheels on Python 3.13 for Linux on ARM (linux/arm64), and the cage never builds a package from source: nothing on 3.13");
   });
 });
 

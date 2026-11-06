@@ -183,7 +183,7 @@ describe("the resolve wrap and --fix run before they write a uvx entry", () => {
     const known = (args: string[]) => (args[0] === "version" ? { status: 0, stdout: "arm64\n", stderr: "" } : args[0] === "image" ? { status: 0, stdout: "sha256:resolve\n", stderr: "" } : undefined);
     const unsolvable: DockerRunner = (args) => known(args) ?? { status: 1, stdout: "", stderr: uv };
     const answer = checkPypi("dbt", pypi("uvx", "dbt-mcp==2.10.1"), { log: () => {}, runner: unsolvable });
-    expect(answer).toEqual({ unsolvable: expect.stringMatching(/^dbt-mcp cannot be installed from PyPI wheels on Python 3\.13, and the cage never builds a package from source: .*Because uuid==1\.30 has no usable wheels/) });
+    expect(answer).toEqual({ unsolvable: expect.stringMatching(/^dbt-mcp cannot be installed from PyPI wheels on Python 3\.13 for Linux on ARM \(linux\/arm64\), and the cage never builds a package from source: .*Because uuid==1\.30 has no usable wheels/) });
     const stopped: DockerRunner = () => ({ status: 1, stdout: "", stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" });
     expect(checkPypi("time", pypi("uvx", "mcp-server-time"), { log: () => {}, runner: stopped })).toEqual({ failed: expect.stringMatching(/^docker version failed: Cannot connect to the Docker daemon/) });
     const offline: DockerRunner = (args) => known(args) ?? { status: 2, stdout: "", stderr: "error: Failed to fetch: `https://pypi.org/simple/mcp-server-time/`" };

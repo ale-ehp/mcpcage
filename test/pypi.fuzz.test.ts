@@ -95,7 +95,7 @@ describe("uv's reasons, fuzzed", () => {
             return { status: 1, stdout: "", stderr: `error: No solution found when resolving dependencies\n${reason.join("\n")}` };
           };
           expect(() => resolvePypi(pypi("uvx", "--python", "3.12", "mcp-server-time"), { log: () => {}, runner })).toThrow(
-            /^mcp-server-time cannot be installed from PyPI wheels on Python 3\.12, and the cage never builds a package from source: /,
+            /^mcp-server-time cannot be installed from PyPI wheels on Python 3\.12 for Linux on ARM \(linux\/arm64\), and the cage never builds a package from source: /,
           );
           try {
             resolvePypi(pypi("uvx", "--python", "3.12", "mcp-server-time"), { log: () => {}, runner });

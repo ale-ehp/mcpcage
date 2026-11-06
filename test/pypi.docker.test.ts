@@ -69,7 +69,7 @@ describe.skipIf(!docker.ok)("resolving PyPI servers (real Docker, PyPI)", () => 
   // uvx would build uuid 1.30 from its 2008 source distribution on the host, running its setup.py.
   it("refuses dbt-mcp 2.10.1, whose uuid dependency ships no wheel, naming it", () => {
     expect(() => lockPypi("dbt", pypi("uvx", "dbt-mcp==2.10.1"), { log: () => {} })).toThrow(
-      /^dbt-mcp cannot be installed from PyPI wheels on Python 3\.13, and the cage never builds a package from source: Because uuid==1\.30 has no usable wheels/,
+      /^dbt-mcp cannot be installed from PyPI wheels on Python 3\.13 for Linux on (?:ARM \(linux\/arm64\)|x86_64 \(linux\/amd64\)), and the cage never builds a package from source: Because uuid==1\.30 has no usable wheels/,
     );
   }, 180_000);
 });

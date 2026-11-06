@@ -326,7 +326,8 @@ only:
 | `awslabs.aws-iac-mcp-server` | 1.0.26 | On Apple silicon: `Because guardpycfn==0.1.0 has no usable wheels and awslabs-aws-iac-mcp-server>=1.0.26 depends on guardpycfn==0.1.0, we can conclude that awslabs-aws-iac-mcp-server>=1.0.26 cannot be used.` |
 
 Each message starts with
-`mcpcage: <package> cannot be installed from PyPI wheels on Python 3.13, and the cage never builds a package from source:`,
+`mcpcage: <package> cannot be installed from PyPI wheels on Python 3.13 for Linux on ARM (linux/arm64), and the cage never builds a package from source:`
+on the Mac (`for Linux on x86_64 (linux/amd64)` on an x86_64 machine),
 and for the last three uv adds
 ``hint: Wheels are required for `proxy-tools` because building from source is disabled for all packages (i.e., with `--no-build`)``
 (with `uuid` for `dbt-mcp`, `guardpycfn` for `awslabs.aws-iac-mcp-server`).
@@ -335,8 +336,9 @@ A wheel can exist for one machine and not another. `guardpycfn` 0.1.0 ships thre
 Linux on x86_64 (manylinux), macOS on arm64 and Windows on amd64, and none for Linux on ARM, which
 is what the cage is on Apple silicon: Docker runs Linux containers there, on ARM. So mcpcage refuses
 `awslabs.aws-iac-mcp-server` on the Mac, and builds it on the Linux runner and the Windows PC, both
-x86_64, where it lists 8 tools. mcpcage's message does not name the architecture today: it says
-only `on Python 3.13`.
+x86_64, where it lists 8 tools. mcpcage's message names the platform the wheels were looked for,
+`on Python 3.13 for Linux on ARM (linux/arm64)` on the Mac, so that the refusal says another
+machine may run the server.
 
 There is nothing to set in mcpcage for these: `--allow-net` does not help, since no image is built,
 and the cage does not build from source. `serena-agent` and `dbt-mcp` will run caged once the

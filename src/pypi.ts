@@ -143,7 +143,7 @@ export function resolvePypi(spec: PypiLaunch, options: { log: (message: string) 
   const extras = parsed.extras.length > 0 ? `[${parsed.extras.join(",")}]` : "";
   const input = [`${root.name}${extras}==${root.version}`, ...spec.with].map((line) => `${line}\n`).join("");
   const answer = compile(runner, input, python, platform, spec, ["--generate-hashes"]);
-  if ("unsolvable" in answer) throw unsolvable(spec.project, python, answer.unsolvable);
+  if ("unsolvable" in answer) throw unsolvable(spec.project, python, answer.unsolvable, platform);
   checkLock(answer.stdout, root);
   options.log(`mcpcage: ${root.name} ${root.version} on Python ${python}, ${pins(answer.stdout)} packages locked with their hashes`);
   return { packageName: root.name, version: root.version, python, platform, lock: answer.stdout };
@@ -201,7 +201,7 @@ function choosePython(spec: PypiLaunch, platform: string, runner: DockerRunner, 
   };
   if (spec.python !== undefined) {
     const root = ask(spec.python);
-    if ("unsolvable" in root) throw unsolvable(spec.project, spec.python, root.unsolvable);
+    if ("unsolvable" in root) throw unsolvable(spec.project, spec.python, root.unsolvable, platform);
     return { root, python: spec.python };
   }
   const answers = new Map<string, Pin | { unsolvable: string }>();
@@ -214,7 +214,7 @@ function choosePython(spec: PypiLaunch, platform: string, runner: DockerRunner, 
     const answer = answers.get(python);
     return answer === undefined || "unsolvable" in answer ? [] : [{ python, root: answer }];
   });
-  if (found.length === 0) throw unsolvable(spec.project, DEFAULT_PYTHON, (onDefault as { unsolvable: string }).unsolvable);
+  if (found.length === 0) throw unsolvable(spec.project, DEFAULT_PYTHON, (onDefault as { unsolvable: string }).unsolvable, platform);
   const newest = found.reduce((best, next) => (comparePypiVersions(next.root.version, best.root.version) > 0 ? next : best));
   if (newest.python !== DEFAULT_PYTHON) {
     const before = "unsolvable" in onDefault ? "" : ` (on Python ${DEFAULT_PYTHON} it would be ${onDefault.version})`;
@@ -257,19 +257,32 @@ function noSolution(stderr: string): string | undefined {
 
 /**
  * The refusal for a server uv finds no solution for from PyPI's wheels (a dependency with no wheel,
- * a version PyPI does not have): its name, the Python, and uv's own reason, which `reason` keeps
- * alone. A server so refused is refused again at every start, unlike a resolve that failed for want
- * of Docker or the network: wrap and --fix leave its entry as it is (see checkPypi), and --inspect
- * names a package that ships no wheel (see noWheel).
+ * a version PyPI does not have): its name, the Python, the platform of the wheels, and uv's own
+ * reason, which `reason` keeps alone. A server so refused is refused again at every start, unlike a
+ * resolve that failed for want of Docker or the network: wrap and --fix leave its entry as it is
+ * (see checkPypi), and --inspect names a package that ships no wheel (see noWheel).
+ *
+ * The platform is named because a wheel can exist for one and not the other: guardpycfn 0.1.0 ships
+ * one for Linux on x86_64 and none for Linux on ARM, so awslabs.aws-iac-mcp-server 1.0.26 is refused
+ * on Apple silicon, where Docker runs Linux on ARM, and builds on an x86_64 PC. With "on Python 3.13"
+ * alone the user could not tell that another machine runs it.
  */
 export class PypiUnsolvable extends Error {
   constructor(
     project: string,
     python: string,
     readonly reason: string,
+    platform: string,
   ) {
-    super(terminalSafe(`${project} cannot be installed from PyPI wheels on Python ${python}, and the cage never builds a package from source: ${reason}`));
+    super(terminalSafe(`${project} cannot be installed from PyPI wheels on Python ${python} for ${platformName(platform)}, and the cage never builds a package from source: ${reason}`));
   }
+}
+
+/** The platform of wheelPlatform in words: Linux on ARM (linux/arm64), Linux on x86_64 (linux/amd64). */
+function platformName(platform: string): string {
+  if (platform.startsWith("aarch64-")) return "Linux on ARM (linux/arm64)";
+  if (platform.startsWith("x86_64-")) return "Linux on x86_64 (linux/amd64)";
+  return platform;
 }
 
 /**
@@ -286,8 +299,8 @@ export function noWheel(reason: string): string | undefined {
   return new RegExp(`(?:all versions of |all of: )${name}\\S* .*?have no usable wheels`).exec(reason)?.[1];
 }
 
-function unsolvable(project: string, python: string, reason: string): PypiUnsolvable {
-  return new PypiUnsolvable(project, python, reason);
+function unsolvable(project: string, python: string, reason: string, platform: string): PypiUnsolvable {
+  return new PypiUnsolvable(project, python, reason, platform);
 }
 
 /**

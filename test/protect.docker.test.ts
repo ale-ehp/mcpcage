@@ -149,7 +149,7 @@ describe.skipIf(!docker.ok)("mcpcage protect --fix with uvx servers (real Docker
     const machine = uvxMachine({ dbt });
     const fix = images.track(mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--command", machine.mcpcage), machine.cage);
     expect(fix.stdout, fix.stderr).toMatch(
-      /\nPlan\n {2}not changed: dbt in ~\/\.cursor\/mcp\.json: dbt-mcp cannot be installed from PyPI wheels on Python 3\.13, and the cage never builds a package from source: Because uuid==1\.30 has no usable wheels[^\n]*\n {2}nothing that mcpcage can change by itself\.\n/,
+      /\nPlan\n {2}not changed: dbt in ~\/\.cursor\/mcp\.json: dbt-mcp cannot be installed from PyPI wheels on Python 3\.13 for Linux on (?:ARM \(linux\/arm64\)|x86_64 \(linux\/amd64\)), and the cage never builds a package from source: Because uuid==1\.30 has no usable wheels[^\n]*\n {2}nothing that mcpcage can change by itself\.\n/,
     );
     expect(JSON.parse(readFileSync(machine.cursor, "utf8")).mcpServers.dbt).toEqual(dbt);
     expect(fix.code).toBe(1);
