@@ -64,6 +64,10 @@ if (servers.length === 0) fail(`no server of ${wanted === undefined ? "servers.j
 
 const docker = dockerInfo();
 if (!docker.ok) fail(`Docker is not available: ${docker.error}`);
+// A result can depend on the engine's architecture: a package with a wheel for x86_64 Linux and none
+// for ARM Linux builds on one and not on the other. Such a row names its result for each.
+const noArch = all.filter((server) => typeof expectedOf(server) !== "string");
+if (noArch.length > 0) fail(`servers.json: ${noArch.map((server) => server.name).join(", ")} gives no expected result for ${docker.arch}, the Docker engine's architecture`);
 try {
   readFileSync(cli);
 } catch {
@@ -104,6 +108,7 @@ try {
     platform: `${process.platform} ${release()} ${process.arch}`,
     node: process.version,
     docker: `${docker.version} (${docker.os})`,
+    arch: docker.arch,
     imagesRemoved: removed.length,
     results,
   };
@@ -131,7 +136,7 @@ async function check(server) {
   const own = ["--id", id, ...(server.mounts ?? []).flatMap((mount) => ["--mount", fill(mount)])];
   for (const name of Object.keys(server.env ?? {})) own.push("--env", name);
   const env = { ...process.env, MCPCAGE_HOME: store, ...(server.env ?? {}) };
-  const result = { name: server.name, runner: runnerOf(server), package: server.package, expected: server.expected ?? "ok", command: redact(line.join(" ")), env: Object.keys(server.env ?? {}), notes: server.notes ?? "" };
+  const result = { name: server.name, runner: runnerOf(server), package: server.package, expected: expectedOf(server), command: redact(line.join(" ")), env: Object.keys(server.env ?? {}), notes: server.notes ?? "" };
 
   const build = await prepare(server, [...own, "--", ...line], env);
   result.buildSeconds = seconds(build.ms);
@@ -150,6 +155,12 @@ async function check(server) {
 
 function runnerOf(server) {
   return server.runner ?? "npx";
+}
+
+/** The result a row expects: its expected, or for an object, its entry for the engine's architecture. */
+function expectedOf(server) {
+  const expected = server.expected ?? "ok";
+  return typeof expected === "string" ? expected : expected?.[docker.arch];
 }
 
 /**
@@ -318,12 +329,12 @@ function dockerOut(args) {
 }
 
 function dockerInfo() {
-  const result = spawnSync("docker", ["version", "--format", "{{.Server.Version}}|{{.Server.Os}}"], { encoding: "utf8" });
+  const result = spawnSync("docker", ["version", "--format", "{{.Server.Version}}|{{.Server.Os}}|{{.Server.Arch}}"], { encoding: "utf8" });
   if (result.error) return { ok: false, error: result.error.message };
   if (result.status !== 0) return { ok: false, error: result.stderr.trim() };
-  const [version, os] = result.stdout.trim().split("|");
+  const [version, os, arch] = result.stdout.trim().split("|");
   const name = spawnSync("docker", ["info", "--format", "{{.OperatingSystem}}"], { encoding: "utf8" }).stdout?.trim() ?? "";
-  return { ok: true, version, os: name || os };
+  return { ok: true, version, os: name || os, arch };
 }
 
 function defaultSystem(info) {
