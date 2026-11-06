@@ -12,10 +12,12 @@
 // It writes <out>/compat.json and <out>/compat.md (default out: compat-out), and what each build and
 // each start wrote on stderr in <out>/logs, and prints the table.
 // Every server gets an image of its own under the id compat-<name>, so nothing of the user's is
-// reused or removed; the images it built are removed at the end unless --keep-images. Its folders,
-// mcpcage's store included (MCPCAGE_HOME), live in one temporary folder in the home directory,
-// because Colima and Docker Desktop share the home directory with their VM by default, and are
-// removed at the end too.
+// reused or removed; the images it built are removed unless --keep-images, each server's once it is
+// checked, so that a run needs room for one server's images, not for all of them (on a Mac with
+// 6.7 GB free for Docker, the 29 PyPI servers ran out of space at the 23rd), and whatever is left
+// at the end. Its folders, mcpcage's store included (MCPCAGE_HOME), live in one temporary folder in
+// the home directory, because Colima and Docker Desktop share the home directory with their VM by
+// default, and are removed at the end too.
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, release } from "node:os";
@@ -77,6 +79,7 @@ const work = mkdtempSync(join(homedir(), "compat-"));
 const store = join(work, "store");
 const imagesBefore = new Set(images());
 const results = [];
+const removed = [];
 let interrupted = false;
 process.on("SIGINT", () => {
   interrupted = true;
@@ -88,9 +91,11 @@ try {
     const result = await check(server);
     results.push(result);
     progress(`[${index + 1}/${servers.length}] ${server.name}: ${summary(result)}`);
+    if (!values["keep-images"]) removed.push(...removeImages([server]));
   }
 } finally {
-  const removed = values["keep-images"] ? [] : removeImages(servers.map((server) => idOf(server)));
+  // What a server's own removal could not take, or that of a server an interrupted run left.
+  if (!values["keep-images"]) removed.push(...removeImages(servers));
   rmSync(work, { recursive: true, force: true, maxRetries: 3 });
   const report = {
     mcpcage: mcpcageVersion,
@@ -249,21 +254,22 @@ async function leftoverContainers(id) {
 }
 
 /**
- * The images this run built: those labeled with one of its ids and, with Docker's classic builder,
- * the image of the install stage that each build leaves untagged and unlabeled. An npm build's is
- * told by the npm install of one of its packages; a PyPI build's by its last step, which checks
- * that the venv has the server's program and names it (`/app/venv/bin/python -I -S -c <check>
- * <command>`, see pypiDockerfile): the steps before it are the same in every PyPI build, and come
- * from Docker's build cache when an older build made them. Then, for the classic builder, the
- * intermediate images each of them was built from, up to the first one that has a name: a base
- * pulled for the build (node, the distroless images) is kept, as the resolve image uv runs in is.
- * Only images that were not there before the run are removed, children first and with --no-prune:
- * Docker's own pruning of parents could take an older build's image with them.
+ * The images this run built for `checked`, some of its servers: those labeled with one of their
+ * ids and, with Docker's classic builder, the image of the install stage that each build leaves
+ * untagged and unlabeled. An npm build's is told by the npm install of its package; a PyPI build's
+ * by its last step, which checks that the venv has the server's program and names it
+ * (`/app/venv/bin/python -I -S -c <check> <command>`, see pypiDockerfile): the steps before it are
+ * the same in every PyPI build, and come from Docker's build cache when an older build made them.
+ * Then, for the classic builder, the intermediate images each of them was built from, up to the
+ * first one that has a name: a base pulled for the build (node, the distroless images) is kept, as
+ * the resolve image uv runs in is. Only images that were not there before the run are removed,
+ * children first and with --no-prune: Docker's own pruning of parents could take an older build's
+ * image with them.
  */
-function removeImages(ids) {
-  const mine = new Set(ids);
-  const installs = servers.filter((server) => runnerOf(server) === "npx").map((server) => `npm install --ignore-scripts --omit=dev ${server.package}@latest`);
-  const commands = servers.filter((server) => runnerOf(server) === "uvx").map((server) => ` ${uvxCommand(server)}`);
+function removeImages(checked) {
+  const mine = new Set(checked.map((server) => idOf(server)));
+  const installs = checked.filter((server) => runnerOf(server) === "npx").map((server) => `npm install --ignore-scripts --omit=dev ${server.package}@latest`);
+  const commands = checked.filter((server) => runnerOf(server) === "uvx").map((server) => ` ${uvxCommand(server)}`);
   const created = new Set(images().filter((image) => !imagesBefore.has(image)));
   const built = [...created].filter((image) => {
     const label = dockerOut(["image", "inspect", "--format", '{{index .Config.Labels "mcpcage.server"}}', image]).trim();
