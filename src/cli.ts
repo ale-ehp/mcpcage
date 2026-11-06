@@ -22,7 +22,7 @@ import { envFileNote, fixConfigs, inspectionSandbox, isUncaged, renderReport, sc
 import { runProxy } from "./proxy.js";
 import { checkPypi, type PypiCheck, type PypiLock, type PypiResolver } from "./pypi.js";
 import { claudeCodeIsRunning } from "./running.js";
-import { dockerAvailable, INSTALL_BASE, npxProgram, parseMount, prepareSandbox, RUNTIME_BASE, sensitiveMount, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
+import { dockerAvailable, INSTALL_BASE, npxProgram, parseMount, prepareSandbox, PYPI_INSTALL_BASE, PYPI_RESOLVE_BASE, PYPI_RUNTIME_BASE, RUNTIME_BASE, sensitiveMount, UV_BASE, withSettingsReadOnly, type ServerRecord } from "./sandbox.js";
 import { countSuspicious, describeViolationsWithFindings, highSeveritySigns } from "./suspicious.js";
 import { boundedLog, terminalSafe } from "./terminal.js";
 
@@ -648,7 +648,18 @@ function doctor(): number {
     ["home", true, cageHome()],
   ];
   for (const [name, ok, detail] of checks) console.log(`${ok ? "ok  " : "FAIL"}  ${name.padEnd(12)} ${detail}`);
-  console.log(`      install base  ${INSTALL_BASE}\n      runtime base  ${RUNTIME_BASE}`);
+  // Every base a build starts from, each pinned by its digest (runtime/bases.Dockerfile): the npm
+  // server's two, then the PyPI server's resolve image, the image its uv binary comes from, and its
+  // install and runtime stages.
+  const bases: Array<[string, string]> = [
+    ["install base", INSTALL_BASE],
+    ["runtime base", RUNTIME_BASE],
+    ["PyPI resolve", PYPI_RESOLVE_BASE],
+    ["PyPI uv", UV_BASE],
+    ["PyPI install", PYPI_INSTALL_BASE],
+    ["PyPI runtime", PYPI_RUNTIME_BASE],
+  ];
+  for (const [name, image] of bases) console.log(`      ${name.padEnd(12)}  ${image}`);
   if (existsSync(cageHome())) console.log(`      servers       ${listServers().length}`);
   return checks.every(([, ok]) => ok) ? 0 : 1;
 }

@@ -35,6 +35,17 @@ describe("cli", () => {
     expect(mcpcage(home, "nonsense").code).toBe(2);
   });
 
+  it("doctor names every base image a build starts from, the npm ones and the PyPI ones, by their digests", () => {
+    const home = freshHome();
+    const result = mcpcageWithEnv({ ...process.env, MCPCAGE_HOME: home, ...noDocker(home) }, "doctor");
+    const bases = readFileSync(join(root, "runtime", "bases.Dockerfile"), "utf8");
+    const stage = (name: string) => new RegExp(`^FROM (\\S+@sha256:[0-9a-f]{64}) AS ${name}$`, "m").exec(bases)![1]!;
+    const labels: Array<[label: string, stage: string]> = [["install base", "install"], ["runtime base", "runtime"], ["PyPI resolve", "pypi-resolve"], ["PyPI uv", "pypi-uv"], ["PyPI install", "pypi-install"], ["PyPI runtime", "pypi-runtime"]];
+    for (const [label, name] of labels) {
+      expect(result.stdout.split("\n"), label).toContain(`      ${label.padEnd(12)}  ${stage(name)}`);
+    }
+  });
+
   it("lists servers with their pinned tools and pending changes", async () => {
     const home = freshHome();
     expect(mcpcage(home, "list").stdout).toContain("No servers yet");
