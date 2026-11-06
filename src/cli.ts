@@ -300,7 +300,7 @@ async function wrap(command: "wrap" | "unwrap", argv: string[]): Promise<number>
         : unwrapConfig(file, { dryRun: values["dry-run"] });
     report(outcome, command, values["dry-run"]);
     if (command === "wrap" && values["no-build"] && cagesUvx(outcome.changed)) console.log(`  ${NOT_RESOLVED}`);
-    if (command === "wrap" && !values["dry-run"] && !values["no-build"]) status = Math.max(status, buildImages(outcome.changed, pypi.locks));
+    if (command === "wrap" && !values["dry-run"] && !values["no-build"]) status = Math.max(status, buildImages(outcome.changed.map((change) => ({ ...change, file })), pypi.locks));
   }
   return status;
 }
@@ -340,13 +340,14 @@ function pypiResolver(): { resolve: PypiResolver; locks: Map<string, PypiLock> }
 /**
  * Builds the images now, so the client's first start does not wait for an image build and time out.
  * A uvx server is built from the lock its resolve made a moment ago (`locks`, see pypiResolver).
+ * `file` is the configuration that holds the entry, whose envFile is read with its env.
  */
-function buildImages(changes: Array<{ name: string; after: ServerEntry }>, locks: ReadonlyMap<string, PypiLock> = new Map()): number {
+function buildImages(changes: Array<{ name: string; after: ServerEntry; file: string }>, locks: ReadonlyMap<string, PypiLock> = new Map()): number {
   let status = 0;
   for (const change of changes) {
     const args = change.after.args ?? [];
-    // With the env the client gives mcpcage, as wrap read it: its UV_PYTHON is the Python `run` builds for.
-    const spec = parseLaunch(args.slice(args.indexOf("--") + 1), undefined, process.platform, uvxEnvironment(change.after));
+    // With the env and the envFile the client gives mcpcage, as wrap read them: their UV_PYTHON is the Python `run` builds for.
+    const spec = parseLaunch(args.slice(args.indexOf("--") + 1), undefined, process.platform, uvxEnvironment(change.after, process.env, change.file));
     if (spec.kind !== "npm" && spec.kind !== "pypi") continue;
     const serverId = serverIdFor(spec);
     const pypiLock = spec.kind === "pypi" ? locks.get(serverId) : undefined;
@@ -434,7 +435,7 @@ async function protect(argv: string[]): Promise<number> {
     if (!planned.includes(line)) console.log(line);
   };
   const outcome = fixConfigs({ report, command, claudeCodeRunning, dryRun: false, home, log: logNew, writable: values.writable, ...resolving });
-  const changed = outcome.files.flatMap((file) => file.changed);
+  const changed = outcome.files.flatMap((fixed) => fixed.changed.map((change) => ({ ...change, file: fixed.file })));
   const status = changed.length < uncaged || unchecked > 0 ? 1 : 0;
   // A failed build is reported and leaves the configuration caged: the image is built at the next start.
   // An entry that was caged already, and only had its env or its launcher changed, keeps the image it has.

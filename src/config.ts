@@ -10,7 +10,7 @@ import type { PypiResolver } from "./pypi.js";
 import { NOT_ON_A_DRIVE, offDrive } from "./sandbox.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
 import { terminalSafe } from "./terminal.js";
-import { uvSettingsReason } from "./uv-settings.js";
+import { entryUvSettingsReason, uvSettingsReason } from "./uv-settings.js";
 import { WINDOWS_PLACES } from "./windows-places.js";
 
 /** One MCP server entry, as Claude Desktop, Claude Code, Cursor, VS Code, Copilot, Windsurf and Devin store it. */
@@ -76,11 +76,11 @@ export function wrapConfig(file: string, options: { dryRun: boolean; command?: M
     const original = isWrapped(entry) && mcpcageAt(entry, command) === "other program" ? unwrapEntry(entry) : { entry };
     if ("skip" in original) return skip(name, original.skip);
     if (serverType(original.entry) === "uvx") uv ??= userUvHere();
-    const wrapped = wrapEntry(original.entry, { command, writable: options.writable, ...(uv === undefined ? {} : { uv }) });
+    const wrapped = wrapEntry(original.entry, { command, writable: options.writable, configFile: file, ...(uv === undefined ? {} : { uv }) });
     if ("skip" in wrapped) return skip(name, wrapped.skip);
     const reason = cageCheck(wrapped.entry, { command, configFile: file });
     if (reason !== undefined) return skip(name, reason);
-    const resolved = resolveBeforeWrite(wrapped.entry, options.resolve, uv?.environment);
+    const resolved = resolveBeforeWrite(wrapped.entry, options.resolve, uv?.environment, file);
     if (resolved !== undefined && "skip" in resolved) return skip(name, resolved.skip);
     return { after: wrapped.entry, ...(resolved === undefined ? {} : { note: resolved.note }) };
   });
@@ -93,15 +93,16 @@ export function wrapConfig(file: string, options: { dryRun: boolean; command?: M
  * with uv's reason: written, it would fail at every start of the client, where npx's failed builds
  * are usually passing. One whose resolve fails otherwise (Docker stopped, no network) is written,
  * with a note, and resolved at its first start. Undefined for any other entry, and without `resolve`
- * (--no-build). `environment` is the user's, which the line is read with (see uvxEnvironment).
+ * (--no-build). `environment` is the user's, which the line is read with, and `configFile` the
+ * configuration that holds the entry, whose envFile is read too (see uvxEnvironment).
  */
-export function resolveBeforeWrite(wrapped: ServerEntry, resolve: PypiResolver | undefined, environment: unknown = process.env): { skip: string } | { note: string } | undefined {
+export function resolveBeforeWrite(wrapped: ServerEntry, resolve: PypiResolver | undefined, environment: unknown = process.env, configFile?: string): { skip: string } | { note: string } | undefined {
   // The entry wrapEntry wrote, whatever --command names mcpcage: the server's line follows the first `--`.
   if (resolve === undefined || !Array.isArray(wrapped.args)) return undefined;
   const args = wrapped.args.filter((arg): arg is string => typeof arg === "string");
   const separator = args.indexOf("--");
   if (separator === -1) return undefined;
-  const spec = parseLaunch(args.slice(separator + 1), undefined, process.platform, uvxEnvironment(wrapped, environment));
+  const spec = parseLaunch(args.slice(separator + 1), undefined, process.platform, uvxEnvironment(wrapped, environment, configFile));
   if (spec.kind !== "pypi") return undefined;
   const answer = resolve(serverIdFor(spec), spec);
   if ("unsolvable" in answer) return { skip: answer.unsolvable };
@@ -364,14 +365,17 @@ export function hostVariable(name: string, value: unknown): { to: "container" | 
  * `cmd /c uvx` entry on Windows keeps `cmd /c` after `--`: unwrap gives it back as it was, and `run`
  * reads the npx or uvx command line in it (see cmdRunner), so mcpcage never starts cmd for it.
  *
- * A uvx entry is read with its env, as uvx reads it (see parseLaunch): one whose env makes uvx install
- * from another index, or from a file on the host, stays as it is with the variable named. Its other
- * variables of uv's stay in its env, where `run` reads them again at every start (UV_PYTHON is its
- * --python there too), and reach the cage by name, where nothing reads them. The user's own uv setup
- * counts too (`uv`, this machine's when not given): their environment, before the entry's env, and
- * their uv settings, which stop every uvx entry when they name a package index.
+ * A uvx entry is read with its env and its envFile, as uvx reads them (see parseLaunch and
+ * uvxEnvironment; `configFile` holds the entry): one whose variables make uvx install from another
+ * index, or from a file on the host, stays as it is with the variable named, and so does one whose
+ * variables point uvx at uv settings that name an index (see entryUvSettingsReason), which wrap
+ * would drop or move. Its other variables of uv's stay in its env, where `run` reads them again at
+ * every start (UV_PYTHON is its --python there too), and reach the cage by name, where nothing reads
+ * them. The user's own uv setup counts too (`uv`, this machine's when not given): their environment,
+ * before the entry's variables, and their uv settings, which stop every uvx entry when they name a
+ * package index.
  */
-export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand; writable?: boolean; uv?: UserUv }): { entry: ServerEntry } | { skip: string } {
+export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand; writable?: boolean; uv?: UserUv; configFile?: string }): { entry: ServerEntry } | { skip: string } {
   const type = serverType(entry);
   if (type === "remote") return { skip: "remote server: nothing runs locally to cage" };
   if (!entry.command) return { skip: "no command" };
@@ -391,14 +395,17 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
   const args = given as string[];
   // Looked for only when there is a uvx entry: on Windows the user's settings are found through the registry.
   const uv = type === "uvx" ? (options.uv ?? userUvHere()) : undefined;
+  const environment = uv === undefined ? [] : uvxEnvironment(entry, uv.environment, options.configFile);
   let serverArgs: string[];
   try {
-    serverArgs = parseLaunch([entry.command, ...args], undefined, process.platform, uv === undefined ? [] : uvxEnvironment(entry, uv.environment)).args;
+    serverArgs = parseLaunch([entry.command, ...args], undefined, process.platform, environment).args;
   } catch (error) {
     // `mcpcage run` would refuse this command line at every start: better to leave the entry as it is.
     return { skip: (error as Error).message };
   }
   if (uv?.settings !== undefined) return { skip: uv.settings };
+  const pointed = uv === undefined ? undefined : entryUvSettingsReason(environment);
+  if (pointed !== undefined) return { skip: pointed };
   // The server's own arguments end the list, after the runner's flags and the package (for uvx, also
   // the values of --from and --with), which are never mounted.
   const runnerPart = args.slice(0, args.length - serverArgs.length);
@@ -449,19 +456,30 @@ function envFlag(variable: string): string[] {
   return variable.startsWith("-") ? [`--env=${variable}`] : ["--env", variable];
 }
 
-/** The variables of an entry's env, as uvx reads them once the client starts it with them (see UvEnvironment). */
-export function entryEnvironment(entry: ServerEntry): UvEnvironment {
-  return [{ where: "its env", variables: entry.env }];
+/**
+ * The variables an entry adds to those its client starts it with, as uvx reads them (see
+ * UvEnvironment): those of its envFile, when `configFile`, the configuration that holds it, is given
+ * and the file can be read (see envFileOf, which finds `${workspaceFolder}` as VS Code does for that
+ * configuration), then those of its env, which win over them: VS Code's extension host loads the
+ * envFile into the environment first, then sets env over it (extHostMcpNode.ts, startNodeMpc). An
+ * envFile that cannot be read is left out here: what it sets is unknown, so the entry does not count
+ * as caged, and wrap and --fix leave it, with the reason (see cageCheck).
+ */
+export function entryEnvironment(entry: ServerEntry, configFile?: string): UvEnvironment {
+  const envFile = configFile === undefined ? undefined : envFileOf(entry, configFile);
+  const fromFile = envFile?.variables === undefined ? [] : [{ where: `its envFile (${envFile.path ?? ""})`, variables: envFile.variables }];
+  return [...fromFile, { where: "its env", variables: entry.env }];
 }
 
 /**
  * The variables a uvx entry starts with, as far as mcpcage can tell where it runs: the user's own
- * environment, which a client started from the user's session passes on, then the entry's env, which
- * the client adds to it. wrap, protect and --fix read a uvx line with both, as `run` reads its own
- * environment, so that what they call caged is what `run` starts.
+ * environment, which a client started from the user's session passes on, then what the entry adds to
+ * it (see entryEnvironment). wrap, protect, --fix and --inspect read a uvx line with them, and look at
+ * the uv settings they point to (see entryUvSettingsReason), as `run` reads its own environment, the
+ * client's with the entry's variables, so that what they call caged is what `run` starts.
  */
-export function uvxEnvironment(entry: ServerEntry, environment: unknown = process.env): UvEnvironment {
-  return [{ where: "your environment", variables: environment, own: true }, ...entryEnvironment(entry)];
+export function uvxEnvironment(entry: ServerEntry, environment: unknown = process.env, configFile?: string): UvEnvironment {
+  return [{ where: "your environment", variables: environment, own: true }, ...entryEnvironment(entry, configFile)];
 }
 
 /**

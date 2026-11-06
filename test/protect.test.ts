@@ -4286,4 +4286,135 @@ describe("uvx servers in protect", () => {
     expect(clean).toMatch(/\n {2}3 already run through mcpcage\.$/);
     expect(clean).not.toContain("cannot start");
   });
+
+  it("reads a uvx entry with its envFile and looks at the uv settings its variables point to: protect, --fix, wrap and run agree on each", () => {
+    const installed = fakeMcpcage();
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-uvx-pointed-"));
+    const index = 'index-url = "http://127.0.0.1:9/simple"\n';
+    const settingsIn = (dir: string, text = index) => {
+      writeText(join(dir, "uv", "uv.toml"), text);
+      return dir;
+    };
+    const indexed = settingsIn(join(top, "indexed"));
+    const clean = settingsIn(join(top, "clean"), "no-cache = true\n");
+    const windows = process.platform === "win32";
+    // Each entry, the variables it adds to what its client starts mcpcage with, and why it cannot be caged.
+    type Case = { entry: ServerEntry; adds: Record<string, string>; why?: string; run?: string };
+    const time = { command: "uvx", args: ["mcp-server-time"] };
+    const uvToml = (dir: string) => join(dir, "uv", "uv.toml");
+    const cursor: Record<string, Case> = windows
+      ? {
+          appdata: {
+            entry: { ...time, env: { APPDATA: indexed } },
+            adds: { APPDATA: indexed },
+            why: `its env sets APPDATA, so uvx reads the uv settings in ${uvToml(indexed)}, which name a package index, and the cage builds from PyPI only`,
+            run: `your uv settings (${uvToml(indexed)}) name a package index, and the cage builds from PyPI only`,
+          },
+          clean: { entry: { ...time, env: { APPDATA: clean } }, adds: { APPDATA: clean } },
+        }
+      : {
+          xdg: {
+            entry: { ...time, env: { XDG_CONFIG_HOME: indexed } },
+            adds: { XDG_CONFIG_HOME: indexed },
+            why: `its env sets XDG_CONFIG_HOME, so uvx reads the uv settings in ${uvToml(indexed)}, which name a package index, and the cage builds from PyPI only`,
+            run: `your uv settings (${uvToml(indexed)}) name a package index, and the cage builds from PyPI only`,
+          },
+          dirs: {
+            entry: { ...time, env: { XDG_CONFIG_DIRS: indexed } },
+            adds: { XDG_CONFIG_DIRS: indexed },
+            why: `its env sets XDG_CONFIG_DIRS, so uvx reads the uv settings in ${uvToml(indexed)}, which name a package index, and the cage builds from PyPI only`,
+            run: `your uv settings (${uvToml(indexed)}) name a package index, and the cage builds from PyPI only`,
+          },
+          // wrap and --fix drop HOME: before, the cage built from PyPI what uvx installed from the index of its home's settings.
+          home: {
+            entry: { ...time, env: { HOME: join(top, "home2") } },
+            adds: { HOME: join(top, "home2") },
+            why: `its env sets HOME, so uvx reads the uv settings in ${join(settingsIn(join(top, "home2", ".config")), "uv", "uv.toml")}, which name a package index, and the cage builds from PyPI only`,
+            run: "your uv settings (~/.config/uv/uv.toml) name a package index, and the cage builds from PyPI only",
+          },
+          clean: { entry: { ...time, env: { XDG_CONFIG_HOME: clean } }, adds: { XDG_CONFIG_HOME: clean } },
+        };
+    // VS Code adds the variables of an envFile, `${workspaceFolder}` its project's folder, as it adds those of env.
+    const vscode: Record<string, Case> = {
+      dotenv: {
+        entry: { type: "stdio", ...time, envFile: "${workspaceFolder}/.env" },
+        adds: { UV_INDEX_URL: "http://127.0.0.1:9/simple" },
+        why: "its envFile (${workspaceFolder}/.env) sets UV_INDEX_URL: uvx installs from another index there",
+        run: "the environment mcpcage runs in sets UV_INDEX_URL: uvx installs from another index there",
+      },
+      pointed: {
+        entry: { type: "stdio", ...time, envFile: "${workspaceFolder}/uv.env" },
+        adds: windows ? { APPDATA: indexed } : { XDG_CONFIG_DIRS: indexed },
+        why: `its envFile (\${workspaceFolder}/uv.env) sets ${windows ? "APPDATA" : "XDG_CONFIG_DIRS"}, so uvx reads the uv settings in ${uvToml(indexed)}, which name a package index, and the cage builds from PyPI only`,
+        run: `your uv settings (${uvToml(indexed)}) name a package index, and the cage builds from PyPI only`,
+      },
+    };
+    const entries = (cases: Record<string, Case>) => Object.fromEntries(Object.entries(cases).map(([name, value]) => [name, value.entry]));
+    const machine = uvxHome(entries(cursor));
+    const vscodeFile = join(machine.project, ".vscode", "mcp.json");
+    writeJsonFile(vscodeFile, { servers: entries(vscode) });
+    writeText(join(machine.project, ".env"), "# the index\nUV_INDEX_URL=http://127.0.0.1:9/simple\n");
+    writeText(join(machine.project, "uv.env"), Object.entries(vscode.pointed!.adds).map(([name, value]) => `${name}=${value}\n`).join(""));
+    const all = { ...cursor, ...vscode };
+    const refused = Object.entries(all).filter((entry): entry is [string, Case & { why: string; run: string }] => entry[1].why !== undefined);
+
+    const report = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline");
+    for (const [name, { why }] of refused) expect(detailsOf(report.stdout, name), name).toContain(`cannot be caged: ${why}`);
+    expect(detailsOf(report.stdout, "clean")).toEqual(["package: mcp-server-time (PyPI)"]);
+    const fix = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    const where = (name: string) => (Object.hasOwn(vscode, name) ? vscodeFile : tilde(machine.cursor, machine.home));
+    for (const [name, { why }] of refused) expect(fix.stdout, name).toContain(`  not changed: ${name} in ${where(name)}: ${why}\n`);
+    expect(JSON.parse(readFileSync(vscodeFile, "utf8")).servers).toEqual(entries(vscode));
+    const caged = JSON.parse(readFileSync(machine.cursor, "utf8")).mcpServers;
+    for (const [name] of refused) if (Object.hasOwn(cursor, name)) expect(caged[name], name).toEqual(cursor[name]!.entry);
+    expect(caged.clean.args).toEqual(["run", "--env", windows ? "APPDATA=" + clean : "XDG_CONFIG_HOME", "--", "uvx", "mcp-server-time"]);
+    const wrap = mcpcageWithEnv(machine.env, "wrap", "--dry-run", vscodeFile);
+    for (const name of Object.keys(vscode)) expect(wrap.stdout, name).toContain(`  skipped ${name}: ${all[name]!.why}\n`);
+
+    // `run`, started as the client starts it, with the entry's variables in its environment, refuses each of them before Docker is needed.
+    const client = (adds: Record<string, string>) => ({ ...machine.env, ...noDocker(top), ...adds });
+    for (const [name, { adds, run }] of refused) {
+      const started = mcpcageWithEnv(client(adds), "run", "--", "uvx", "mcp-server-time");
+      expect(started.stderr, name).toBe(`mcpcage: ${run}\n`);
+      expect(started.code, name).toBe(1);
+    }
+    expect(mcpcageWithEnv(client(cursor.clean!.adds), "run", "--", "uvx", "mcp-server-time").stderr).toMatch(/^mcpcage: Docker is required to cage a server /);
+
+    // The same entries caged by hand: protect says they cannot start, with the same reasons, and does not count them as caged.
+    const wrapped = (cases: Record<string, Case>) =>
+      Object.fromEntries(Object.entries(cases).map(([name, { entry }]) => [name, { ...entry, command: installed.command, args: ["run", ...Object.keys(entry.env ?? {}).flatMap((variable) => ["--env", variable]), "--", "uvx", "mcp-server-time"] }]));
+    writeJsonFile(machine.cursor, { mcpServers: wrapped(cursor) });
+    writeJsonFile(vscodeFile, { servers: wrapped(vscode) });
+    const stuck = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--command", installed.command);
+    for (const [name, { why }] of refused) expect(lineOf(stuck.stdout, name), name).toMatch(new RegExp(` {2}cannot start: ${literal(why)}$`));
+    expect(lineOf(stuck.stdout, "clean")).toMatch(windows ? / {2}caged, but its env runs on your machine$/ : / {2}caged$/);
+
+    // An envFile that cannot be read leaves what uvx would read unknown: not counted as caged, and --fix leaves it, with the reason.
+    writeJsonFile(vscodeFile, { servers: { unread: { type: "stdio", ...time, envFile: "${workspaceFolder}/missing.env" } } });
+    const unread = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline");
+    expect(lineOf(unread.stdout, "unread")).toMatch(/ NOT CAGED$/);
+    expect(detailsOf(unread.stdout, "unread")).toContain("envFile: ${workspaceFolder}/missing.env could not be read, so what it sets is unknown");
+    const left = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    expect(left.stdout).toContain(`  not changed: unread in ${vscodeFile}: its envFile \${workspaceFolder}/missing.env could not be read, so what it sets is unknown: check that file, or move what it sets into its "env"\n`);
+    expect(JSON.parse(readFileSync(vscodeFile, "utf8")).servers.unread.command).toBe("uvx");
+  });
+
+  it("--inspect reads a uvx line with its envFile, as run will, and gives the cage none of it", async () => {
+    const machine = uvxHome({});
+    const vscodeFile = join(machine.project, ".vscode", "mcp.json");
+    writeJsonFile(vscodeFile, { servers: { time: { type: "stdio", command: "uvx", args: ["mcp-server-time"], env: { TZ: "UTC" }, envFile: "${workspaceFolder}/.env" } } });
+    writeText(join(machine.project, ".env"), "UV_PYTHON=3.12\nAPI_TOKEN=from-the-file\n");
+    const launches: Array<Parameters<Inspector>[0]> = [];
+    const inspect: Inspector = async (launch) => {
+      launches.push(launch);
+      return [];
+    };
+    await scanConfigs({ locations: discoverConfigs({ platform: process.platform, home: machine.home, env: {}, project: machine.project }), home: machine.home, offline: true, cacheDir: join(machine.top, "cache"), npmRunner: noNpm, inspect, uv: { environment: {}, settings: undefined } });
+    expect(launches.map(({ argv, env, envFile }) => ({ argv, env, envFile }))).toEqual([{ argv: ["uvx", "mcp-server-time"], env: { TZ: "UTC" }, envFile: { UV_PYTHON: "3.12", API_TOKEN: "from-the-file" } }]);
+    const sandbox = inspectionSandbox(launches[0]!);
+    // UV_PYTHON is its Python, as `run` reads it from the environment VS Code gives it; the cage gets its env only.
+    expect(sandbox.spec).toMatchObject({ kind: "pypi", project: "mcp-server-time", python: "3.12" });
+    expect(sandbox.env).toEqual(["TZ=UTC"]);
+    expect(sandbox.serverId).toBe(serverIdFor(parseLaunch(["uvx", "mcp-server-time"], undefined, process.platform, [{ where: "the environment mcpcage runs in", variables: { UV_PYTHON: "3.12" }, own: true }])));
+  });
 });

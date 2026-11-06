@@ -8,7 +8,7 @@ import {
 } from "./config.js";
 import { batchFile, envFileOf, mcpcageAt, nodeScript, type ForeignPath, type McpcageCommand, type McpcageKind } from "./installed.js";
 import { hasComments, isJsonObject, parseJsonc } from "./jsonc.js";
-import { cmdRunner, cmdWouldRead, npxArgv, parseLaunch, serverIdFor, toolRunArgs, type LaunchSpec } from "./launch.js";
+import { cmdRunner, cmdWouldRead, npxArgv, parseLaunch, serverIdFor, toolRunArgs, type LaunchSpec, type UvEnvironment } from "./launch.js";
 import { MAX_DEPTH, nestedDeeperThan, tooDeep, type ToolDefinition } from "./manifest.js";
 import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
@@ -18,6 +18,7 @@ import { hostMount, NOT_ON_A_DRIVE, offDrive, type SandboxOptions } from "./sand
 import { accountHome, clientPlaces, sensitivePath, thisMachine, toolPlaces } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
 import { terminalSafe } from "./terminal.js";
+import { entryUvSettingsReason } from "./uv-settings.js";
 
 /*
  * `mcpcage protect`: every MCP configuration of this machine and of the current project, what each
@@ -126,11 +127,12 @@ export interface ProtectReport {
 
 /**
  * Starts one npx or uvx server in the cage and lists its tools: `argv` is its npx or uvx command
- * line, `env` its environment, and `redact` hides the values it was given in what an error quotes
- * of it, before the error cuts it (listTools). A uvx server whose packages ship no wheel throws
+ * line, `env` its environment, `envFile` what its envFile sets, which `run` reads a uvx line with
+ * but never gives the cage, and `redact` hides the values it was given in what an error quotes of
+ * it, before the error cuts it (listTools). A uvx server whose packages ship no wheel throws
  * PypiUnsolvable, as `run` would.
  */
-export type Inspector = (launch: { argv: string[]; env: Record<string, string>; redact: Redact }) => Promise<ToolDefinition[]>;
+export type Inspector = (launch: { argv: string[]; env: Record<string, string>; envFile?: Record<string, string>; redact: Redact }) => Promise<ToolDefinition[]>;
 
 export interface ScanOptions {
   locations: ConfigLocation[];
@@ -233,7 +235,7 @@ async function describeServer(
       server.opened = openedBy(entry);
       const unmountable = offDriveMount(entry);
       if (unmountable !== undefined) server.offDrive = unmountable;
-      const refused = uvxRefusal(entry, userUv);
+      const refused = uvxRefusal(entry, userUv, file.file);
       if (refused !== undefined) server.uvxRefused = refused;
     }
     server.secrets = [...new Set([...secretNames(entry), ...shown.secrets])];
@@ -248,7 +250,7 @@ async function describeServer(
     }
     const cmd = type === "other" && Array.isArray(entry.args) ? cmdRunner([entry.command, ...entry.args]) : undefined;
     if (cmd !== undefined && "notPlain" in cmd) server.notPlain = { runner: cmd.runner, reason: cmd.notPlain };
-    if (type === "uvx") Object.assign(server, pypiOf(entry, userUv()));
+    if (type === "uvx") Object.assign(server, pypiOf(entry, userUv(), file.file));
     const odd = Array.isArray(entry.args) ? entry.args.filter((arg) => typeof arg !== "string").length : 0;
     if (odd > 0) server.problems.push(`args: ${odd === 1 ? "an argument that is not a string" : `${odd} arguments that are not strings`}`);
     // A uvx server that cannot be caged is not inspected: the cage would build another package than
@@ -267,7 +269,7 @@ async function describeServer(
       }
       server.installScripts = lookup;
     }
-    if (options.inspect && launch) server.inspection = await inspectServer(options.inspect, launch, entry, shown.hidden);
+    if (options.inspect && launch) server.inspection = await inspectServer(options.inspect, launch, entry, shown.hidden, file.file);
   } catch (error) {
     // The values of the entry's env and headers stay out of the report, whatever the error says.
     // Hidden before the message is put on one line: a value with line breaks would no longer be the same.
@@ -276,19 +278,22 @@ async function describeServer(
   return server;
 }
 
-async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEntry, hidden: string[]): Promise<NonNullable<ServerReport["inspection"]>> {
+async function inspectServer(inspect: Inspector, argv: string[], entry: ServerEntry, hidden: string[], configFile: string): Promise<NonNullable<ServerReport["inspection"]>> {
   // A wrapped entry gives the server some of its variables as `--env NAME=value`: the cage gets them too.
   const moved = isWrapped(entry) ? envValues(stringArgs(entry)) : [];
   const env = { ...stringValues(entry.env), ...Object.fromEntries(moved.map((variable) => [variable.name, variable.value])) };
+  // What its envFile sets reaches `run`, which reads a uvx line with it (UV_PYTHON is its Python), never the cage.
+  const fromFile = envFileOf(entry, configFile)?.variables;
+  const envFile = fromFile === undefined ? {} : { envFile: fromFile };
   // Reported whether the server lists its tools or not: one that needs the path left out may not start.
-  const spec = cageableLaunch(argv, env);
+  const spec = cageableLaunch(argv, env, fromFile);
   const skipped = spec ? inspectionPlan(spec).skipped : [];
   const left = skipped.length > 0 ? { skipped } : {};
   // The server may repeat a value it was given, in its error output or in its tools: no value reaches the report.
   const values = [...Object.values(env), ...hidden];
   const redact = redactor(values);
   try {
-    const tools = await inspect({ argv, env, redact });
+    const tools = await inspect({ argv, env, ...envFile, redact });
     // The proxy refuses such a listing whole, so the report does not read it either.
     const deep = tooDeep(tools);
     if (deep) throw new Error(`the definition of "${deep.name}" is nested more than ${MAX_DEPTH} levels deep, which mcpcage refuses`);
@@ -336,10 +341,11 @@ function findingsIn(tools: ToolDefinition[]): Finding[] {
  * directory named `.ssh:rw` was inspected with the real ~/.ssh mounted writable. Otherwise it is
  * mounted as `run` mounts it (hostMount), so the server sees what it will see once caged: on Windows
  * the folder as the system spells it on disk, at /c/... (cagePath). A uvx line is read with the
- * user's environment and the entry's env, as `run` will read it (its UV_PYTHON is its Python).
+ * user's environment, the entry's envFile and its env, as `run` will read it (its UV_PYTHON is its
+ * Python); the envFile's variables never reach the cage.
  */
-export function inspectionSandbox(launch: { argv: string[]; env: Record<string, string> }): Omit<SandboxOptions, "log"> {
-  const spec = parseLaunch(launch.argv, undefined, process.platform, uvxEnvironment({ env: launch.env }));
+export function inspectionSandbox(launch: { argv: string[]; env: Record<string, string>; envFile?: Record<string, string> }): Omit<SandboxOptions, "log"> {
+  const spec = parseLaunch(launch.argv, undefined, process.platform, inspectedEnvironment(launch.env, launch.envFile));
   if (spec.kind !== "npm" && spec.kind !== "pypi") throw new Error("only npx and uvx servers can be inspected");
   const plan = inspectionPlan(spec);
   // docker's --mount takes comma-separated fields: hostMount refuses such a path, as `mcpcage run` does.
@@ -382,10 +388,16 @@ function inspectionPlan<Spec extends CageableLaunch>(spec: Spec): { spec: Spec; 
 
 type CageableLaunch = Extract<LaunchSpec, { kind: "npm" | "pypi" }>;
 
-/** The npx or uvx launch of a command line started with `env`, or undefined for one that `mcpcage run` would not start. */
-function cageableLaunch(argv: string[], env: Record<string, string>): CageableLaunch | undefined {
+/** The variables an inspected uvx line is read with: the user's, then its envFile's, then its env's (see uvxEnvironment). */
+function inspectedEnvironment(env: Record<string, string>, envFile: Record<string, string> | undefined): UvEnvironment {
+  const [own, ...rest] = uvxEnvironment({ env });
+  return [own!, ...(envFile === undefined ? [] : [{ where: "its envFile", variables: envFile }]), ...rest];
+}
+
+/** The npx or uvx launch of a command line started with `env` and its envFile's variables, or undefined for one that `mcpcage run` would not start. */
+function cageableLaunch(argv: string[], env: Record<string, string>, envFile: Record<string, string> | undefined): CageableLaunch | undefined {
   try {
-    const spec = parseLaunch(argv, undefined, process.platform, uvxEnvironment({ env }));
+    const spec = parseLaunch(argv, undefined, process.platform, inspectedEnvironment(env, envFile));
     return spec.kind === "npm" || spec.kind === "pypi" ? spec : undefined;
   } catch {
     return undefined;
@@ -394,18 +406,23 @@ function cageableLaunch(argv: string[], env: Record<string, string>): CageableLa
 
 /**
  * What a uvx entry installs, as `run` would read its line once caged (with the user's environment and
- * the entry's env, see uvxEnvironment), or why it cannot be caged: the line's own reason first, then
- * the user's uv settings. The reasons are wrap's, which names flags and variables, never their values.
+ * the entry's envFile and env, see uvxEnvironment; `configFile` holds the entry), or why it cannot be
+ * caged: the line's own reason first, then the user's uv settings, then those the entry's variables
+ * point uvx to (see entryUvSettingsReason). The reasons are wrap's, which names flags and variables,
+ * never their values.
  */
-function pypiOf(entry: ServerEntry, uv: UserUv): { pypiPackage: string } | { cannotCage: string } | Record<string, never> {
+function pypiOf(entry: ServerEntry, uv: UserUv, configFile: string): { pypiPackage: string } | { cannotCage: string } | Record<string, never> {
   let spec: LaunchSpec;
+  const environment = uvxEnvironment(entry, uv.environment, configFile);
   try {
-    spec = parseLaunch([entry.command as string, ...stringArgs(entry)], undefined, process.platform, uvxEnvironment(entry, uv.environment));
+    spec = parseLaunch([entry.command as string, ...stringArgs(entry)], undefined, process.platform, environment);
   } catch (error) {
     return { cannotCage: messageOf(error) };
   }
   if (spec.kind !== "pypi") return {};
   if (uv.settings !== undefined) return { cannotCage: uv.settings };
+  const pointed = entryUvSettingsReason(environment);
+  if (pointed !== undefined) return { cannotCage: pointed };
   return { pypiPackage: `${spec.requirement} (PyPI)${spec.with.length > 0 ? `, with ${spec.with.join(", ")}` : ""}` };
 }
 
@@ -481,7 +498,7 @@ function offDriveMount(entry: ServerEntry): string | undefined {
  * named one starts nothing, where the report called it caged. Undefined for a line that is not
  * uvx's, one started from --image, and when `run` would refuse its options anyway.
  */
-function uvxRefusal(entry: ServerEntry, userUv: () => UserUv): string | undefined {
+function uvxRefusal(entry: ServerEntry, userUv: () => UserUv, configFile: string): string | undefined {
   const args = fromRun(entry);
   const separator = args.indexOf("--");
   if (separator === -1) return undefined;
@@ -494,7 +511,7 @@ function uvxRefusal(entry: ServerEntry, userUv: () => UserUv): string | undefine
   const server = args.slice(separator + 1);
   // The user's uv setup is looked up for a uvx line only (on Windows through the registry).
   if (image !== undefined || toolRunArgs(server) === undefined) return undefined;
-  const read = pypiOf({ ...entry, command: server[0], args: server.slice(1) }, userUv());
+  const read = pypiOf({ ...entry, command: server[0], args: server.slice(1) }, userUv(), configFile);
   return "cannotCage" in read ? read.cannotCage : undefined;
 }
 
@@ -984,20 +1001,20 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
  */
 function rewrite(entry: ServerEntry, options: FixOptions, configFile: string, userUv: () => UserUv): { entry: ServerEntry; alreadyCaged?: boolean; note?: string } | { skip: string } {
   const { command } = options;
-  const rewritten = rewriteEntry(entry, command, options.writable === true, userUv);
+  const rewritten = rewriteEntry(entry, command, options.writable === true, userUv, configFile);
   if ("skip" in rewritten) return rewritten;
   const reason = cageCheck(rewritten.entry, { command, configFile });
   if (reason !== undefined) return { skip: reason };
   if (rewritten.entry === entry) return { skip: "its env no longer runs on your machine" };
   // An entry caged already keeps the image it has: nothing to resolve.
-  const resolved = rewritten.alreadyCaged ? undefined : resolveBeforeWrite(rewritten.entry, options.resolve, options.uv?.environment);
+  const resolved = rewritten.alreadyCaged ? undefined : resolveBeforeWrite(rewritten.entry, options.resolve, options.uv?.environment, configFile);
   if (resolved !== undefined && "skip" in resolved) return resolved;
   return resolved === undefined ? rewritten : { ...rewritten, note: resolved.note };
 }
 
-function rewriteEntry(entry: ServerEntry, command: McpcageCommand, writable: boolean, userUv: () => UserUv): { entry: ServerEntry; alreadyCaged?: boolean } | { skip: string } {
+function rewriteEntry(entry: ServerEntry, command: McpcageCommand, writable: boolean, userUv: () => UserUv, configFile: string): { entry: ServerEntry; alreadyCaged?: boolean } | { skip: string } {
   // The user's uv setup is looked up for a uvx entry only (on Windows through the registry).
-  const wrap = (original: ServerEntry) => wrapEntry(original, { command, writable, ...(serverType(original) === "uvx" ? { uv: userUv() } : {}) });
+  const wrap = (original: ServerEntry) => wrapEntry(original, { command, writable, configFile, ...(serverType(original) === "uvx" ? { uv: userUv() } : {}) });
   if (serverType(entry) !== "mcpcage") return wrap(entry);
   const found = mcpcageAt(entry as ServerEntry & { command: string }, command);
   if (found === "other program") {

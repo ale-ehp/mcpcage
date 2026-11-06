@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { namesIndex, uvConfigFiles, uvSettingsReason } from "../src/uv-settings.js";
+import { entryUvSettingsReason, namesIndex, uvConfigFiles, uvSettingsReason } from "../src/uv-settings.js";
 
 describe("the scan of a uv.toml for a package index", () => {
   it("finds an [[index]] table and each key that chooses where packages come from, under any table", () => {
@@ -104,6 +104,25 @@ describe("where uv's settings are looked for", () => {
     expect(uvConfigFiles({ platform: "win32", env: { UV_CONFIG_FILE: "D:/conf/../uv.toml" }, home: "C:\\Users\\me" })).toEqual(["D:\\uv.toml"]);
   });
 
+  it("adds the files an environment's HOME, or USERPROFILE, SYSTEMDRIVE and PROGRAMDATA on Windows, point uv to", () => {
+    // A client's environment with an entry's variables in it, as `run` gets it: uv reads its settings where they say.
+    expect(uvConfigFiles({ platform: "linux", env: { HOME: "/srv/other" }, home: "/home/me" })).toEqual([
+      "/srv/other/.config/uv/uv.toml",
+      "/home/me/.config/uv/uv.toml",
+      "/etc/xdg/uv/uv.toml",
+      "/etc/uv/uv.toml",
+    ]);
+    const windows = { appData: "C:\\Users\\me\\AppData\\Roaming", programData: "C:\\ProgramData" };
+    const env = { USERPROFILE: "D:\\profiles\\me", SystemDrive: "E:", PROGRAMDATA: "F:\\data" };
+    expect(uvConfigFiles({ platform: "win32", env, home: "C:\\Users\\me", windows })).toEqual([
+      "D:\\profiles\\me\\AppData\\Roaming\\uv\\uv.toml",
+      "E:\\ProgramData\\uv\\uv.toml",
+      "F:\\data\\uv\\uv.toml",
+      "C:\\Users\\me\\AppData\\Roaming\\uv\\uv.toml",
+      "C:\\ProgramData\\uv\\uv.toml",
+    ]);
+  });
+
   // Real files, so real paths of this machine: those of macOS and Linux here, Windows' in the next one.
   it.skipIf(process.platform === "win32")("on macOS and Linux, gives the first file that names an index, written from ~, and one that cannot be read as unknown", () => {
     const top = mkdtempSync(join(tmpdir(), "mcpcage-uv-settings-"));
@@ -147,5 +166,58 @@ describe("where uv's settings are looked for", () => {
     // A uv.toml that is a directory, say: what it sets is unknown, and the cage is refused.
     const odd = { ...places, env: { UV_CONFIG_FILE: programData } };
     expect(uvSettingsReason(odd)).toBe(`your uv settings (${programData}) could not be read, so whether they name a package index is unknown, and the cage builds from PyPI only`);
+  });
+});
+
+describe("the uv settings an entry's own variables point uvx to", () => {
+  const index = "index-url = 'https://pypi.corp.example/simple'\n";
+  const own = (variables: Record<string, string>) => ({ where: "your environment", variables, own: true });
+
+  it.skipIf(process.platform === "win32")("on macOS and Linux: its HOME, XDG_CONFIG_HOME and XDG_CONFIG_DIRS, by the variable and the file; the user's own environment is left out", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-uv-entry-"));
+    const elsewhere = join(top, "elsewhere");
+    mkdirSync(join(elsewhere, "uv"), { recursive: true });
+    mkdirSync(join(elsewhere, ".config", "uv"), { recursive: true });
+    const env = (variables: Record<string, string>) => [own({ XDG_CONFIG_HOME: elsewhere }), { where: "its env", variables }];
+    expect(entryUvSettingsReason(env({ XDG_CONFIG_HOME: elsewhere, HOME: elsewhere, XDG_CONFIG_DIRS: elsewhere }), process.platform, top)).toBeUndefined();
+    writeFileSync(join(elsewhere, "uv", "uv.toml"), index);
+    // The user's own XDG_CONFIG_HOME is theirs: uvSettingsReason looks at it.
+    expect(entryUvSettingsReason([own({ XDG_CONFIG_HOME: elsewhere })], process.platform, top)).toBeUndefined();
+    expect(entryUvSettingsReason(env({ XDG_CONFIG_HOME: elsewhere }), process.platform, top)).toBe(
+      "its env sets XDG_CONFIG_HOME, so uvx reads the uv settings in ~/elsewhere/uv/uv.toml, which name a package index, and the cage builds from PyPI only",
+    );
+    expect(entryUvSettingsReason(env({ XDG_CONFIG_DIRS: `/nonexistent:${elsewhere}` }), process.platform, "/home/me")).toBe(
+      `its env sets XDG_CONFIG_DIRS, so uvx reads the uv settings in ${join(elsewhere, "uv", "uv.toml")}, which name a package index, and the cage builds from PyPI only`,
+    );
+    // A relative XDG_CONFIG_HOME is ignored by uv, as the XDG specification says.
+    expect(entryUvSettingsReason(env({ XDG_CONFIG_HOME: "elsewhere" }), process.platform, top)).toBeUndefined();
+    expect(entryUvSettingsReason(env({ HOME: elsewhere }), process.platform, top)).toBeUndefined();
+    writeFileSync(join(elsewhere, ".config", "uv", "uv.toml"), "[[index]]\nurl = 'https://pypi.corp.example/simple'\n");
+    expect(entryUvSettingsReason([own({}), { where: "its envFile (.env)", variables: { HOME: elsewhere } }, { where: "its env", variables: {} }], process.platform, top)).toBe(
+      "its envFile (.env) sets HOME, so uvx reads the uv settings in ~/elsewhere/.config/uv/uv.toml, which name a package index, and the cage builds from PyPI only",
+    );
+    // A file that is there and cannot be read leaves what it sets unknown.
+    rmSync(join(elsewhere, ".config", "uv", "uv.toml"));
+    mkdirSync(join(elsewhere, ".config", "uv", "uv.toml"));
+    expect(entryUvSettingsReason(env({ HOME: elsewhere }), process.platform, "/home/me")).toBe(
+      `its env sets HOME, so uvx reads the uv settings in ${join(elsewhere, ".config", "uv", "uv.toml")}, which could not be read: whether they name a package index is unknown, and the cage builds from PyPI only`,
+    );
+  });
+
+  it.runIf(process.platform === "win32")("on Windows: its APPDATA, USERPROFILE, SYSTEMDRIVE and PROGRAMDATA, by the variable and the file", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-uv-entry-"));
+    const elsewhere = join(top, "elsewhere");
+    mkdirSync(join(elsewhere, "uv"), { recursive: true });
+    const env = (variables: Record<string, string>) => [own({ APPDATA: elsewhere }), { where: "its env", variables }];
+    expect(entryUvSettingsReason(env({ AppData: elsewhere }), "win32", top)).toBeUndefined();
+    writeFileSync(join(elsewhere, "uv", "uv.toml"), index);
+    expect(entryUvSettingsReason([own({ APPDATA: elsewhere })], "win32", top)).toBeUndefined();
+    expect(entryUvSettingsReason(env({ AppData: elsewhere }), "win32", top)).toBe(
+      "its env sets AppData, so uvx reads the uv settings in ~\\elsewhere\\uv\\uv.toml, which name a package index, and the cage builds from PyPI only",
+    );
+    expect(entryUvSettingsReason(env({ PROGRAMDATA: elsewhere }), "win32", top)).toMatch(/^its env sets PROGRAMDATA, so uvx reads the uv settings in /);
+    mkdirSync(join(elsewhere, "AppData", "Roaming", "uv"), { recursive: true });
+    writeFileSync(join(elsewhere, "AppData", "Roaming", "uv", "uv.toml"), index);
+    expect(entryUvSettingsReason(env({ USERPROFILE: elsewhere }), "win32", top)).toMatch(/^its env sets USERPROFILE, so uvx reads the uv settings in ~\\elsewhere\\AppData\\Roaming\\uv\\uv\.toml, /);
   });
 });
