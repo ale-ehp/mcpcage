@@ -12,20 +12,31 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * and none may be a network path. On macOS and Linux the code reads Windows paths with the host's
  * rules, so the spellings with a slash first are the ones that reach node:fs here, as all of them
  * do on Windows.
+ *
+ * A share (\\server\share, \\?\UNC\server\share, with slashes or backslashes) is recorded, then
+ * answered as a file that is not there, without asking the system: the shares named here do not
+ * exist, and on Windows asking for one goes to the network (a statSync of \\fs01\... on the PC took
+ * 2.3 s and failed with UNKNOWN, not ENOENT), where macOS and Linux read the same text as a name in
+ * the current directory, which is not there either. Device paths (\\.\pipe, \\?\C:\...) are asked.
  */
 const touched: string[] = [];
 
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof Fs>();
-  const record = <T extends (...args: never[]) => unknown>(call: T): T =>
+  const share = (path: string) => /^[\\/]{2}(?![?.][\\/])/.test(path) || /^[\\/]{2}[?.][\\/]UNC[\\/]/i.test(path);
+  const notThere = (path: string) => Object.assign(new Error(`ENOENT: no such file or directory, '${path}'`), { code: "ENOENT", path });
+  const record = <T extends (...args: never[]) => unknown>(call: T, absent: (path: string) => unknown = (path) => { throw notThere(path); }): T =>
     ((...args: Parameters<T>) => {
-      if (typeof args[0] === "string") touched.push(args[0]);
+      if (typeof args[0] === "string") {
+        touched.push(args[0]);
+        if (share(args[0])) return absent(args[0]);
+      }
       return call(...args);
     }) as T;
   const realpathSync = Object.assign(record(fs.realpathSync), { native: record(fs.realpathSync.native) });
   const spied = {
     ...fs,
-    existsSync: record(fs.existsSync),
+    existsSync: record(fs.existsSync, () => false),
     statSync: record(fs.statSync),
     lstatSync: record(fs.lstatSync),
     accessSync: record(fs.accessSync),
