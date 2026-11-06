@@ -552,7 +552,8 @@ export function buildPypiImage(
       for (const wheel of options.wheels) copyFileSync(wheel, join(context, "wheels", basename(wheel)));
     }
     options.log(`mcpcage: building the sandbox image for ${build.serverId} from its lock (wheels only, no package code runs)...`);
-    const result = runner(["build", "--label", `mcpcage.server=${build.serverId}`, "-t", build.tag, context], { stream: true });
+    // --force-rm, as the npm path builds: a failed step leaves no stopped container (see prepareNpmImage).
+    const result = runner(["build", "--force-rm", "--label", `mcpcage.server=${build.serverId}`, "-t", build.tag, context], { stream: true });
     if (result.status !== 0) throw new Error(`docker build failed for ${build.serverId}${result.stderr.trim() === "" ? "" : `: ${firstLines(result.stderr)}`}`);
   } finally {
     rmSync(context, { recursive: true, force: true });

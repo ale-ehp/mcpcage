@@ -184,6 +184,26 @@ describe.skipIf(!docker.ok)("building PyPI servers (real Docker, PyPI)", () => {
     expect(started.stdout).toContain("evilpth main");
   }, 600_000);
 
+  it("leaves no stopped container when a step of the build fails", () => {
+    // uv pip sync refuses the wheel: the lock gives it another sha256.
+    const wheel = evilWheel(mkdtempSync(join(home, "wheel-")));
+    const output: string[] = [];
+    const runner: DockerRunner = (args, more = {}) => {
+      const result = noting()(args, more);
+      if (more.stream) output.push(result.stderr);
+      return result;
+    };
+    const lock = `/app/wheels/evilpth-0.1-py3-none-any.whl \\\n    --hash=sha256:${"0".repeat(64)}\n`;
+    const build = () => buildPypiImage({ serverId: "failing", tag: "mcpcage/failing:test", dockerfile: pypiDockerfile({ command: "evilpth", python: "3.13", wheels: true }), lock }, { log: () => {}, runner, wheels: [wheel.file] });
+    expect(build).toThrow(/^docker build failed for failing/);
+    // The classic builder names the container of each step; BuildKit runs none that outlives the build.
+    const steps = [...output.join("\n").matchAll(/^ ---> Running in ([0-9a-f]{12})$/gm)].map((match) => match[1]!);
+    // Either builder's steps are in what it printed: the check below is not vacuous.
+    expect(steps.length > 0 || /^#\d+ \[/m.test(output.join("\n"))).toBe(true);
+    expect(output.join("\n")).toMatch(/hash|Hash/);
+    for (const id of steps) expect(realDocker(["container", "inspect", id]).status, `container ${id}`).not.toBe(0);
+  }, 600_000);
+
   it("builds mcp-server-time from its lock and lists its tools in the cage, without network", async () => {
     const spec = pypi("uvx", "mcp-server-time");
     const record = preparePypiImage(options("time", spec), noting());

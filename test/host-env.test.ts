@@ -179,6 +179,18 @@ describe.skipIf(process.platform === "win32")("the environment of docker and npm
   });
 });
 
+// On Windows docker.exe and npm-cli.js are found otherwise (see the tests below): the build's arguments are the same there.
+describe.skipIf(process.platform === "win32")("the npm build", () => {
+  it("removes the container of a step that fails: --force-rm, which the classic builder needs and BuildKit takes", () => {
+    const pkg = join(top, "local-server");
+    mkdirSync(pkg);
+    writeFileSync(join(pkg, "package.json"), '{"name": "local-server", "version": "1.0.0"}');
+    prepareSandbox(options({ serverId: "local", spec: { kind: "npm" as const, packageName: "", localPath: pkg, args: [] } }));
+    const build = spawned.find((call) => call.args[0] === "build");
+    expect(build?.args).toContain("--force-rm");
+  });
+});
+
 describe("the environment of docker and npm on Windows", () => {
   it("compares names without case, keeps one spelling of each, and gives `docker run` the server's by name", () => {
     const bin = join(top, "bin");

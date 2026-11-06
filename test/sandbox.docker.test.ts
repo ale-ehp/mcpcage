@@ -1,6 +1,6 @@
 // Runs only with `npm run test:docker`: needs a working Docker daemon and network for the first build.
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { dockerAvailable } from "../src/sandbox.js";
@@ -108,6 +108,20 @@ describe.skipIf(!docker.ok)("caged npm server (real Docker)", () => {
     expect(report.network).toMatch(/^blocked/);
     expect(JSON.parse(readFileSync(join(home, "servers", "probe-image", "pin.json"), "utf8")).tools).toHaveProperty("probe");
   }, 120_000);
+
+  it("leaves no stopped container when a step of the build fails", () => {
+    // npm install fails in the build: a version of mcpcage itself that will never be published (ETARGET).
+    const failing = mkdtempSync(join(home, "failing-"));
+    writeFileSync(join(failing, "package.json"), JSON.stringify({ name: "mcpcage-failing", version: "1.0.0", dependencies: { mcpcage: "0.0.0-never-published" } }));
+    const result = images.track(mcpcage(home, "prepare", "--id", "probe-failing", "--", "npx", "-y", failing), home);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/docker build failed/);
+    // The classic builder names the container of each step; BuildKit runs none that outlives the build.
+    const steps = [...result.stderr.matchAll(/^ ---> Running in ([0-9a-f]{12})$/gm)].map((match) => match[1]!);
+    // Either builder's steps are in what it printed: the check below is not vacuous.
+    expect(steps.length > 0 || /^#\d+ \[/m.test(result.stderr)).toBe(true);
+    for (const id of steps) expect(spawnSync("docker", ["container", "inspect", id], { encoding: "utf8" }).status, `container ${id}`).not.toBe(0);
+  }, 600_000);
 
   it("records the sandbox in the audit log, intact", async () => {
     expect(mcpcage(home, "audit", "verify", "probe").code).toBe(0);

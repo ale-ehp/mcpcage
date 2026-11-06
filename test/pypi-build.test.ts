@@ -277,7 +277,8 @@ describe("building a PyPI server's image", () => {
     });
     expect(record.integrity).toBeUndefined();
     const [build] = engine.builds();
-    expect(build!.slice(0, 5)).toEqual(["build", "--label", "mcpcage.server=time", "-t", tag]);
+    // --force-rm: the classic builder leaves the container of a failed step otherwise.
+    expect(build!.slice(0, 6)).toEqual(["build", "--force-rm", "--label", "mcpcage.server=time", "-t", tag]);
     // Nothing in the build resolves, so a cached layer is the same as a fresh one (see buildPypiImage).
     expect(build).not.toContain("--no-cache");
   });

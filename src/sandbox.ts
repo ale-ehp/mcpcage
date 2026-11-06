@@ -740,7 +740,10 @@ function prepareNpmImage(options: SandboxOptions): ServerRecord {
     // server-filesystem got 2.1.0 from a build made hours before, with 2.2.0 on npm. The builds from
     // a pinned lockfile keep the cache: npm ci installs the same tree whatever the cache holds.
     const cache = reusePinnedTree ? [] : ["--no-cache"];
-    docker(["build", ...cache, "--label", `mcpcage.server=${options.serverId}`, "-t", tag, context], true);
+    // --force-rm: the classic builder (Docker without buildx, Colima's) removes a step's container
+    // only when the step succeeds, so each failed build left a stopped container and the images it
+    // held, seen in the compatibility run. BuildKit leaves none and takes the flag as a no-op.
+    docker(["build", ...cache, "--force-rm", "--label", `mcpcage.server=${options.serverId}`, "-t", tag, context], true);
 
     // Keep the exact dependency tree that was installed, so every later build is identical.
     const container = docker(["create", tag]).trim();
