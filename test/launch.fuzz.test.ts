@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { serverType } from "../src/config.js";
 import { cmdRunner, isNpx, isUvx, npxArgv, parseLaunch, pypiRequirement, serverIdFor, splitPackageSpec, toolRunArgs, type PypiLaunch } from "../src/launch.js";
+import { resolvePypi, type DockerRunner } from "../src/pypi.js";
 import { anyText, check, TIMEOUT } from "./fuzz.js";
 
 /*
@@ -53,6 +54,26 @@ function expectPypi(spec: PypiLaunch, argv: string[], platform: NodeJS.Platform)
   if (platform === "win32" && spec.command !== parsed!.name) expect(spec.command).not.toMatch(/\.(?:exe|cmd|bat|ps1)$/i);
   if (spec.python !== undefined) expect(spec.python).toMatch(/^3\.1[0-5](?:\.[0-9]+)?$/);
   if (spec.resolution.prerelease !== undefined) expect(["disallow", "allow", "if-necessary", "explicit", "if-necessary-or-explicit"]).toContain(spec.resolution.prerelease);
+  // Nothing a terminal or uv's stdin would read as more than one line or as a control: and the resolve,
+  // which checks the requirements again before it writes them on uv's stdin, takes the spec.
+  for (const text of [spec.requirement, ...spec.with, spec.command]) expect(text, JSON.stringify(text)).not.toMatch(/[\u0000-\u001f\u007f]/);
+  for (const line of resolvedInput(spec)) expect(line, JSON.stringify(line)).not.toMatch(/[\u0000-\u001f\u007f]/);
+}
+
+/**
+ * The lines the resolve of `spec` writes on uv's stdin, with a runner that answers as uv does: its
+ * version 1.0, then a lock that pins it. resolvePypi throws when it refuses a requirement of the spec.
+ */
+function resolvedInput(spec: PypiLaunch): string[] {
+  const input: string[] = [];
+  const runner: DockerRunner = (args, options) => {
+    if (args[0] === "image") return { status: 0, stdout: "sha256:resolve\n", stderr: "" };
+    input.push(...(options?.input ?? "").split("\n").filter((line) => line !== ""));
+    const lock = args.includes("--generate-hashes") ? ` \\\n    --hash=sha256:${"0".repeat(64)}` : "";
+    return { status: 0, stdout: `${spec.project}==1.0${lock}\n`, stderr: "" };
+  };
+  resolvePypi(spec, { log: () => {}, runner, platform: "aarch64-manylinux_2_28" });
+  return input;
 }
 
 /** The words after /c: half of them start with npx or uvx, which any word may follow. */
@@ -67,6 +88,38 @@ const CMD = fc.constantFrom("cmd", "cmd.exe", "CMD.EXE", "C:\\Windows\\System32\
 
 /** What cmd reads itself in the line after /c (see CMD_READS in launch.ts), and what ends its line. */
 const CMD_SPECIAL = /[&|<>^%!"()\u0000-\u001f\u007f]/;
+
+/** `word` in any mix of ASCII upper and lower case. */
+const anyCase = (word: string) => fc.tuple(...[...word].map((character) => fc.constantFrom(character.toLowerCase(), character.toUpperCase()))).map((characters) => characters.join(""));
+
+/** What uvx says of a word it reads as a Python interpreter to start (see INTERPRETER in launch.ts). */
+const INTERPRETER = "uvx reads it as a Python interpreter to start (python, python3.13, python@3.12, cpython, pypy, graalpy, pyodide), not as a PyPI package, and the cage starts PyPI packages only";
+
+/**
+ * What uv 0.13.7 reads after an interpreter's name as a version request (see pythonVersionRequest in
+ * launch.ts): nothing, @ and anything, a version of one to three parts of 0 to 255 (a pre-release
+ * with two parts at least), a variant right after its last digit, or version specifiers. A variant
+ * after a letter is not one: uv 0.13.7 looked for the package python3-13at for python3.13at, and
+ * started an interpreter for python3.13rc2t.
+ */
+const versionRequest = fc.oneof(
+  fc.constant(""),
+  anyText(8).map((text) => `@${text}`),
+  fc
+    .tuple(
+      fc.constantFrom("", "v"),
+      fc.array(fc.integer({ min: 0, max: 255 }), { minLength: 1, maxLength: 3 }),
+      fc.constantFrom("", "a1", "b0", "rc2", "c3", "alpha3", "beta1", "pre1", "preview2", "a", "beta", "rc", "c"),
+      fc.constantFrom("", "t", "+debug", "d", "td", "freethreaded", "+freethreaded", "gil", "gil+debug", "freethreaded+debug"),
+    )
+    .map(([v, parts, pre, variant]) => {
+      const release = `${v}${parts.join(".")}${parts.length >= 2 ? pre : ""}`;
+      return /[0-9]$/.test(release) ? `${release}${variant}` : release;
+    }),
+  fc
+    .array(fc.tuple(fc.constantFrom("", " "), fc.constantFrom(">=", "<=", "==", "!=", "~=", ">", "<"), fc.constantFrom("3.12", "3.13", "3.10.4", "3")), { minLength: 1, maxLength: 3 })
+    .map((specifiers) => specifiers.map(([gap, operator, version]) => `${gap}${operator}${operator === "~=" && version === "3" ? "3.1" : version}`).join(",")),
+);
 
 describe("command lines, fuzzed", () => {
   it(
@@ -124,8 +177,8 @@ describe("command lines, fuzzed", () => {
               return;
             }
             if (spec.kind === "host") {
-              // Only a name that Windows alone reads without case, read elsewhere.
-              expect(platform !== "win32" && /[A-Z]/.test(start[0]!)).toBe(true);
+              // Only a name that Windows and macOS alone read without case, read on Linux.
+              expect(platform === "linux" && /[A-Z]/.test(start[0]!)).toBe(true);
               return;
             }
             expect(spec.kind).toBe("pypi");
@@ -191,6 +244,57 @@ describe("command lines, fuzzed", () => {
           else expect(npxArgv(argv, "win32")).toEqual(line);
         }),
         2000,
+      );
+    },
+    TIMEOUT,
+  );
+  it(
+    "refuse a package or --from that uvx reads as a Python interpreter, in any case and spelling",
+    () => {
+      check(
+        fc.property(
+          fc.constantFrom<NodeJS.Platform>("darwin", "linux", "win32"),
+          fc.constantFrom("python", "cpython", "pypy", "graalpy", "pyodide", "pythonw").chain((name) => anyCase(name).map((spelled) => ({ name, spelled }))),
+          versionRequest,
+          fc.constantFrom(["uvx"], ["uv", "tool", "run"], ["uv", "tool", "uvx"], ["/usr/local/bin/uvx"], ["cmd", "/c", "uvx"]),
+          fc.constantFrom([], ["--offline"], ["-q"], ["--with", "mcp"], ["-p", "3.12"], ["--python=3.13"], ["--isolated", "--refresh"], ["--prerelease", "allow"]),
+          fc.boolean(),
+          (platform, { name, spelled }, version, start, flags, viaFrom) => {
+            // pythonw is one on Windows only.
+            fc.pre(name !== "pythonw" || platform === "win32");
+            const word = `${spelled}${version}`;
+            // cmd /c is read on Windows only, and as uvx only when cmd would hand uvx the words as they are.
+            fc.pre(start[0] !== "cmd" || (platform === "win32" && !CMD_SPECIAL.test(word) && !/[\s,;=]/.test(word)));
+            const argv = viaFrom ? [...start, ...flags, "--from", word, "server"] : [...start, ...flags, word, "server.py"];
+            expect(() => parseLaunch(argv, undefined, platform), JSON.stringify(argv)).toThrow(new Error(`uvx ${viaFrom ? "--from" : "<package>"}: ${INTERPRETER}`));
+          },
+        ),
+        1000,
+      );
+    },
+    TIMEOUT,
+  );
+  it(
+    "read uvx, uv and npx in any case on macOS and Windows, whose file systems compare names without case, and in lowercase only on Linux",
+    () => {
+      check(
+        fc.property(
+          fc.constantFrom("uvx", "uvx.exe", "uv", "uv.exe", "npx", "npx.cmd").chain((name) => anyCase(name).map((spelled) => ({ name, spelled }))),
+          fc.constantFrom("", "/usr/local/bin/", "/Users/me/.local/bin/", "C:\\Users\\me\\.local\\bin\\"),
+          fc.constantFrom("run", "uvx"),
+          fc.constantFrom<NodeJS.Platform>("darwin", "linux", "win32"),
+          ({ name, spelled }, dir, sub, platform) => {
+            const command = `${dir}${spelled}`;
+            const argv = name.startsWith("npx") ? [command, "-y", "@acme/notes-mcp"] : name.startsWith("uvx") ? [command, "mcp-server-time"] : [command, "tool", sub, "mcp-server-time"];
+            const kind = name.startsWith("npx") ? "npm" : "pypi";
+            const read = spelled === name || platform !== "linux";
+            expect(parseLaunch(argv, undefined, platform).kind, JSON.stringify(argv)).toBe(read ? kind : "host");
+            expect(serverType({ command, args: argv.slice(1) }, platform)).toBe(read ? (kind === "npm" ? "npx" : "uvx") : "other");
+            if (name.startsWith("uvx")) expect(isUvx(command, platform)).toBe(read);
+            if (name.startsWith("npx")) expect(isNpx(command, platform)).toBe(read);
+          },
+        ),
+        1000,
       );
     },
     TIMEOUT,
