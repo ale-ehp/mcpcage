@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -352,6 +352,61 @@ describe("building a PyPI server's image", () => {
     engine.reset();
     expect(prepare(engine, pypi(...argv)).version).toBe("2026.12.1");
     expect(engine.resolves()).toBeGreaterThan(0);
+  });
+
+  it("resolves again when --python names another version than the lock was made for", () => {
+    const state = { arch: "arm64", version: "2026.11.4" };
+    const engine = fakeEngine(state);
+    prepare(engine, pypi("uvx", "--python", "3.12", "mcp-server-time"));
+    state.version = "2026.12.1";
+    engine.reset();
+    expect(prepare(engine, pypi("uvx", "--python", "3.13", "mcp-server-time")).version).toBe("2026.12.1");
+    expect(engine.resolves()).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ["no Python", { python: undefined }],
+    ["no package", { packageName: undefined }],
+    ["no version", { version: undefined }],
+  ])("resolves again when the record of the lock holds %s, or the lock is gone", (_what, missing) => {
+    const state = { arch: "arm64", version: "2026.11.4" };
+    const engine = fakeEngine(state);
+    const first = prepare(engine, pypi("uvx", "mcp-server-time"));
+    state.version = "2026.12.1";
+    writeFileSync(join(home, "servers", "time", "server.json"), JSON.stringify({ ...first, ...missing }));
+    engine.reset();
+    expect(prepare(engine, pypi("uvx", "mcp-server-time")).version).toBe("2026.12.1");
+    expect(engine.resolves()).toBeGreaterThan(0);
+    // The lock removed: resolved again too, never read as an empty lock.
+    rmSync(join(home, "servers", "time", "requirements.lock"));
+    state.version = "2027.1.1";
+    engine.reset();
+    expect(prepare(engine, pypi("uvx", "mcp-server-time")).version).toBe("2027.1.1");
+  });
+
+  it("records the tag the image is under, when the same image is there under a new tag", () => {
+    const engine = fakeEngine({ arch: "arm64", version: "2026.11.4" });
+    const first = prepare(engine, pypi("uvx", "mcp-server-time"));
+    // A record made by another mcpcage, whose Dockerfile, and so the tag, differed: the image is the same.
+    writeFileSync(join(home, "servers", "time", "server.json"), JSON.stringify({ ...first, image: "mcpcage/time:000000000000" }));
+    engine.reset();
+    expect(prepare(engine, pypi("uvx", "mcp-server-time"))).toMatchObject({ image: first.image, imageId: first.imageId });
+    expect(engine.builds()).toEqual([]);
+  });
+
+  it("refuses a build that fails, with what docker printed, or that leaves no image, and takes an empty answer for no image", () => {
+    const engine = fakeEngine({ arch: "arm64", version: "2026.11.4" });
+    const failing: DockerRunner = (args, options) => (args[0] === "build" ? { status: 1, stdout: "", stderr: "step 3/9: no space left on device\nmore\n" } : engine.runner(args, options));
+    expect(() => preparePypiImage(options(pypi("uvx", "mcp-server-time")), failing)).toThrow(/^docker build failed for time: step 3\/9: no space left on device more$/);
+    const silent: DockerRunner = (args, options) => (args[0] === "build" ? { status: 1, stdout: "", stderr: "" } : engine.runner(args, options));
+    expect(() => preparePypiImage(options(pypi("uvx", "mcp-server-time")), silent)).toThrow(/^docker build failed for time$/);
+    const empty: DockerRunner = (args, options) => (args[0] === "build" ? { status: 0, stdout: "", stderr: "" } : engine.runner(args, options));
+    expect(() => preparePypiImage(options(pypi("uvx", "mcp-server-time")), empty)).toThrow(/^docker build left no image mcpcage\/time:[0-9a-f]{12}$/);
+    // docker image inspect that answers nothing, with success: no image, built.
+    engine.reset();
+    const blank: DockerRunner = (args, options) => (args[0] === "image" && args.at(-1)!.startsWith("mcpcage/") && !engine.builds().length ? { status: 0, stdout: "\n", stderr: "" } : engine.runner(args, options));
+    expect(preparePypiImage(options(pypi("uvx", "mcp-server-time")), blank).imageId).toMatch(/^sha256:/);
+    expect(engine.builds()).toHaveLength(1);
   });
 
   it("keeps the lock when only the server's arguments change", () => {

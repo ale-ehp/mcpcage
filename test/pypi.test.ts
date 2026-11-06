@@ -1,10 +1,11 @@
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseLaunch, type PypiLaunch } from "../src/launch.js";
-import { checkLock, comparePypiVersions, lockPypi, noWheel, resolveArgs, resolvePypi, wheelPlatform, type DockerResult, type DockerRunner } from "../src/pypi.js";
+import { checkLock, comparePypiVersions, lockPypi, noWheel, realDocker, resolveArgs, resolvePypi, wheelPlatform, type DockerResult, type DockerRunner } from "../src/pypi.js";
 import { PYPI_RESOLVE_BASE } from "../src/sandbox.js";
+import { onWindows } from "./fake-programs.js";
 
 /*
  * The resolve of a PyPI server, with a fake docker in place of the real one: what mcpcage asks uv,
@@ -102,7 +103,10 @@ describe("resolving a PyPI server", () => {
 
   it("pins the server's own version first, without its dependencies, then locks that version with hashes", () => {
     const docker = timeDocker();
-    const resolved = resolvePypi(pypi("uvx", "mcp-server-time"), { log: () => {}, runner: docker.runner });
+    const log: string[] = [];
+    const resolved = resolvePypi(pypi("uvx", "mcp-server-time"), { log: (line) => log.push(line), runner: docker.runner });
+    // What is locked, counted by its pins: the hash lines are not packages.
+    expect(log.at(-1)).toBe("mcpcage: mcp-server-time 2026.11.4 on Python 3.13, 3 packages locked with their hashes");
     expect(resolved).toEqual({ packageName: "mcp-server-time", version: "2026.11.4", python: "3.13", platform: "aarch64-manylinux_2_40", lock: TIME_LOCK });
     const [first, ...rest] = docker.compiles();
     expect(first!.args).toContain("--no-deps");
@@ -126,6 +130,9 @@ describe("resolving a PyPI server", () => {
     expect(docker.compiles()[0]!.input).toBe("Duckduckgo_MCP.Server[browser]\n");
     expect(docker.compiles().at(-1)!.input).toBe("duckduckgo-mcp-server[browser]==0.7.0\nhttpx>=0.27,<1\nrich\n");
     expect(resolved.packageName).toBe("duckduckgo-mcp-server");
+    // Each of several extras.
+    resolvePypi(pypi("uvx", "duckduckgo-mcp-server[browser, cli]"), { log: () => {}, runner: docker.runner });
+    expect(docker.compiles().at(-1)!.input).toBe("duckduckgo-mcp-server[browser,cli]==0.7.0\n");
   });
 
   it("asks uv in a hardened container of the resolve image: nonroot, read-only, no capabilities, no host file, only uv's own settings", () => {
@@ -164,6 +171,26 @@ describe("resolving a PyPI server", () => {
       expect(flag(uv, "--exclude-newer")).toBe("30 days");
     }
     expect(resolveArgs(["--no-deps"])).toEqual(expect.arrayContaining(["--entrypoint", "uv", PYPI_RESOLVE_BASE, "pip", "compile", "--no-deps", "-"]));
+  });
+
+  it("asks uv for the pins alone, with exactly the flags the spec gives and none it does not", () => {
+    const docker = timeDocker();
+    resolvePypi(pypi("uvx", "mcp-server-time"), { log: () => {}, runner: docker.runner });
+    const uv = docker.compiles().map(({ args }) => args.slice(args.indexOf(PYPI_RESOLVE_BASE) + 1));
+    // --quiet keeps uv's warnings out of what is checked, --no-header and --no-annotate keep the output to the pins.
+    const common = ["--no-header", "--no-annotate", "--python-version", "3.13", "--python-platform", "aarch64-manylinux_2_40", "-"];
+    expect(uv[0]).toEqual(["pip", "compile", "--quiet", "--no-build", "--no-deps", ...common]);
+    expect(uv.at(-1)).toEqual(["pip", "compile", "--quiet", "--no-build", "--generate-hashes", ...common]);
+  });
+
+  it("checks every requirement again before uv's stdin, --with too: a line break would add a line of uv's own", () => {
+    const docker = timeDocker();
+    const spec = pypi("uvx", "--with", "anyio", "mcp-server-time");
+    for (const bad of ["anyio\n--index-url https://evil.example/simple", "anyio\r", "./local"]) {
+      expect(() => resolvePypi({ ...spec, with: ["httpx", bad] }, { log: () => {}, runner: docker.runner }), JSON.stringify(bad)).toThrow(/^not a PyPI requirement: /);
+    }
+    // Refused before uv is asked anything.
+    expect(docker.compiles()).toEqual([]);
   });
 
   it("gives the resolve's uv, which runs in UTC, the instant a date of --exclude-newer stands for on the host, as uv reads it there", () => {
@@ -211,6 +238,30 @@ describe("resolving a PyPI server", () => {
     expect(docker.compiles().map((call) => flag(call.args, "--python-version"))).toEqual(["3.12"]);
   });
 
+  it("keeps uv's reason alone: what follows its No solution line, without uv's layout, or says uv gave none", () => {
+    const refused = (stderr: string) => {
+      const docker = fakeDocker({ roots: { "3.13": ok("x==1\n"), "3.15": ok("x==1\n") }, lock: () => noSolution(stderr) });
+      try {
+        resolvePypi(pypi("uvx", "x"), { log: () => {}, runner: docker.runner });
+      } catch (error) {
+        return (error as Error).message.replace(/^.*the cage never builds a package from source: /, "");
+      }
+      throw new Error("not refused");
+    };
+    // A warning before it is not the reason; nor are uv's cause: and its tree, at the start of a line or after a space.
+    expect(refused("warning: an old cache\nerror: No solution found when resolving dependencies\ncause: Because x==1 has no usable wheels, nope.\n")).toBe("Because x==1 has no usable wheels, nope.");
+    expect(refused("error: No solution found when resolving dependencies\n  ╰─▶ Because a\n      ╰─▶ and b\n")).toBe("Because a and b");
+    expect(refused("error: No solution found when resolving dependencies\n")).toBe("uv gives no reason");
+    // Long reasons are cut at 2000 characters, and one that long is not.
+    expect(refused(`error: No solution found when resolving dependencies\n  cause: ${"y".repeat(2000)}\n`)).toBe("y".repeat(2000));
+    expect(refused(`error: No solution found when resolving dependencies\n  cause: ${"y".repeat(2001)}\n`)).toBe(`${"y".repeat(2000)}...`);
+  });
+
+  it("gives the first four lines of what uv printed when it failed otherwise, on one line", () => {
+    const docker = fakeDocker({ roots: { "3.13": { status: 2, stdout: "", stderr: "\nerror: one\n  two\nthree\r\nfour\nfive\nsix\n" } } });
+    expect(() => resolvePypi(pypi("uvx", "mcp-server-time"), { log: () => {}, runner: docker.runner })).toThrow(/^the resolve of mcp-server-time failed \(exit code 2\): error: one two three four$/);
+  });
+
   it("spells out what a terminal would act on in uv's reason", () => {
     const docker = fakeDocker({ roots: { "3.13": ok("x==1\n"), "3.15": ok("x==1\n") }, lock: () => noSolution("error: No solution found when resolving dependencies\n  cause: \u001b[2Jgone‮\n") });
     expect(() => resolvePypi(pypi("uvx", "x"), { log: () => {}, runner: docker.runner })).toThrow(/: \[U\+001B\]\[2Jgone\[U\+202E\]$/);
@@ -231,9 +282,16 @@ describe("resolving a PyPI server", () => {
     ["a range", "mcp-server-time>=2026\n"],
     ["a URL", "mcp-server-time @ https://example.com/x.whl\n"],
     ["nothing", ""],
+    ["an indented pin", "  mcp-server-time==2026.11.4\n"],
+    ["more after the pin", "mcp-server-time==2026.11.4 extra\n"],
   ])("refuses a step 1 answer with %s", (_what, stdout) => {
     const docker = fakeDocker({ roots: { "3.13": ok(stdout), "3.15": ok(stdout) }, lock: () => ok(TIME_LOCK) });
     expect(() => resolvePypi(pypi("uvx", "mcp-server-time"), { log: () => {}, runner: docker.runner })).toThrow("the resolve of mcp-server-time printed something other than the version of mcp-server-time");
+  });
+
+  it("takes a step 1 answer with comments around its one pin", () => {
+    const docker = fakeDocker({ roots: { "3.13": ok("# via uv\n  # indented\n   \nmcp-server-time==2026.11.4\n\n"), "3.15": ok("mcp-server-time==2026.11.4\n") }, lock: () => ok(TIME_LOCK) });
+    expect(resolvePypi(pypi("uvx", "mcp-server-time"), { log: () => {}, runner: docker.runner }).version).toBe("2026.11.4");
   });
 
   it("refuses a lock that pins the server to another version than step 1 chose", () => {
@@ -250,6 +308,8 @@ describe("the lock uv writes", () => {
     expect(() => checkLock(`# a comment\n\n${TIME_LOCK}    # an indented comment\n\n`, root)).not.toThrow();
     // uv's normal form, or a name written otherwise: the same package.
     expect(() => checkLock(lockOf([["MCP_Server.Time", "2026.11.4"]]), root)).not.toThrow();
+    expect(() => checkLock(lockOf([["mcp__server-.time", "2026.11.4"]]), root)).not.toThrow();
+    expect(() => checkLock(`   \n${TIME_LOCK}\t\n`.replace("\t", " "), root)).not.toThrow();
   });
 
   it.each([
@@ -267,6 +327,8 @@ describe("the lock uv writes", () => {
     ["a range", `${TIME_LOCK}tzdata>=2026 \\\n    --hash=sha256:${hex(9)}\n`, "has line 10, which is not a package pinned with ==, followed by its hashes"],
     ["a wildcard", `${TIME_LOCK}rich==15.* \\\n    --hash=sha256:${hex(9)}\n`, "has line 10, which is not a package pinned with ==, followed by its hashes"],
     ["a marker", `${TIME_LOCK}rich==15.0.0 ; python_version >= "3.8" \\\n    --hash=sha256:${hex(9)}\n`, "has line 10, which is not a package pinned with ==, followed by its hashes"],
+    ["two versions on a pin", `${TIME_LOCK}rich==15.0.0,<16 \\\n    --hash=sha256:${hex(9)}\n`, "has line 10, which is not a package pinned with ==, followed by its hashes"],
+    ["a version uv cannot read", `${TIME_LOCK}rich==15.0.0;x \\\n    --hash=sha256:${hex(9)}\n`, "has line 10, which is not a package pinned with ==, followed by its hashes"],
     ["extras on a pin", `${TIME_LOCK}rich[jupyter]==15.0.0 \\\n    --hash=sha256:${hex(9)}\n`, "has line 10, which is not a package pinned with ==, followed by its hashes"],
     ["a package twice", `${TIME_LOCK}tzdata==2025.1 \\\n    --hash=sha256:${hex(9)}\n`, "pins one package twice, at line 10"],
     ["a carriage return", TIME_LOCK.replace("\n", "\r\n"), "holds a control character"],
@@ -290,7 +352,7 @@ describe("the Python a PyPI server is resolved for", () => {
     const log: string[] = [];
     expect(resolvePypi(pypi("uvx", "mcp-server-time"), { log: (line) => log.push(line), runner: docker.runner }).python).toBe("3.13");
     expect(docker.compiles().map((call) => flag(call.args, "--python-version"))).toEqual(["3.13", "3.15", "3.13"]);
-    expect(log.join("\n")).not.toMatch(/Python 3\.1[45]/);
+    expect(log.join("\n")).not.toMatch(/Python 3\.1[45]|which needs it/);
   });
 
   it("is raised to 3.14 when the newest release needs it, and the log says so", () => {
@@ -417,6 +479,25 @@ describe("comparePypiVersions", () => {
   it("never takes a version it cannot read for the newest", () => {
     expect(comparePypiVersions("not-a-version", "0.0.1")).toBeLessThan(0);
     expect(comparePypiVersions("0.0.1", "not-a-version")).toBeGreaterThan(0);
+    // Two it cannot read are alike; a release of more than eight parts is one it cannot read.
+    expect(comparePypiVersions("x1.0", "1.0x")).toBe(0);
+    for (const unread of ["x1.0", "1.0x", "1..0", "1.0+", "1.0-", "1.0rc1.x", "1.0 ", "1!", "1.2.3.4.5.6.7.8.9"]) expect(comparePypiVersions(unread, "0.0.1"), unread).toBeLessThan(0);
+    expect(comparePypiVersions("1.2.3.4.5.6.7.8", "1.2.3.4.5.6.7.7")).toBeGreaterThan(0);
+  });
+
+  it("sorts every spelling of the parts of a version as PEP 440 does", () => {
+    // Each newer than the one before it.
+    const sorted = [
+      "1.0.dev0", "1.0.dev2", "1.0a0.dev1", "1.0a", "1.0a1", "1.0alpha2", "1.0b0", "1.0beta1", "1.0c1", "1.0rc2", "1.0pre3", "1.0preview4",
+      "1.0", "1.0.post0.dev1", "1.0.post", "1.0-1", "1.0.post2", "1.0.rev3", "1.0r4", "1.0.0.1", "1.0.1", "1.10", "1!0.1",
+    ];
+    for (let index = 1; index < sorted.length; index++) {
+      expect(comparePypiVersions(sorted[index]!, sorted[index - 1]!), `${sorted[index]} > ${sorted[index - 1]}`).toBeGreaterThan(0);
+      expect(comparePypiVersions(sorted[index - 1]!, sorted[index]!), `${sorted[index - 1]} < ${sorted[index]}`).toBeLessThan(0);
+    }
+    for (const [left, right] of [["1.0-post1", "1.0.post1"], ["1.0post1", "1.0_post_1"], ["1.0RC1", "1.0rc1"], ["1.0-dev1", "1.0.dev1"], ["1.0+abc.1", "1.0"], ["0!1.0", "1.0"], ["1.0a", "1.0a0"], ["1.0.post", "1.0.post0"]]) {
+      expect(comparePypiVersions(left!, right!), `${left} = ${right}`).toBe(0);
+    }
   });
 });
 
@@ -434,5 +515,43 @@ describe("the package uv's reason says ships no wheel", () => {
       ["uv gives no reason", undefined],
     ];
     for (const [reason, named] of table) expect(noWheel(reason), reason).toBe(named);
+  });
+});
+
+describe("the docker the resolve runs", () => {
+  // As on Windows, where docker.exe is looked for in the PATH alone (see dockerProgram): a script of
+  // shell builtins in its place, which says what it was given. Not on Windows, where it would not start.
+  it.skipIf(process.platform === "win32")("gives docker its arguments and the input, keeps what it prints, however long, in the allowlisted environment", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-real-docker-"));
+    const docker = join(dir, "docker.exe");
+    writeFileSync(
+      docker,
+      [
+        "#!/bin/sh",
+        'printf "args:%s\\n" "$*"',
+        'printf "secret:%s\\n" "${MCPCAGE_TEST_SECRET-unset}"',
+        'while IFS= read -r line; do printf "in:%s\\n" "$line"; done',
+        'if [ "$1" = big ]; then i=0; while [ $i -lt 2200 ]; do printf "%01000d\\n" 0; i=$((i + 1)); done; fi',
+        'printf "oops\\n" >&2',
+        'exit 3',
+        "",
+      ].join("\n"),
+    );
+    chmodSync(docker, 0o755);
+    vi.stubEnv("PATH", dir);
+    vi.stubEnv("MCPCAGE_TEST_SECRET", "from the entry");
+    try {
+      onWindows(() => {
+        expect(realDocker(["version", "--format", "x"])).toEqual({ status: 3, stdout: "args:version --format x\nsecret:unset\n", stderr: "oops\n" });
+        expect(realDocker(["run"], { input: "a\nb\n" }).stdout).toBe("args:run\nsecret:unset\nin:a\nin:b\n");
+        // More than the 1 MiB spawnSync keeps by default: a lock with every file of numpy and its kin.
+        expect(realDocker(["big"]).stdout.length).toBeGreaterThan(2_000_000);
+        expect(() => realDocker(["pull"], { stream: true, input: "x" })).toThrow("realDocker streams the output of a command without input only");
+        vi.stubEnv("PATH", join(dir, "nowhere"));
+        expect(() => realDocker(["version"])).toThrow("docker.exe not found in the PATH");
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
