@@ -356,7 +356,7 @@ function parseUvx(words: string[], platform: NodeJS.Platform, environment: UvEnv
   const tool = toolRequirement(from ?? target, from === undefined ? "<package>" : "--from");
   for (const requirement of withs) {
     // uv reads `pkg@1.0` in --with as a path, not as the version uvx's own package takes after @.
-    if (pypiRequirement(requirement) === undefined) throw new Error(`uvx --with: ${(outsidePyPI(requirement) || requirement.includes("@")) ? OUTSIDE_PYPI : NOT_A_REQUIREMENT}`);
+    if (uvxRequirement(requirement) === undefined) throw new Error(`uvx --with: ${(outsidePyPI(requirement) || requirement.includes("@")) ? OUTSIDE_PYPI : NOT_A_REQUIREMENT}`);
   }
   const flagPython = once.get("--python");
   if (flagPython !== undefined && !PYTHON_VERSION.test(flagPython)) throw new Error(`uvx --python: ${PYTHON_RANGE}`);
@@ -450,17 +450,27 @@ function toolRequirement(text: string, where: string): { requirement: string; na
   const refuse = (reason: string) => new Error(`uvx ${where}: ${reason}`);
   const at = text.indexOf("@");
   if (at === -1) {
-    const parsed = pypiRequirement(text);
+    const parsed = uvxRequirement(text);
     if (parsed === undefined) throw refuse(outsidePyPI(text) ? OUTSIDE_PYPI : NOT_A_REQUIREMENT);
     return { requirement: text, name: parsed.name };
   }
   const base = text.slice(0, at);
   const version = text.slice(at + 1);
-  const parsed = pypiRequirement(base);
+  const parsed = uvxRequirement(base);
   if (parsed === undefined || parsed.specifiers.length > 0 || /[ \t]/.test(base)) throw refuse(outsidePyPI(text) ? OUTSIDE_PYPI : NOT_A_REQUIREMENT);
   if (version === "latest") return { requirement: base, name: parsed.name };
   if (isVersion(version)) return { requirement: `${base}==${version}`, name: parsed.name };
   throw refuse(outsidePyPI(version) ? OUTSIDE_PYPI : AT_VERSION);
+}
+
+/**
+ * pypiRequirement, for a requirement uvx installs: never one with a control character, which the
+ * resolve refuses before it writes a requirement on uv's stdin, one per line (see checkedRequirement
+ * in pypi.ts). A tab, which PEP 508 and uv 0.13.7 read as a space, was taken here: `uvx "idna<tab>"`
+ * was the package idna, protect said it would start, and every start failed at the resolve.
+ */
+function uvxRequirement(text: string): ReturnType<typeof pypiRequirement> {
+  return /[\u0000-\u001f\u007f]/.test(text) ? undefined : pypiRequirement(text);
 }
 
 /**

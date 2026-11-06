@@ -305,6 +305,12 @@ describe("uvx command lines", () => {
       [[""], `uvx <package>: ${NOT_REQUIREMENT}`],
       [["--", "-x"], `uvx <package>: ${NOT_REQUIREMENT}`],
       [["-"], `uvx <package>: ${NOT_REQUIREMENT}`],
+      // uv 0.13.7 reads a tab as a space there, and the resolve refuses every control character before
+      // it writes a requirement on uv's stdin: read here, the line started nowhere.
+      [["mcp-server-time\t"], `uvx <package>: ${NOT_REQUIREMENT}`],
+      [["\tmcp-server-time>=1"], `uvx <package>: ${NOT_REQUIREMENT}`],
+      [["--from", "mcp-server-time\t==1.0", "x"], `uvx --from: ${NOT_REQUIREMENT}`],
+      [["--with", "anyio\t>=4", "mcp-server-time"], `uvx --with: ${NOT_REQUIREMENT}`],
     ];
     for (const [words, message] of refused) expect(() => uvx(...words), JSON.stringify(words)).toThrow(new Error(message));
   });
