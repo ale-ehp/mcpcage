@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { serverType } from "../src/config.js";
-import { cmdNpx, cmdRunner, imageRepository, isLocalPath, npxArgv, parseLaunch, serverIdFor, splitPackageSpec, type LaunchSpec } from "../src/launch.js";
+import { cmdNpx, cmdRunner, imageRepository, isLocalPath, npxArgv, parseLaunch, pypiRequirement, serverIdFor, splitPackageSpec, startsUv, toolRunArgs, type LaunchSpec, type PypiLaunch } from "../src/launch.js";
 
 /** `run` with the host's time zone set to `zone`, as TZ sets it for node and for uv. */
 function inZone<T>(zone: string, run: () => T): T {
@@ -27,6 +27,9 @@ describe("the server id", () => {
       [{ kind: "image", image: "docker.io/mcp/time:latest@sha256:abc", args: ["--tz", "UTC"] }, "docker-io-mcp-time-ffe1066f"],
       [{ kind: "host", command: "/usr/local/bin/uvx", args: ["mcp-server-time"] }, "uvx-82cf2188"],
       [{ kind: "npm", packageName: "", args: [] }, "local-0e7dc29e"],
+      // A PyPI server by its project, whatever the command after --from.
+      [parseLaunch(["uvx", "mcp-server-time"], undefined, "linux"), "mcp-server-time-8ede74b2"],
+      [parseLaunch(["uvx", "--from", "awslabs.aws-api-mcp-server", "aws-api-server", "--x"], undefined, "linux"), "awslabs-aws-api-mcp-server-a1b12344"],
     ];
     for (const [spec, id] of ids) expect(serverIdFor(spec), JSON.stringify(spec)).toBe(id);
   });
@@ -387,6 +390,80 @@ describe("uvx command lines", () => {
     inZone("Asia/Tokyo", () => {
       for (const value of ["2026-01-01T00:00:00Z", "2026-01-01T12:30:00+02:00", "30 days", "P3D"]) expect(uvx("--exclude-newer", value, "mcp-server-time"), value).toEqual(time({ resolution: { excludeNewer: value } }));
     });
+  });
+
+  it("takes each form of --exclude-newer uv 0.13.7 takes, and refuses an impossible date or time", () => {
+    const taken = [
+      "2024-02-29", "2026-12-31", "2026-01-01T23:59:59Z", "2026-01-01t00:00z", "2026-01-01T12:30:00.123456789+02:00", "2026-01-01T12:30-23:59",
+      "1 s", "2 sec", "3 secs", "4 second", "5 seconds", "6 min", "7 mins", "8 minute", "9 minutes", "10 h", "11 hr", "12 hrs", "13 hour", "14 hours",
+      "15 d", "16day", "17 days", "18 w", "19 wk", "20 week", "21 weeks", "99999 days ago", "P1W", "P2D", "P1W2D", "PT3H", "PT4M", "PT5S", "P1DT2H3M4S", "p3d",
+    ];
+    for (const value of taken) expect((uvx("--exclude-newer", value, "mcp-server-time") as PypiLaunch).resolution, value).toHaveProperty("excludeNewer");
+    const refused = [
+      "2026-02-29", "2026-04-31", "2026-00-10", "2026-01-00", "2026-01-01T24:00:00Z", "2026-01-01T23:60:00Z", "2026-01-01T23:59:60Z", "2026-01-01T12:00+24:00",
+      "2026-01-01T12:00+02:60", "x2026-01-01", "2026-01-01x", "123456 days", "1 dayz", "1 years", "P", "PT", "P1DT", "P123456D", "xP1D", "P1Dx", "1 day ago now",
+    ];
+    for (const value of refused) expect(() => uvx("--exclude-newer", value, "mcp-server-time"), value).toThrow(/^uvx --exclude-newer: give a date/);
+  });
+
+  it("splits a --with value at its commas as uv does: not inside brackets, nor before a version operator", () => {
+    const withs = (value: string) => (uvx("--with", value, "mcp-server-time") as { with: string[] }).with;
+    expect(withs("a[x,y],b")).toEqual(["a[x,y]", "b"]);
+    expect(withs("a[x],b[y]")).toEqual(["a[x]", "b[y]"]);
+    expect(withs("a>=1, <2,b")).toEqual(["a>=1, <2", "b"]);
+    expect(withs("a>=1,  !=1.5")).toEqual(["a>=1,  !=1.5"]);
+    expect(withs("a,  b ,c")).toEqual(["a", "b", "c"]);
+    expect(() => withs("a[x")).toThrow(/^uvx --with: not a PyPI requirement/);
+  });
+
+  it("takes extras and versions as PEP 508 and uv 0.13.7 write them, and refuses the ones uv refuses", () => {
+    const taken = ["a[ x , y ]==1", "a [x]", "a == 1 , != 1.5", "a==1.0+local", "a!=1.0+local", "a===1.0+local", "a==1!2.*", "a!=v1.2.*", "a~=1!2.0", "a~=V2.0rc1", "a>=1.0"];
+    for (const text of taken) expect(pypiRequirement(text), text).toBeDefined();
+    const refused = ["a[x", "a[x,]", "a[-x]", "a[x-]", "a>=1.0+local", "a~=1.0+local", "a~=1", "a~=1!2", "a>=1.*", "a==1*", "a==1.0,", "a==1.0 x", "a==", "a 1.0"];
+    for (const text of refused) expect(pypiRequirement(text), text).toBeUndefined();
+  });
+
+  it("ignores a variable of uv's set empty, as uv does, and reads UV_CONFIG_FILE as a settings file only from the user or a caged entry", () => {
+    const env = (variables: Record<string, string>, more: object = {}) => [{ where: "its env", variables, ...more }];
+    const read = (variables: Record<string, string>, more: object = {}) => parseLaunch(["uvx", "mcp-server-time"], undefined, "linux", env(variables, more));
+    expect(read({ UV_PYTHON: "", UV_INDEX_URL: "", UV_EXCLUDE_NEWER: "", UV_RESOLUTION: "" })).toEqual(time());
+    expect(() => read({ UV_CONFIG_FILE: "/home/me/uv.toml" })).toThrow("its env sets UV_CONFIG_FILE: uvx reads a file on your machine there, which the cage does not read");
+    expect(read({ UV_CONFIG_FILE: "/home/me/uv.toml" }, { caged: true })).toEqual(time());
+    expect(read({ UV_CONFIG_FILE: "/home/me/uv.toml" }, { own: true })).toEqual(time());
+  });
+
+  it("takes --color auto, always and never, which only tune uv's output", () => {
+    for (const value of ["auto", "always", "never"]) expect(uvx("--color", value, "mcp-server-time"), value).toEqual(time());
+  });
+
+  it("reads uv tool run only at the start of uv's line, with nothing of uv's own before it", () => {
+    expect(() => parseLaunch(["uv", "-q", "tool", "run", "mcp-server-time"], undefined, "linux")).toThrow(/^uv -q before tool run: /);
+    expect(() => parseLaunch(["uv", "--directory=/x", "tool", "uvx", "mcp-server-time"], undefined, "linux")).toThrow(/^uv --directory before tool run: /);
+    // Another uv command, or a word that only looks like a flag of uv's elsewhere: a host command.
+    for (const argv of [["uv", "run", "-q", "tool", "run", "x"], ["uv", "-q", "pip", "install", "x"], ["uvicorn", "-q", "tool", "run", "x"]]) {
+      expect(parseLaunch(argv, undefined, "linux"), argv.join(" ")).toEqual({ kind: "host", command: argv[0], args: argv.slice(1) });
+    }
+    expect(toolRunArgs([5, "mcp-server-time"], "linux")).toBeUndefined();
+    expect(toolRunArgs(["cmd", "/c", "npx", "-y", "x"], "win32")).toBeUndefined();
+    expect(toolRunArgs(["cmd", "/c", "uvx", "mcp-server-time"], "win32")).toEqual(["mcp-server-time"]);
+  });
+
+  it("knows a command line that starts uv: uvx, uv tool run, or uv itself with anything after it", () => {
+    for (const argv of [["uvx", "x"], ["uv", "pip", "install", "x"], ["/opt/uv/bin/uv"], ["uv", "tool", "run", "x"]]) expect(startsUv(argv, "linux"), argv.join(" ")).toBe(true);
+    for (const argv of [["npx", "x"], ["uvicorn", "app"], ["uv.exe.old"], [5], []]) expect(startsUv(argv as unknown[], "linux"), JSON.stringify(argv)).toBe(false);
+  });
+
+  it("refuses a Windows script after --from, and drops only a final .exe there", () => {
+    const from = (command: string) => (parseLaunch(["uvx", "--from", "mcp-server-time", command], undefined, "win32") as { command: string }).command;
+    expect(from("server.EXE")).toBe("server");
+    expect(from("tool.exec")).toBe("tool.exec");
+    expect(from("server.cmdline")).toBe("server.cmdline");
+    expect(() => from("server.Cmd")).toThrow(/^uvx --from: the command is a Windows script/);
+  });
+
+  it("says a requirement is from outside PyPI only when uv would read it so", () => {
+    for (const text of ["agit+x", "afile:x", "pkg:x"]) expect(() => uvx(text), text).toThrow(new Error(`uvx <package>: ${NOT_REQUIREMENT}`));
+    for (const text of ["git+x", "file:x", "C:x", " ./x"]) expect(() => uvx(text), text).toThrow(new Error(`uvx <package>: ${OUTSIDE}`));
   });
 
   it("refuses a flag that misses its value or is given twice, as uv does", () => {
