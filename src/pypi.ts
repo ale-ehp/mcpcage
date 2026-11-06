@@ -293,8 +293,8 @@ function rootPin(output: string, project: string): Pin {
  * index URL, an option, a path or a URL of a package) would change where the build takes its code
  * from. Nothing of the line is quoted, only where it is.
  */
-export function checkLock(lock: string, root: Pin): void {
-  const refuse = (problem: string) => new Error(`the lock uv wrote for ${root.name} ${problem}`);
+export function checkLock(lock: string, root: Pin, what = `the lock uv wrote for ${root.name}`): void {
+  const refuse = (problem: string) => new Error(`${what} ${problem}`);
   if (/[\u0000-\u0009\u000b-\u001f\u007f]/.test(lock)) throw refuse("holds a control character");
   const lines = lock.split("\n");
   const seen = new Set<string>();
@@ -450,6 +450,13 @@ function sameInstall(left: PypiLaunch, right: PypiLaunch): boolean {
  * The lock kept for a server, when it can be reused for `spec` on `platform` (see preparePypiImage):
  * the server's record is for the same install, the same platform, and names the lock on disk by its
  * sha256. Undefined when it cannot, and the server is resolved again.
+ *
+ * A lock that can be reused is checked again as a fresh one is (see checkLock), against the spec's
+ * package and the recorded version: the lock and the sha256 that names it are both in the store, so
+ * the sha256 says only that the two agree, and the build fed `uv pip sync` any lock that came with
+ * a record to match, an index URL or a package's URL among its lines. mcpcage never keeps a lock that
+ * fails the check, so one that does was written by something else: it is refused, not resolved again
+ * over, and --rebuild (which skips this) replaces it.
  */
 function keptLock(serverId: string, spec: PypiLaunch, platform: string): { packageName: string; version: string; python: string; lock: string } | undefined {
   const dir = serverDir(serverId);
@@ -459,6 +466,15 @@ function keptLock(serverId: string, spec: PypiLaunch, platform: string): { packa
   if (previous?.spec.kind !== "pypi" || !sameInstall(previous.spec, spec) || previous.platform !== platform) return undefined;
   if (previous.python === undefined || previous.packageName === undefined || previous.version === undefined) return undefined;
   if (kept === undefined || sha256(kept) !== previous.lockfileSha256) return undefined;
+  // The record is read from the store too: its version is spelled out where the message quotes it.
+  const what = `the lock kept for ${spec.project} in ${lockfile}`;
+  const refused = (problem: string) => new Error(terminalSafe(`${problem}; mcpcage never keeps such a lock, and --rebuild resolves the server again`));
+  if (previous.packageName !== spec.project) throw refused(`${what} is recorded for another package than ${spec.project}`);
+  try {
+    checkLock(kept, { name: spec.project, version: previous.version }, what);
+  } catch (error) {
+    throw refused((error as Error).message);
+  }
   return { packageName: previous.packageName, version: previous.version, python: previous.python, lock: kept };
 }
 

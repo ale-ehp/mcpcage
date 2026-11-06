@@ -355,6 +355,43 @@ describe("building a PyPI server's image", () => {
     expect(engine.resolves()).toBeGreaterThan(0);
   });
 
+  it.each([
+    ["an index URL", (lock: string) => `--index-url http://127.0.0.1:9/simple\n${lock}`, /has line 1, which is not a package pinned with ==/],
+    ["a package's URL", (lock: string) => `${lock}evil @ http://127.0.0.1:9/evil.whl \\\n    --hash=sha256:${hex(3)}\n`, /has line 5, which is not a package pinned with ==/],
+    ["a pin without its hash", (lock: string) => `${lock}evil==1.0\n`, /has line 5, which is not a package pinned with ==/],
+    ["the server at another version than recorded", () => lockOf("0.1"), /pins mcp-server-time to another version than 2026\.11\.4/],
+  ])("refuses a kept lock with %s, even when the record names it by its sha256", (_what, tamper, problem) => {
+    // The lock and the sha256 that names it are both in the store: something that writes one can
+    // write the other, and a lock reused so was never checked again.
+    const engine = fakeEngine({ arch: "arm64", version: "2026.11.4" });
+    const first = prepare(engine, pypi("uvx", "mcp-server-time"));
+    const lock = tamper(readFileSync(join(home, "servers", "time", "requirements.lock"), "utf8"));
+    writeFileSync(join(home, "servers", "time", "requirements.lock"), lock);
+    writeFileSync(join(home, "servers", "time", "server.json"), JSON.stringify({ ...first, lockfileSha256: sha256(lock) }));
+    engine.images.clear();
+    engine.reset();
+    const refusal = new RegExp(`^the lock kept for mcp-server-time in .*requirements\\.lock ${problem.source}.*; mcpcage never keeps such a lock, and --rebuild resolves the server again$`);
+    expect(() => preparePypiImage(options(pypi("uvx", "mcp-server-time")), engine.runner)).toThrow(refusal);
+    expect(engine.builds()).toEqual([]);
+    expect(checkPypi("time", pypi("uvx", "mcp-server-time"), { log: () => {}, runner: engine.runner })).toEqual({ failed: expect.stringMatching(refusal) });
+    expect(engine.builds()).toEqual([]);
+    // --rebuild does not read it: the server is resolved again, and the new lock replaces it.
+    const rebuilt = prepare(engine, pypi("uvx", "mcp-server-time"), { rebuild: true });
+    expect(readFileSync(join(home, "servers", "time", "requirements.lock"), "utf8")).toBe(lockOf("2026.11.4"));
+    expect(rebuilt.lockfileSha256).toBe(sha256(lockOf("2026.11.4")));
+  });
+
+  it("refuses a kept lock whose record names another package, and spells out what the record holds", () => {
+    const engine = fakeEngine({ arch: "arm64", version: "2026.11.4" });
+    const first = prepare(engine, pypi("uvx", "mcp-server-time"));
+    writeFileSync(join(home, "servers", "time", "server.json"), JSON.stringify({ ...first, packageName: "tzdata", version: "2026.2" }));
+    engine.reset();
+    expect(() => preparePypiImage(options(pypi("uvx", "mcp-server-time")), engine.runner)).toThrow(/^the lock kept for mcp-server-time in .* is recorded for another package than mcp-server-time; /);
+    writeFileSync(join(home, "servers", "time", "server.json"), JSON.stringify({ ...first, version: "9\u001b[2J" }));
+    expect(() => preparePypiImage(options(pypi("uvx", "mcp-server-time")), engine.runner)).toThrow(/another version than 9\[U\+001B\]\[2J; /);
+    expect(engine.builds()).toEqual([]);
+  });
+
   it("builds again from the same lock, without resolving, when the image is gone", () => {
     const engine = fakeEngine({ arch: "arm64", version: "2026.11.4" });
     const first = prepare(engine, pypi("uvx", "mcp-server-time"));
