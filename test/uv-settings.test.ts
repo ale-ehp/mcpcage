@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { entryUvSettingsReason, namesIndex, uvConfigFiles, uvSettingsReason } from "../src/uv-settings.js";
+import { entryUvSettingsReason, namesIndex, settingThatStops, uvConfigFiles, uvSettingsReason } from "../src/uv-settings.js";
 
 describe("the scan of a uv.toml for a package index", () => {
   it("finds an [[index]] table and each key that chooses where packages come from, under any table", () => {
@@ -65,6 +65,56 @@ describe("the scan of a uv.toml for a package index", () => {
     for (const text of clean) expect(namesIndex(text), text).toBe(false);
     // A false positive only leaves a server uncaged, with the reason: this one is counted.
     expect(namesIndex("no-index = false")).toBe(true);
+  });
+});
+
+describe("the scan of a uv.toml for what else uvx installs otherwise", () => {
+  const index = "name a package index, and the cage builds from PyPI only";
+  const versions = (key: string) => `set ${key}: uvx installs other versions there than the cage builds`;
+  const source = (key: string) => `set ${key}: uvx builds packages from source there, and the cage installs PyPI wheels only`;
+
+  it("names each key that changes what uvx installs, under any table and as a table, and the index as before", () => {
+    // Each run with `uv tool run` 0.13.7 in its image: resolution = "lowest" installed idna 2.0 for
+    // idna>=2 (3.20 without it), exclude-newer and exclude-newer-package = { idna = <2020> } idna 2.8,
+    // prerelease = "allow" httpx 1.0.dev6 (0.28.1 without it), a [[dependency-metadata]] entry giving
+    // idna 3.10 requires-dist six installed six, and no-binary, no-binary-package = ["idna"] chose
+    // idna-3.10.tar.gz over its wheel.
+    const table: Array<[string, string]> = [
+      ['resolution = "lowest"', "set resolution: uvx chooses other versions there than the newest, which the cage installs"],
+      ['exclude-newer = "2020-01-01T00:00:00Z"', versions("exclude-newer")],
+      ['exclude-newer-package = { idna = "2020-01-01T00:00:00Z" }', versions("exclude-newer-package")],
+      ['[exclude-newer-package]\nidna = "2020-01-01T00:00:00Z"', versions("exclude-newer-package")],
+      ['prerelease = "allow"', versions("prerelease")],
+      ['[[dependency-metadata]]\nname = "idna"\nversion = "3.10"\nrequires-dist = ["six"]', "set dependency-metadata: uvx installs other dependencies there than the cage builds"],
+      ['dependency-metadata = [{ name = "idna", version = "3.10", requires-dist = ["six"] }]', "set dependency-metadata: uvx installs other dependencies there than the cage builds"],
+      ["no-binary = true", source("no-binary")],
+      ['no-binary-package = ["idna"]', source("no-binary-package")],
+      ['"no\\u002Dbinary" = true', source("no-binary")],
+      ['pip = { no-binary = ["idna"] }', source("no-binary")],
+      ['[[index]]\nurl = "https://pypi.corp.example/simple"', index],
+      ['no-cache = true\nindex-url = "https://pypi.corp.example/simple"', index],
+    ];
+    for (const [text, says] of table) expect(settingThatStops(text), text).toBe(says);
+    // The first one the file sets.
+    expect(settingThatStops('resolution = "lowest"\nindex-url = "x"')).toBe("set resolution: uvx chooses other versions there than the newest, which the cage installs");
+    // A false positive only leaves a server uncaged, with the reason: uv's defaults are counted too.
+    expect(settingThatStops('resolution = "highest"')).toBe("set resolution: uvx chooses other versions there than the newest, which the cage installs");
+  });
+
+  it("skips comments, values and other keys", () => {
+    const clean = ["", "# resolution = 'lowest'", 'cache-dir = "/tmp/exclude-newer = x"', "no-build = true", "python-preference = 'managed'", "binary = 1", "no-binary-packages = 1", "[tool.resolution-x]"];
+    for (const text of clean) expect(settingThatStops(text), text).toBeUndefined();
+  });
+
+  it.skipIf(process.platform === "win32")("gives the reason with the file, the user's and the one an entry's variable points to", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-uv-keys-"));
+    const home = join(top, "home");
+    mkdirSync(join(home, ".config", "uv"), { recursive: true });
+    writeFileSync(join(home, ".config", "uv", "uv.toml"), 'exclude-newer = "2020-01-01T00:00:00Z"\n');
+    expect(uvSettingsReason({ platform: process.platform, env: {}, home })).toBe(`your uv settings (~/.config/uv/uv.toml) ${versions("exclude-newer")}`);
+    expect(entryUvSettingsReason([{ where: "its env", variables: { HOME: home } }], process.platform, top)).toBe(
+      `its env sets HOME, so uvx reads the uv settings in ~/home/.config/uv/uv.toml, which ${versions("exclude-newer")}`,
+    );
   });
 });
 

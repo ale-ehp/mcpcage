@@ -128,36 +128,82 @@ function variableIn(env: Readonly<Record<string, unknown>>, name: string, platfo
  * --torch-backend, which the cage refuses.
  */
 const INDEX_KEYS = ["index", "index-url", "extra-index-url", "default-index", "find-links", "no-index", "index-strategy", "keyring-provider", "torch-backend"];
-const INDEX_KEY = new RegExp(`(?:^|[\\s{,.])(?:${INDEX_KEYS.join("|")})\\s*=`);
-const INDEX_TABLE = /^\s*\[{1,2}\s*(?:[A-Za-z0-9_-]+\s*\.\s*)*index\s*\]{1,2}/;
 
 /**
- * Whether the text of a uv.toml names a package index: a line that opens an [[index]] table, or sets
- * one of INDEX_KEYS, under any table and as a dotted or quoted key too. Strings are read first, so
- * that a # or a key's name inside a value is neither a comment nor a key; a quoted key keeps its
- * name, its escapes decoded as uv decodes them (see unescaped); what follows a # outside a string is
- * a comment. `no-index = false` and the keys of [pip], which uvx does not read, count too: a false
- * positive leaves a server uncaged, with the reason.
+ * The other keys of uv.toml that change what uvx installs, with what uvx does with each, as their
+ * variables and flags do (see UV_REFUSED and UVX_FLAGS in launch.ts): the cage resolves without the
+ * user's settings, so an entry is not caged while they set one. Each run with `uv tool run` 0.13.7 in
+ * its image: resolution = "lowest" installed idna 2.0 for idna>=2 (3.20 without it); exclude-newer,
+ * and exclude-newer-package for idna, of 2020-01-01 idna 2.8; prerelease = "allow" httpx 1.0.dev6
+ * (0.28.1 without it); a [[dependency-metadata]] entry giving idna 3.10 requires-dist six installed
+ * six with it; no-binary = true, and no-binary-package = ["idna"], chose idna-3.10.tar.gz over its
+ * wheel. A value that is uv's default (resolution = "highest") counts too: a false positive leaves a
+ * server uncaged, with the reason.
  */
-export function namesIndex(text: string): boolean {
-  for (const raw of text.split(/\r?\n/)) {
-    let line = "";
-    for (let at = 0; at < raw.length; at++) {
-      const character = raw[at]!;
-      if (character === "#") break;
-      if (character !== '"' && character !== "'") {
-        line += character;
-        continue;
+const OTHER_VERSIONS = "uvx installs other versions there than the cage builds";
+const FROM_SOURCE = "uvx builds packages from source there, and the cage installs PyPI wheels only";
+const INSTALL_KEYS: ReadonlyMap<string, string> = new Map([
+  ["resolution", "uvx chooses other versions there than the newest, which the cage installs"],
+  ["prerelease", OTHER_VERSIONS],
+  ["exclude-newer", OTHER_VERSIONS],
+  ["exclude-newer-package", OTHER_VERSIONS],
+  ["dependency-metadata", "uvx installs other dependencies there than the cage builds"],
+  ["no-binary", FROM_SOURCE],
+  ["no-binary-package", FROM_SOURCE],
+]);
+
+/**
+ * A scan of the text of a uv.toml for the first of `keys` it sets, or opens as a table ([[index]],
+ * [[dependency-metadata]], [exclude-newer-package]), under any table and as a dotted or quoted key
+ * too. Strings are read first, so that a # or a key's name inside a value is neither a comment nor a
+ * key; a quoted key keeps its name, its escapes decoded as uv decodes them (see unescaped); what
+ * follows a # outside a string is a comment. Keys of [pip], which uvx does not read, count too: a
+ * false positive leaves a server uncaged, with the reason.
+ */
+function scanFor(keys: readonly string[]): (text: string) => string | undefined {
+  const names = keys.join("|");
+  const key = new RegExp(`(?:^|[\\s{,.])(${names})\\s*=`);
+  const table = new RegExp(`^\\s*\\[{1,2}\\s*(?:[A-Za-z0-9_-]+\\s*\\.\\s*)*(${names})\\s*\\]{1,2}`);
+  return (text) => {
+    for (const raw of text.split(/\r?\n/)) {
+      let line = "";
+      for (let at = 0; at < raw.length; at++) {
+        const character = raw[at]!;
+        if (character === "#") break;
+        if (character !== '"' && character !== "'") {
+          line += character;
+          continue;
+        }
+        let end = at + 1;
+        while (end < raw.length && raw[end] !== character) end += character === '"' && raw[end] === "\\" ? 2 : 1;
+        const inner = character === '"' ? unescaped(raw.slice(at + 1, end)) : raw.slice(at + 1, end);
+        line += keys.includes(inner) ? inner : "_";
+        at = end;
       }
-      let end = at + 1;
-      while (end < raw.length && raw[end] !== character) end += character === '"' && raw[end] === "\\" ? 2 : 1;
-      const inner = character === '"' ? unescaped(raw.slice(at + 1, end)) : raw.slice(at + 1, end);
-      line += INDEX_KEYS.includes(inner) ? inner : "_";
-      at = end;
+      const found = table.exec(line) ?? key.exec(line);
+      if (found !== null) return found[1];
     }
-    if (INDEX_TABLE.test(line) || INDEX_KEY.test(line)) return true;
-  }
-  return false;
+    return undefined;
+  };
+}
+
+const indexKeyIn = scanFor(INDEX_KEYS);
+const stoppingKeyIn = scanFor([...INDEX_KEYS, ...INSTALL_KEYS.keys()]);
+
+/** Whether the text of a uv.toml names a package index: an [[index]] table, or one of INDEX_KEYS (see scanFor). `no-index = false` counts too. */
+export function namesIndex(text: string): boolean {
+  return indexKeyIn(text) !== undefined;
+}
+
+/**
+ * What the text of a uv.toml sets that keeps the cage from building what uvx installs, in words that
+ * follow the file's name: that it names a package index, or the first key of INSTALL_KEYS it sets and
+ * what uvx does with it. Undefined when it sets none.
+ */
+export function settingThatStops(text: string): string | undefined {
+  const key = stoppingKeyIn(text);
+  if (key === undefined) return undefined;
+  return INDEX_KEYS.includes(key) ? "name a package index, and the cage builds from PyPI only" : `set ${key}: ${INSTALL_KEYS.get(key)!}`;
 }
 
 /** The one-letter escapes of a TOML basic string, TOML 1.1's \e among them. */
@@ -189,7 +235,7 @@ export function uvSettingsReason(places: UvPlaces = uvPlacesHere()): string | un
     const found = readSettings(file);
     const what = `your uv settings (${shown(file, places.home, places.platform)})`;
     if (found === "unreadable") return `${what} could not be read, so whether they name a package index is unknown, and the cage builds from PyPI only`;
-    if (found === "index") return `${what} name a package index, and the cage builds from PyPI only`;
+    if (found !== undefined) return `${what} ${found.says}`;
   }
   return undefined;
 }
@@ -214,7 +260,7 @@ export function entryUvSettingsReason(environment: UvEnvironment, platform: Node
         const found = readSettings(file);
         const what = `${layer.where} sets ${variable.name}, so uvx reads the uv settings in ${shown(file, home, platform)}`;
         if (found === "unreadable") return `${what}, which could not be read: whether they name a package index is unknown, and the cage builds from PyPI only`;
-        if (found === "index") return `${what}, which name a package index, and the cage builds from PyPI only`;
+        if (found !== undefined) return `${what}, which ${found.says}`;
       }
     }
   }
@@ -222,11 +268,11 @@ export function entryUvSettingsReason(environment: UvEnvironment, platform: Node
 }
 
 /**
- * What a uv.toml says for the cage: "index" when it names a package index, "unreadable" when it is
- * there and could not be read (too large, not a regular file, not readable), so its settings are
- * unknown; undefined when it is not there or names none.
+ * What a uv.toml sets that stops the cage (see settingThatStops), "unreadable" when it is there and
+ * could not be read (too large, not a regular file, not readable), so its settings are unknown;
+ * undefined when it is not there or sets nothing of the kind.
  */
-function readSettings(file: string): "index" | "unreadable" | undefined {
+function readSettings(file: string): { says: string } | "unreadable" | undefined {
   let text: string;
   try {
     text = readConfigFile(file).toString("utf8");
@@ -234,7 +280,8 @@ function readSettings(file: string): "index" | "unreadable" | undefined {
     if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") return undefined;
     return "unreadable";
   }
-  return namesIndex(text) ? "index" : undefined;
+  const says = settingThatStops(text);
+  return says === undefined ? undefined : { says };
 }
 
 /** A file in the home directory written from ~, safe to print. */

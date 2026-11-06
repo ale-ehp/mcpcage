@@ -402,6 +402,8 @@ describe("uv's environment on a uvx line", () => {
     const table: Array<[string, string]> = [
       ...["UV_INDEX", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_FIND_LINKS", "UV_INDEX_STRATEGY", "UV_KEYRING_PROVIDER", "UV_TORCH_BACKEND"].map((name): [string, string] => [name, "uvx installs from another index there"]),
       ...["UV_CONFIG_FILE", "UV_CONSTRAINT", "UV_OVERRIDE", "UV_BUILD_CONSTRAINT", "UV_ENV_FILE"].map((name): [string, string] => [name, "uvx reads a file on your machine there, which the cage does not read"]),
+      // --directory's: uv 0.13.7 ran the server in that directory, and read a relative UV_CONFIG_FILE from it.
+      ...["UV_WORKING_DIR", "UV_WORKING_DIRECTORY"].map((name): [string, string] => [name, "uvx reads a file on your machine there, which the cage does not read"]),
       ["UV_NO_BINARY", "uvx builds packages from source there, and the cage installs PyPI wheels only"],
       ["UV_NO_BINARY_PACKAGE", "uvx builds packages from source there, and the cage installs PyPI wheels only"],
       ["UV_INSECURE_HOST", "uvx turns off certificate checks for a host there, which only another index or a proxy needs"],
@@ -429,6 +431,8 @@ describe("uv's environment on a uvx line", () => {
     expect(started({ uv_index_url: "https://x.example/simple" })).toEqual(time());
     const tuning = { UV_CACHE_DIR: "/tmp/c", UV_NO_PROGRESS: "1", UV_LINK_MODE: "copy", UV_PYTHON_PREFERENCE: "only-system", UV_NO_CACHE: "1", UV_OFFLINE: "1", UV_NO_CONFIG: "1", UV_RESOLUTION: "highest", UV_NO_BUILD_ISOLATION: "1" };
     expect(started(tuning)).toEqual(time());
+    // uv 0.13.7's tool run kept its directory with UV_PROJECT set, and read nothing in the one it named.
+    expect(started({ UV_PROJECT: "/tmp/project" })).toEqual(time());
     // No env at all, or one that is not an object, as configuration files are not type-checked.
     for (const env of [undefined, null, "UV_INDEX_URL=x", ["UV_INDEX_URL"], 3]) expect(started(env), JSON.stringify(env)).toEqual(time());
   });

@@ -178,14 +178,20 @@ export type UvEnvironment = ReadonlyArray<{ where: string; variables: unknown; o
  * wheels, or decide what it installs from a file on the host, with what uvx does with each: the cage
  * reproduces none of it, so a line started with one is refused, as the flag it stands for is
  * (UVX_FLAGS). The names are those `uv tool run --help` gives for its flags in uv 0.13.7. UV_NO_INDEX
- * is not one: uv 0.13.7 installed from PyPI with it set.
+ * is not one: uv 0.13.7 installed from PyPI with it set. UV_WORKING_DIR and UV_WORKING_DIRECTORY are
+ * --directory's: uv 0.13.7 ran the server in that directory, and read a relative UV_CONFIG_FILE
+ * from it, a file mcpcage looks for in the client's directory. UV_PROJECT, --project's, is not one:
+ * uv 0.13.7's tool run kept its directory with it set, and read no file from the one it named.
  */
 const UV_REFUSED: ReadonlyMap<string, string> = new Map([
   ...["UV_INDEX", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_FIND_LINKS", "UV_INDEX_STRATEGY", "UV_KEYRING_PROVIDER", "UV_TORCH_BACKEND"].map((name): [string, string] => [
     name,
     "uvx installs from another index there",
   ]),
-  ...["UV_CONFIG_FILE", "UV_CONSTRAINT", "UV_OVERRIDE", "UV_BUILD_CONSTRAINT", "UV_ENV_FILE"].map((name): [string, string] => [name, "uvx reads a file on your machine there, which the cage does not read"]),
+  ...["UV_CONFIG_FILE", "UV_CONSTRAINT", "UV_OVERRIDE", "UV_BUILD_CONSTRAINT", "UV_ENV_FILE", "UV_WORKING_DIR", "UV_WORKING_DIRECTORY"].map((name): [string, string] => [
+    name,
+    "uvx reads a file on your machine there, which the cage does not read",
+  ]),
   ...["UV_NO_BINARY", "UV_NO_BINARY_PACKAGE"].map((name): [string, string] => [name, "uvx builds packages from source there, and the cage installs PyPI wheels only"]),
   ["UV_INSECURE_HOST", "uvx turns off certificate checks for a host there, which only another index or a proxy needs"],
 ]);
