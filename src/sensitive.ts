@@ -36,6 +36,8 @@ export interface SensitiveOptions {
    * be outside the places below (see clientPlaces). Each counts with all it holds.
    */
   clients?: ReadonlyArray<{ path: string; what: string }>;
+  /** uv's and pipx's places where the environment moves them, outside the places below (see toolPlaces). Each counts with all it holds. */
+  tools?: ReadonlyArray<{ path: string; what: string }>;
 }
 
 /**
@@ -65,7 +67,39 @@ export function thisMachine(): SensitiveOptions {
     cage: cageHome(),
     path: process.env.PATH,
     clients: clientPlaces({ platform: process.platform, home, env: process.env }),
+    tools: toolPlaces({ platform: process.platform, env: process.env }),
   };
+}
+
+/**
+ * Where the environment moves uv's and pipx's places, away from those in IN_HOME: uv's cache under
+ * XDG_CACHE_HOME or UV_CACHE_DIR, its tools and Pythons under XDG_DATA_HOME, UV_TOOL_DIR or
+ * UV_PYTHON_INSTALL_DIR, its settings under XDG_CONFIG_HOME; on Windows under another LOCALAPPDATA or
+ * APPDATA; pipx's home under XDG_DATA_HOME or PIPX_HOME (https://docs.astral.sh/uv/reference/storage/).
+ * Absolute values only: uv takes a relative XDG directory for none.
+ */
+export function toolPlaces(options: { platform: NodeJS.Platform; env: NodeJS.ProcessEnv }): Array<{ path: string; what: string }> {
+  const windows = options.platform === "win32";
+  const syntax = windows ? win32 : posix;
+  const places: Array<{ path: string; what: string }> = [];
+  const add = (dir: string | undefined, what: string, ...below: string[]) => {
+    if (dir !== undefined && dir !== "" && syntax.isAbsolute(dir)) places.push({ path: syntax.join(dir, ...below), what });
+  };
+  const env = options.env;
+  add(env.UV_CACHE_DIR, UV_CACHE);
+  add(env.UV_TOOL_DIR, UV_DATA);
+  add(env.UV_PYTHON_INSTALL_DIR, UV_DATA);
+  add(env.PIPX_HOME, PIPX);
+  if (windows) {
+    add(env.LOCALAPPDATA, UV_CACHE, "uv");
+    add(env.APPDATA, UV_SETTINGS_AND_DATA, "uv");
+  } else {
+    add(env.XDG_CACHE_HOME, UV_CACHE, "uv");
+    add(env.XDG_DATA_HOME, UV_DATA, "uv");
+    add(env.XDG_CONFIG_HOME, UV_SETTINGS, "uv");
+    add(env.XDG_DATA_HOME, PIPX, "pipx");
+  }
+  return places;
 }
 
 /**
@@ -86,6 +120,13 @@ export function clientPlaces(options: { platform: NodeJS.Platform; home: string;
 const settingsOf = (client: string) => `the MCP servers and settings of ${client}`;
 const SHELL = "the commands your shell runs";
 const AT_LOGIN = "the programs that start at login";
+// What uv and pipx keep, which uvx and pipx run outside any cage, as npx runs what ~/.npm holds; and
+// uv's settings, which can name the index uvx installs from.
+const UV_CACHE = "the environments uvx runs, in uv's cache";
+const UV_DATA = "the tools and the Pythons uv installs";
+const UV_SETTINGS = "your uv settings, which choose where uvx takes its packages from";
+const UV_SETTINGS_AND_DATA = "your uv settings, and the tools and the Pythons uv installs";
+const PIPX = "the programs pipx installs and runs";
 
 /** Where other tools keep keys, tokens, sockets and what they run, from the home directory, in plain words. */
 const IN_HOME: ReadonlyArray<{ path: string; what: string; platform?: NodeJS.Platform }> = [
@@ -186,6 +227,16 @@ const IN_HOME: ReadonlyArray<{ path: string; what: string; platform?: NodeJS.Pla
   { path: "Library/pnpm", what: "the programs pnpm installs", platform: "darwin" },
   { path: "Applications", what: "your applications", platform: "darwin" },
   { path: ".local/share/pnpm", what: "the programs pnpm installs", platform: "linux" },
+  // uv keeps its cache, tools and settings in XDG's places on macOS too, in Windows' own on Windows;
+  // ~/.local/bin, where it puts uvx and the tools' commands, is above. pipx's home moved from
+  // ~/.local/pipx to ~/.local/share/pipx in pipx 1.2.
+  { path: ".cache/uv", what: UV_CACHE },
+  { path: ".local/share/uv", what: UV_DATA },
+  { path: ".config/uv", what: UV_SETTINGS },
+  { path: "AppData/Local/uv", what: UV_CACHE, platform: "win32" },
+  { path: "AppData/Roaming/uv", what: UV_SETTINGS_AND_DATA, platform: "win32" },
+  { path: ".local/share/pipx", what: PIPX },
+  { path: ".local/pipx", what: PIPX },
 
   // More Docker sockets, which start containers with any part of the host mounted.
   { path: ".rd", what: "the Docker socket of Rancher Desktop" },
@@ -318,10 +369,10 @@ export function sensitivePath(path: string, options: SensitiveOptions): string |
       places.push({ spellings, what: place.what, shown: shown(spellings[0]!) });
     }
   }
-  // Where the environment moves other clients' configurations. The home directory and what holds it
-  // count already as themselves: COPILOT_HOME set to the home directory makes its file count, not
-  // every path in the home directory.
-  for (const client of options.clients ?? []) {
+  // Where the environment moves other clients' configurations, and uv's and pipx's places. The home
+  // directory and what holds it count already as themselves: COPILOT_HOME set to the home directory
+  // makes its file count, not every path in the home directory.
+  for (const client of [...(options.clients ?? []), ...(options.tools ?? [])]) {
     if (!syntax.isAbsolute(client.path)) continue;
     const place = spell(client.path);
     if (place.some((spelling) => isDisk(spelling) || isHome(spelling) || holdsHomes(spelling))) continue;

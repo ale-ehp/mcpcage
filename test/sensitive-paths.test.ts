@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "n
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { accountHome, clientPlaces, sensitivePath } from "../src/sensitive.js";
+import { accountHome, clientPlaces, sensitivePath, toolPlaces } from "../src/sensitive.js";
 import { literal } from "./helpers.js";
 
 // An account the user database does not know, as in some containers: userInfo() throws.
@@ -182,6 +182,13 @@ describe("each place mcpcage will not mount", () => {
       ["Library/pnpm", "the programs pnpm installs", "darwin"],
       ["Applications", "your applications", "darwin"],
       [".local/share/pnpm", "the programs pnpm installs", "linux"],
+      [".cache/uv", "the environments uvx runs, in uv's cache", ""],
+      [".local/share/uv", "the tools and the Pythons uv installs", ""],
+      [".config/uv", "your uv settings, which choose where uvx takes its packages from", ""],
+      ["AppData/Local/uv", "the environments uvx runs, in uv's cache", "win32"],
+      ["AppData/Roaming/uv", "your uv settings, and the tools and the Pythons uv installs", "win32"],
+      [".local/share/pipx", "the programs pipx installs and runs", ""],
+      [".local/pipx", "the programs pipx installs and runs", ""],
       [".rd", "the Docker socket of Rancher Desktop", ""],
       [".lima", "the Docker socket of Lima", ""],
       ["Library/Containers/com.docker.docker", "the Docker socket of Docker Desktop", "darwin"],
@@ -244,5 +251,33 @@ describe("each place mcpcage will not mount", () => {
 describe("client configurations", () => {
   it("count a client's file alone when it keeps no directory of its own", () => {
     expect(clientPlaces({ platform: "linux", home: "/home/me", env: {} })).toContainEqual({ path: "/home/me/.claude.json", what: "the MCP servers and settings of Claude Code" });
+  });
+});
+
+describe("uv's and pipx's places where the environment moves them", () => {
+  it("count with all they hold, wherever XDG's directories, uv's and pipx's own variables, or Windows' APPDATA put them", () => {
+    const env = { XDG_CACHE_HOME: "/x/cache", XDG_DATA_HOME: "/x/data", XDG_CONFIG_HOME: "/x/config", UV_CACHE_DIR: "/c/uv", UV_TOOL_DIR: "/t/tools", UV_PYTHON_INSTALL_DIR: "/p/pythons", PIPX_HOME: "/h/pipx" };
+    const tools = toolPlaces({ platform: "linux", env });
+    expect(tools).toEqual([
+      { path: "/c/uv", what: "the environments uvx runs, in uv's cache" },
+      { path: "/t/tools", what: "the tools and the Pythons uv installs" },
+      { path: "/p/pythons", what: "the tools and the Pythons uv installs" },
+      { path: "/h/pipx", what: "the programs pipx installs and runs" },
+      { path: "/x/cache/uv", what: "the environments uvx runs, in uv's cache" },
+      { path: "/x/data/uv", what: "the tools and the Pythons uv installs" },
+      { path: "/x/config/uv", what: "your uv settings, which choose where uvx takes its packages from" },
+      { path: "/x/data/pipx", what: "the programs pipx installs and runs" },
+    ]);
+    expect(sensitivePath("/x/data/uv/tools/mcp-server-time", { ...linux, tools })).toBe("the tools and the Pythons uv installs in /x/data/uv");
+    expect(sensitivePath("/x/config", { ...linux, tools })).toBe("your uv settings, which choose where uvx takes its packages from in /x/config, which holds /x/config/uv");
+    expect(sensitivePath("/x/cache/pip", { ...linux, tools })).toBeUndefined();
+    // Relative directories name no place, and an empty variable none either.
+    expect(toolPlaces({ platform: "linux", env: { XDG_DATA_HOME: "data", UV_CACHE_DIR: "" } })).toEqual([]);
+    expect(toolPlaces({ platform: "win32", env: { LOCALAPPDATA: "D:\\Local", APPDATA: "D:\\Roaming", XDG_DATA_HOME: "D:\\xdg" } })).toEqual([
+      { path: "D:\\Local\\uv", what: "the environments uvx runs, in uv's cache" },
+      { path: "D:\\Roaming\\uv", what: "your uv settings, and the tools and the Pythons uv installs" },
+    ]);
+    // A place set to the home directory counts as the home directory, not as every path in it.
+    expect(sensitivePath("/home/me/projects/notes", { ...linux, tools: toolPlaces({ platform: "linux", env: { UV_CACHE_DIR: "/home/me" } }) })).toBeUndefined();
   });
 });

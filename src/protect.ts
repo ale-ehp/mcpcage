@@ -15,7 +15,7 @@ import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scrip
 import { cageHome } from "./paths.js";
 import { noWheel, PypiUnsolvable, type PypiResolver } from "./pypi.js";
 import { hostMount, NOT_ON_A_DRIVE, offDrive, type SandboxOptions } from "./sandbox.js";
-import { accountHome, clientPlaces, sensitivePath, thisMachine } from "./sensitive.js";
+import { accountHome, clientPlaces, sensitivePath, thisMachine, toolPlaces } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
 import { terminalSafe } from "./terminal.js";
 
@@ -1200,6 +1200,7 @@ export function broadAccessKind(path: string, home: string): string | undefined 
     cage: cageHome(),
     path: here ? process.env.PATH : undefined,
     clients: here ? clientPlaces({ platform, home, env: process.env }) : undefined,
+    tools: here ? toolPlaces({ platform, env: process.env }) : undefined,
   });
 }
 
