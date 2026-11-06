@@ -297,6 +297,31 @@ describe("uvx command lines", () => {
     for (const [words, message] of refused) expect(() => uvx(...words), JSON.stringify(words)).toThrow(new Error(message));
   });
 
+  it("refuses a package or --from that uvx reads as a Python interpreter to start, as uv 0.13.7 reads it, and keeps the names that only look like one", () => {
+    const INTERPRETER = "uvx reads it as a Python interpreter to start (python, python3.13, python@3.12, cpython, pypy, graalpy, pyodide), not as a PyPI package, and the cage starts PyPI packages only";
+    // Each started an interpreter in `uv tool run --offline <word>`, or said none was found (pypy...),
+    // or refused the version (python@latest, python@foo, python255 read as 2.55): never a package.
+    const interpreters = [
+      "python", "PYTHON", "Python3", "python3", "python3.13", "python313", "python3.13t", "python3.13+debug", "python3.13gil", "python3.13rc1", "python3.13a",
+      "python3.13.0", "python3.255", "python255", "pythonv3.13", "python@3.13", "python@latest", "python@foo", "python>=3.12", "python>=3.12,<3.14", "python ==3.13",
+      "python==3.13.*", "cpython", "CPython3.13", "pypy", "pypy3.10", "pypy310", "graalpy", "GraalPy", "pyodide", "Pyodide", "pyodide3.12",
+    ];
+    for (const word of interpreters) {
+      expect(() => uvx(word, "server.py"), word).toThrow(new Error(`uvx <package>: ${INTERPRETER}`));
+      expect(() => uvx("--from", word, "pip"), word).toThrow(new Error(`uvx --from: ${INTERPRETER}`));
+    }
+    expect(() => uvx("--with", "mcp", "python3.13", "/srv/server.py")).toThrow(new Error(`uvx <package>: ${INTERPRETER}`));
+    // pythonw is one on Windows only, where uv also reads it so.
+    for (const word of ["pythonw", "PythonW3.12", "pythonw@3.12"]) expect(() => parseLaunch(["uvx", word], undefined, "win32"), word).toThrow(new Error(`uvx <package>: ${INTERPRETER}`));
+    // Each was a package for uv 0.13.7: "Because <name> was not found in the cache".
+    const packages: Array<[string, string]> = [
+      ["python-dotenv", "python-dotenv"], ["python3-openid", "python3-openid"], ["python3foo", "python3foo"], ["python3rc1", "python3rc1"], ["python3.12.post1", "python3-12-post1"],
+      ["python3.13-1", "python3-13-1"], ["python3.13dev", "python3-13dev"], ["python3.13r1", "python3-13r1"], ["python3.256", "python3-256"], ["python3.13.1.1", "python3-13-1-1"],
+      ["python3_13", "python3-13"], ["python3.13[x]", "python3-13"], ["cpython-3.13", "cpython-3-13"], ["cp313", "cp313"], ["pp310", "pp310"], ["pythonw", "pythonw"], ["pythonw3.13", "pythonw3-13"],
+    ];
+    for (const [word, project] of packages) expect(uvx(word), word).toMatchObject({ kind: "pypi", project });
+  });
+
   it("takes a command after --from that is a plain file name", () => {
     const COMMAND = "uvx --from: the command after its package must be a plain file name (no / or \\, no leading -, no control characters, not . or ..)";
     for (const command of ["../bin/x", "bin/x", "a\\b", ".", "..", "-x", "x\u0000", "a\nb", ""]) {

@@ -125,6 +125,7 @@ const NOT_A_REQUIREMENT = "not a PyPI requirement: give a name, optional [extras
 const PYTHON_RANGE = "the cage runs CPython 3.10 to 3.15: give a version such as 3.12 or 3.12.4";
 const AT_VERSION = "after @, uvx takes only an exact version or latest, and reads anything else as a path or URL (for a range, write pkg>=1.2)";
 const PLAIN_COMMAND = "the command after its package must be a plain file name (no / or \\, no leading -, no control characters, not . or ..)";
+const INTERPRETER = "uvx reads it as a Python interpreter to start (python, python3.13, python@3.12, cpython, pypy, graalpy, pyodide), not as a PyPI package, and the cage starts PyPI packages only";
 
 /** What a flag of `uv tool run` does in the cage: read into the spec, ignored, or refused with the reason. */
 type UvxFlag = { value: boolean; read?: "from" | "with" | "python" | "prerelease" | "exclude-newer" | "color" | "link-mode" } | { refused: string };
@@ -329,6 +330,7 @@ function parseUvx(words: string[], platform: NodeJS.Platform, environment: UvEnv
   const target = words[index];
   const from = once.get("--from");
   if (target === undefined) throw new Error(from === undefined ? "uvx needs a package name" : "uvx --from needs a command after its package");
+  if (interpreterRequest(from ?? target, platform)) throw new Error(`uvx ${from === undefined ? "<package>" : "--from"}: ${INTERPRETER}`);
   const tool = toolRequirement(from ?? target, from === undefined ? "<package>" : "--from");
   for (const requirement of withs) {
     // uv reads `pkg@1.0` in --with as a path, not as the version uvx's own package takes after @.
@@ -353,6 +355,60 @@ function parseUvx(words: string[], platform: NodeJS.Platform, environment: UvEnv
     resolution: { ...(prerelease === undefined ? {} : { prerelease }), ...(excludeNewer === undefined ? {} : { excludeNewer }) },
     args: words.slice(index + 1),
   };
+}
+
+/**
+ * Whether uvx reads its package, or the value of --from, as a request for a Python interpreter, which
+ * it starts in place of a package's command: uv 0.13.7 tries that first (ToolRequest::parse,
+ * PythonRequest::try_from_tool_name), in ASCII lowercase. `python` alone, and `pythonw` on Windows,
+ * is the default interpreter; it, or an implementation's name (cpython, pypy, graalpy, pyodide), is
+ * one when followed by nothing (the implementation's), by `@` and anything (a version, or an error of
+ * uv's), or by a version request (see pythonVersionRequest). Read as PyPI projects, they had the cage
+ * build another program, or none: `uvx --with mcp python3.13 server.py` runs server.py with uv's
+ * Python, and mcpcage resolved the project python3-13; `uvx pyodide` starts uv's Pyodide, and
+ * mcpcage planned PyPI's pyodide 0.19.0a1, a wheel without a command.
+ */
+function interpreterRequest(text: string, platform: NodeJS.Platform): boolean {
+  const lower = text.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
+  const abstract = platform === "win32" ? ["python", "pythonw"] : ["python"];
+  if (abstract.includes(lower)) return true;
+  return [...abstract, "cpython", "pypy", "graalpy", "pyodide"].some((prefix) => {
+    if (!lower.startsWith(prefix)) return false;
+    const rest = lower.slice(prefix.length);
+    return rest === "" || rest.startsWith("@") || pythonVersionRequest(rest);
+  });
+}
+
+/** The variants uv 0.13.7 reads at the end of an interpreter's version: 3.13t, 3.13+debug. */
+const PYTHON_VARIANTS = new Set(["t", "freethreaded", "d", "debug", "td", "freethreaded+debug", "gil", "gil+debug"]);
+
+/** A PEP 440 version in lowercase, its release and its pre, post, dev and local parts apart. */
+const VERSION_PARTS = /^v?(?:[0-9]+!)?([0-9]+(?:\.[0-9]+)*)((?:[-_.]?(?:alpha|a|beta|b|preview|pre|c|rc)[-_.]?[0-9]*)?)((?:-[0-9]+|[-_.]?(?:post|rev|r)[-_.]?[0-9]*)?)((?:[-_.]?dev[-_.]?[0-9]*)?)((?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?)$/;
+
+/**
+ * Whether uv 0.13.7 reads the text after an interpreter's name as a version request
+ * (VersionRequest::from_str), a variant at its end set aside: a version of one to three parts, 313
+ * read as 3.13, each part 0 to 255, a pre-release with two parts at least, no post, dev or local part;
+ * else version specifiers (>=3.12,<3.14). For anything else uv reads the whole word as a package:
+ * python-dotenv, python3-openid, python3.13-1 (a post release), python3.256 each was one for uv 0.13.7.
+ */
+function pythonVersionRequest(text: string): boolean {
+  let version = text;
+  const digit = text.search(/[0-9][^0-9]*$/);
+  if (digit !== -1 && digit + 1 < text.length && PYTHON_VARIANTS.has(text.slice(digit + 1).replace(/^\+/, ""))) version = text.slice(0, digit + 1);
+  const parts = VERSION_PARTS.exec(trimmed(version, ASCII_SPACE));
+  if (parts === null) {
+    return version.split(",").every((specifier) => {
+      const match = /^[ \t]*(===|==|!=|<=|>=|~=|<|>)[ \t]*(.*?)[ \t]*$/.exec(specifier);
+      return match !== null && isSpecifierVersion(match[1]!, match[2]!);
+    });
+  }
+  const [, release, pre, post, dev, local] = parts;
+  if (post !== "" || dev !== "" || local !== "") return false;
+  let numbers = release!.split(".").map(Number);
+  const tag = String(numbers[0]);
+  if (numbers.length === 1 && /^[0-9]{2,}$/.test(tag)) numbers = [Number(tag[0]), Number(tag.slice(1))];
+  return numbers.length <= 3 && numbers.every((number) => number <= 255) && !(numbers.length === 1 && pre !== "");
 }
 
 /** A flag's name: the word up to its "=", without the value that follows. */
