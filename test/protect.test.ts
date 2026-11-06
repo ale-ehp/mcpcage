@@ -1879,7 +1879,12 @@ describe("mcpcage protect", () => {
     expect(result.stdout).toContain(`not changed: ${tilde(files.vscodeUser, home)} has comments, which rewriting it would lose`);
     expect(result.stdout).toContain(`    memory: ${installed} run -- npx -y @modelcontextprotocol/server-memory\n`);
     expect(result.stdout).toContain(`not changed: ${files.vscodeProject} has comments`);
-    expect(result.stdout).toContain(`    proj-npx (project ${project}): ${installed} run -- npx -y @acme/project-mcp@1.2.0\n`);
+    // The commands to give with claude mcp add are written for a shell (see pasteable): on Windows -- and
+    // -y in quotes, which PowerShell drops bare, and a path in quotes when it holds more than plain
+    // characters, as the runner's temporary directory does (C:\Users\RUNNER~1\...).
+    const windows = process.platform === "win32";
+    const shell = (path: string) => pasteable([path])!;
+    expect(result.stdout).toContain(`    proj-npx (project ${project}): ${shell(installed)} run ${windows ? '"--" npx "-y" "@acme/project-mcp@1.2.0"' : "-- npx -y @acme/project-mcp@1.2.0"}\n`);
     expect(result.stdout).toContain(
       "  not changed: Claude Code is running and rewrites ~/.claude.json while it runs: close it and run mcpcage protect --fix again, or add the servers again with claude mcp add using the commands above",
     );
@@ -1887,8 +1892,8 @@ describe("mcpcage protect", () => {
     expect(result.stdout.match(/Claude Code is running/g)).toHaveLength(1);
     expect(result.code).toBe(1); // five npx servers and a uvx one are still outside the cage
     // The uvx server of ~/.claude.json is in the plan, with the command to give it by hand, quoted for
-    // a shell: on Windows -- in quotes, which PowerShell drops bare.
-    expect(result.stdout).toContain(`    time: ${installed} run ${process.platform === "win32" ? '"--"' : "--"} uvx mcp-server-time\n`);
+    // a shell.
+    expect(result.stdout).toContain(`    time: ${shell(installed)} run ${windows ? '"--"' : "--"} uvx mcp-server-time\n`);
 
     const again = mcpcageWithEnv(machine.env, "protect", "--project", project, "--offline", "--command", installed);
     const statuses = Object.fromEntries(
@@ -2520,10 +2525,22 @@ describe("mcpcage protect", () => {
     // With --writable, the commands to write by hand say what each writable mount lets the server change.
     const byHand: string[] = [];
     fixConfigs({ report, command: "/opt/mcpcage", claudeCodeRunning: true, dryRun: true, log: (line) => byHand.push(line), home, writable: true, uv });
+    // Written for a shell (see pasteable): on Windows each word that does not start with a letter or a
+    // digit in quotes, which PowerShell drops or reads bare, and a path when it holds more than plain
+    // characters, as the runner's temporary directory does (C:\Users\RUNNER~1\...).
+    const shell = (path: string) => pasteable([path])!;
     expect(byHand.slice(0, 4)).toEqual([
-      "    user-npx: /opt/mcpcage run --env ACME_TOKEN -- npx -y @acme/user-mcp",
-      "    time: /opt/mcpcage run -- uvx mcp-server-time",
-      `    proj-npx (project ${project}): /opt/mcpcage run --mount ${data}:rw -- npx -y @acme/project-mcp@1.2.0 ${data}`,
+      ...(process.platform === "win32"
+        ? [
+            '    user-npx: "/opt/mcpcage" run "--env" ACME_TOKEN "--" npx "-y" "@acme/user-mcp"',
+            '    time: "/opt/mcpcage" run "--" uvx mcp-server-time',
+            `    proj-npx (project ${project}): "/opt/mcpcage" run "--mount" ${shell(`${data}:rw`)} "--" npx "-y" "@acme/project-mcp@1.2.0" ${shell(data)}`,
+          ]
+        : [
+            "    user-npx: /opt/mcpcage run --env ACME_TOKEN -- npx -y @acme/user-mcp",
+            "    time: /opt/mcpcage run -- uvx mcp-server-time",
+            `    proj-npx (project ${project}): /opt/mcpcage run --mount ${data}:rw -- npx -y @acme/project-mcp@1.2.0 ${data}`,
+          ]),
       `      WARNING proj-npx can change files in ${data}, code and settings that git, editors and build tools run included (--writable)`,
     ]);
     expect(byHand[4]).toMatch(/^ {2}not changed: Claude Code is running/);
