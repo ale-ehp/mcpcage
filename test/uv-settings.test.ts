@@ -23,6 +23,10 @@ describe("the scan of a uv.toml for a package index", () => {
       'pip.index-url = "https://pypi.corp.example/simple"',
       '"index-url" = "https://pypi.corp.example/simple"',
       "pip = { extra-index-url = ['x'] }",
+      // After a string of any length on the same line: its closing quote ends it, wherever it falls.
+      "pip = { python-version = 'abc', index-url = \"x\" }",
+      'pip = { python-version = "abc", index-url = "x" }',
+      'pip = { python-version = "a\\\\", index-url = "x" }',
       "\r\nno-cache = true\r\nfind-links = []\r\n",
       // uv 0.13.7 asks download.pytorch.org for torch and its kin with it, as --torch-backend.
       'torch-backend = "cpu"',
@@ -41,7 +45,7 @@ describe("the scan of a uv.toml for a package index", () => {
     ];
     for (const text of found) expect(namesIndex(text), text).toBe(true);
     // A literal string has no escapes, and a value with backslashes is a value (a Windows path).
-    const clean = ["'index\\u002Durl' = 1", 'cache-dir = "C:\\\\Users\\\\me\\\\uv"', '"index\\\\u002Durl" = 1'];
+    const clean = ["'index\\u002Durl' = 1", 'cache-dir = "C:\\\\Users\\\\me\\\\uv"', '"index\\\\u002Durl" = 1', '"index\\U00110000" = 1'];
     for (const text of clean) expect(namesIndex(text), text).toBe(false);
   });
 
@@ -150,6 +154,21 @@ describe("where uv's settings are looked for", () => {
     const files = uvConfigFiles({ platform: process.platform, env: { XDG_CONFIG_DIRS: `conf:${join("..", "other")}` }, home: "/home/me" });
     expect(files).toContain(resolve("conf", "uv", "uv.toml"));
     expect(files).toContain(resolve("..", "other", "uv", "uv.toml"));
+  });
+
+  it("on Windows: the user's AppData on a share, where the registry puts it, whatever the environment's APPDATA", () => {
+    const share = "\\\\fs01\\profiles$\\me\\AppData\\Roaming";
+    const windows = { appData: "C:\\Users\\me\\AppData\\Roaming", programData: "C:\\ProgramData", redirected: share };
+    expect(uvConfigFiles({ platform: "win32", env: { APPDATA: "D:\\Roaming" }, home: "C:\\Users\\me", windows })).toEqual([
+      "D:\\Roaming\\uv\\uv.toml",
+      "C:\\Users\\me\\AppData\\Roaming\\uv\\uv.toml",
+      "C:\\ProgramData\\uv\\uv.toml",
+      `${share}\\uv\\uv.toml`,
+    ]);
+  });
+
+  it("names HOME when the home directory is a network path on macOS, and reads nothing there", () => {
+    expect(uvSettingsReason({ platform: "darwin", env: {}, home: "/net/fs01/me" })).toBe("your environment sets HOME to a network path, which mcpcage does not open, and the cage builds from PyPI only");
   });
 
   it("takes a relative UV_CONFIG_FILE from the current directory, as uv takes it on the machine it runs on", () => {
@@ -277,6 +296,37 @@ describe("the uv settings an entry's own variables point uvx to", () => {
     expect(entryUvSettingsReason(env({ HOME: elsewhere }), process.platform, "/home/me")).toBe(
       `its env sets HOME, so uvx reads the uv settings in ${join(elsewhere, ".config", "uv", "uv.toml")}, which could not be read: whether they name a package index is unknown, and the cage builds from PyPI only`,
     );
+  });
+
+  it.skipIf(process.platform === "win32")("reads a caged entry's UV_CONFIG_FILE, which run takes for the user's, and an entry's not caged yet not at all", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-uv-caged-"));
+    const file = join(top, "corp.toml");
+    writeFileSync(file, index);
+    // parseLaunch refuses UV_CONFIG_FILE in an entry not caged yet: nothing to read for it here.
+    expect(entryUvSettingsReason([{ where: "its env", variables: { UV_CONFIG_FILE: file } }], process.platform, "/home/me")).toBeUndefined();
+    expect(entryUvSettingsReason([{ where: "its env", variables: { UV_CONFIG_FILE: file }, caged: true }], process.platform, "/home/me")).toBe(
+      `its env sets UV_CONFIG_FILE, so uvx reads the uv settings in ${file}, which name a package index, and the cage builds from PyPI only`,
+    );
+  });
+
+  it.skipIf(process.platform === "win32")("reads a variable by its exact name off Windows, a string only, and a file under another file as no file", () => {
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-uv-names-"));
+    mkdirSync(join(top, ".config", "uv"), { recursive: true });
+    writeFileSync(join(top, ".config", "uv", "uv.toml"), index);
+    // home is not HOME on macOS and Linux; a number is no directory (JSON can hold one in an env).
+    expect(entryUvSettingsReason([{ where: "its env", variables: { home: top, HOME: 5 } }], "linux", "/home/me")).toBeUndefined();
+    expect(entryUvSettingsReason([{ where: "its env", variables: { HOME: 5, home: top } }], "linux", "/home/me")).toBeUndefined();
+    // The file is said from ~ when it is in the home directory, a final / of the home aside, and in full
+    // when the home directory is / itself, where every file would be.
+    expect(entryUvSettingsReason([{ where: "its env", variables: { HOME: top } }], "linux", `${top}/`)).toBe(
+      "its env sets HOME, so uvx reads the uv settings in ~/.config/uv/uv.toml, which name a package index, and the cage builds from PyPI only",
+    );
+    expect(entryUvSettingsReason([{ where: "its env", variables: { HOME: top } }], "linux", "/")).toBe(
+      `its env sets HOME, so uvx reads the uv settings in ${top}/.config/uv/uv.toml, which name a package index, and the cage builds from PyPI only`,
+    );
+    // HOME on a regular file: its .config/uv/uv.toml is not there (ENOTDIR), not unreadable.
+    writeFileSync(join(top, "file"), "");
+    expect(entryUvSettingsReason([{ where: "its env", variables: { HOME: join(top, "file") } }], "linux", "/home/me")).toBeUndefined();
   });
 
   it.runIf(process.platform === "win32")("on Windows: its APPDATA, USERPROFILE, SYSTEMDRIVE and PROGRAMDATA, by the variable and the file", () => {
