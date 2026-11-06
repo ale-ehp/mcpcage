@@ -185,10 +185,13 @@ describe("each place mcpcage will not mount", () => {
       [".cache/uv", "the environments uvx runs, in uv's cache", ""],
       [".local/share/uv", "the tools and the Pythons uv installs", ""],
       [".config/uv", "your uv settings, which choose where uvx takes its packages from", ""],
+      ["Library/Caches/uv", "the environments uvx runs, in uv's cache", "darwin"],
+      ["Library/Application Support/uv", "the tools and the Pythons uv installs", "darwin"],
       ["AppData/Local/uv", "the environments uvx runs, in uv's cache", "win32"],
       ["AppData/Roaming/uv", "your uv settings, and the tools and the Pythons uv installs", "win32"],
       [".local/share/pipx", "the programs pipx installs and runs", ""],
       [".local/pipx", "the programs pipx installs and runs", ""],
+      ["Library/Application Support/pipx", "the programs pipx installs and runs", "darwin"],
       [".rd", "the Docker socket of Rancher Desktop", ""],
       [".lima", "the Docker socket of Lima", ""],
       ["Library/Containers/com.docker.docker", "the Docker socket of Docker Desktop", "darwin"],
@@ -263,6 +266,7 @@ describe("uv's and pipx's places where the environment moves them", () => {
       { path: "/t/tools", what: "the tools and the Pythons uv installs" },
       { path: "/p/pythons", what: "the tools and the Pythons uv installs" },
       { path: "/h/pipx", what: "the programs pipx installs and runs" },
+      { path: "/x/data/../bin", what: "the programs uv installs, which you run" },
       { path: "/x/cache/uv", what: "the environments uvx runs, in uv's cache" },
       { path: "/x/data/uv", what: "the tools and the Pythons uv installs" },
       { path: "/x/config/uv", what: "your uv settings, which choose where uvx takes its packages from" },
@@ -273,11 +277,44 @@ describe("uv's and pipx's places where the environment moves them", () => {
     expect(sensitivePath("/x/cache/pip", { ...linux, tools })).toBeUndefined();
     // Relative directories name no place, and an empty variable none either.
     expect(toolPlaces({ platform: "linux", env: { XDG_DATA_HOME: "data", UV_CACHE_DIR: "" } })).toEqual([]);
+    // On Windows uv's data is under APPDATA, but its programs go to XDG_DATA_HOME's ../bin there too.
     expect(toolPlaces({ platform: "win32", env: { LOCALAPPDATA: "D:\\Local", APPDATA: "D:\\Roaming", XDG_DATA_HOME: "D:\\xdg" } })).toEqual([
+      { path: "D:\\xdg\\..\\bin", what: "the programs uv installs, which you run" },
       { path: "D:\\Local\\uv", what: "the environments uvx runs, in uv's cache" },
       { path: "D:\\Roaming\\uv", what: "your uv settings, and the tools and the Pythons uv installs" },
     ]);
     // A place set to the home directory counts as the home directory, not as every path in it.
     expect(sensitivePath("/home/me/projects/notes", { ...linux, tools: toolPlaces({ platform: "linux", env: { UV_CACHE_DIR: "/home/me" } }) })).toBeUndefined();
+  });
+
+  it("count the directories uv installs its programs in, uv and uvx among them, on every system", () => {
+    // uv 0.13.7, user_executable_directory: UV_TOOL_BIN_DIR (the tools' commands), UV_PYTHON_BIN_DIR
+    // (the Pythons'), UV_INSTALL_DIR (uv itself), else XDG_BIN_HOME, else XDG_DATA_HOME/../bin.
+    const env = { UV_TOOL_BIN_DIR: "/srv/toolbin", UV_PYTHON_BIN_DIR: "/srv/pybin", UV_INSTALL_DIR: "/srv/uvinst", XDG_BIN_HOME: "/srv/xbin", XDG_DATA_HOME: "/srv/xdata" };
+    const tools = toolPlaces({ platform: "linux", env });
+    const programs = "the programs uv installs, which you run";
+    for (const dir of ["/srv/toolbin", "/srv/pybin", "/srv/uvinst", "/srv/xbin", "/srv/bin"]) {
+      expect(sensitivePath(`${dir}/uvx`, { ...linux, tools }), dir).toBe(`${programs} in ${dir}`);
+    }
+    expect(sensitivePath("/srv", { ...linux, tools })).toBe(`${programs} in /srv, which holds /srv/toolbin`);
+    // XDG_DATA_HOME's own bin is not where uv puts them: its parent's is.
+    expect(sensitivePath("/srv/xdata/bin", { ...linux, tools })).toBeUndefined();
+    expect(sensitivePath("C:\\uv\\bin\\uvx.exe", { ...windows, tools: toolPlaces({ platform: "win32", env: { UV_INSTALL_DIR: "C:\\uv\\bin" } }) })).toBe(`${programs} in C:\\uv\\bin`);
+    expect(sensitivePath("D:\\bin", { ...windows, tools: toolPlaces({ platform: "win32", env: { XDG_BIN_HOME: "D:\\bin" } }) })).toBe(`${programs} in D:\\bin`);
+    // Relative values name no place. uv takes a relative XDG directory for none, and reads a relative
+    // UV_* directory from the directory it runs in: for `uv tool install` that is wherever the user's
+    // shell was, which mcpcage cannot know, so any directory it guessed would be a wrong one.
+    expect(toolPlaces({ platform: "linux", env: { UV_TOOL_BIN_DIR: "bin", UV_PYTHON_BIN_DIR: "./py", UV_INSTALL_DIR: "../uv", XDG_BIN_HOME: "xbin", XDG_DATA_HOME: "share" } })).toEqual([]);
+  });
+
+  it.skipIf(process.platform === "win32")("count XDG_DATA_HOME's ../bin where the system goes up from a symlinked XDG_DATA_HOME, as uv leaves it to the system", () => {
+    const top = realpathSync(mkdtempSync(join(tmpdir(), "mcpcage-xdg-bin-")));
+    mkdirSync(join(top, "real", "share"), { recursive: true });
+    mkdirSync(join(top, "real", "bin"));
+    symlinkSync(join(top, "real", "share"), join(top, "data"));
+    const tools = toolPlaces({ platform: process.platform, env: { XDG_DATA_HOME: join(top, "data") } });
+    const options = { home: "/nonexistent-home", platform: process.platform, tools };
+    expect(sensitivePath(join(top, "real", "bin", "uvx"), options)).toMatch(/^the programs uv installs, which you run in /);
+    expect(sensitivePath(join(top, "bin"), options)).toMatch(/^the programs uv installs, which you run in /);
   });
 });

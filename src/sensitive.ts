@@ -77,7 +77,16 @@ export function thisMachine(): SensitiveOptions {
  * XDG_CACHE_HOME or UV_CACHE_DIR, its tools and Pythons under XDG_DATA_HOME, UV_TOOL_DIR or
  * UV_PYTHON_INSTALL_DIR, its settings under XDG_CONFIG_HOME; on Windows under another LOCALAPPDATA or
  * APPDATA; pipx's home under XDG_DATA_HOME or PIPX_HOME (https://docs.astral.sh/uv/reference/storage/).
- * Absolute values only: uv takes a relative XDG directory for none.
+ *
+ * And the directory of the programs uv installs, uv and uvx among them, which the user runs by name
+ * (uv 0.13.7, uv-dirs' user_executable_directory, the same on every system): UV_TOOL_BIN_DIR for the
+ * tools' commands, UV_PYTHON_BIN_DIR for the Pythons', UV_INSTALL_DIR for uv itself, else XDG_BIN_HOME,
+ * else XDG_DATA_HOME's ../bin, else ~/.local/bin (in IN_HOME). Each that is set counts, not only the
+ * one uv would take first: another uv command, or the installer, can take another.
+ *
+ * Absolute values only. uv takes a relative XDG directory for none, and reads a relative UV_* one from
+ * the directory it runs in, which for `uv tool install` is wherever the user's shell was: mcpcage has
+ * no way to know it.
  */
 export function toolPlaces(options: { platform: NodeJS.Platform; env: NodeJS.ProcessEnv }): Array<{ path: string; what: string }> {
   const windows = options.platform === "win32";
@@ -91,6 +100,14 @@ export function toolPlaces(options: { platform: NodeJS.Platform; env: NodeJS.Pro
   add(env.UV_TOOL_DIR, UV_DATA);
   add(env.UV_PYTHON_INSTALL_DIR, UV_DATA);
   add(env.PIPX_HOME, PIPX);
+  add(env.UV_TOOL_BIN_DIR, UV_PROGRAMS);
+  add(env.UV_PYTHON_BIN_DIR, UV_PROGRAMS);
+  add(env.UV_INSTALL_DIR, UV_PROGRAMS);
+  add(env.XDG_BIN_HOME, UV_PROGRAMS);
+  // Written with its `..`, not joined: uv leaves it to the system, which goes up from where a symlinked
+  // XDG_DATA_HOME leads, and sensitivePath compares both the path as written and where it leads.
+  const data = env.XDG_DATA_HOME;
+  if (data !== undefined && data !== "" && syntax.isAbsolute(data)) places.push({ path: `${data}${syntax.sep}..${syntax.sep}bin`, what: UV_PROGRAMS });
   if (windows) {
     add(env.LOCALAPPDATA, UV_CACHE, "uv");
     add(env.APPDATA, UV_SETTINGS_AND_DATA, "uv");
@@ -128,6 +145,7 @@ const UV_DATA = "the tools and the Pythons uv installs";
 const UV_SETTINGS = "your uv settings, which choose where uvx takes its packages from";
 const UV_SETTINGS_AND_DATA = "your uv settings, and the tools and the Pythons uv installs";
 const PIPX = "the programs pipx installs and runs";
+const UV_PROGRAMS = "the programs uv installs, which you run";
 
 /** Where other tools keep keys, tokens, sockets and what they run, from the home directory, in plain words. */
 const IN_HOME: ReadonlyArray<{ path: string; what: string; platform?: NodeJS.Platform }> = [
@@ -229,15 +247,22 @@ const IN_HOME: ReadonlyArray<{ path: string; what: string; platform?: NodeJS.Pla
   { path: "Applications", what: "your applications", platform: "darwin" },
   { path: ".local/share/pnpm", what: "the programs pnpm installs", platform: "linux" },
   // uv keeps its cache, tools and settings in XDG's places on macOS too, in Windows' own on Windows;
-  // ~/.local/bin, where it puts uvx and the tools' commands, is above. pipx's home moved from
-  // ~/.local/pipx to ~/.local/share/pipx in pipx 1.2.
+  // ~/.local/bin, where it puts uvx and the tools' commands, is above. On macOS uv keeps using the
+  // places of its first releases when they exist (uv 0.13.7, uv-cache and uv-state: the legacy
+  // directories of uv-dirs), ~/Library/Caches/uv for its cache and ~/Library/Application Support/uv
+  // for its tools and Pythons. pipx's home is platformdirs' data directory (pipx 1.18.15, paths.py:
+  // ~/.local/share/pipx on Linux, ~/Library/Application Support/pipx on macOS) unless ~/.local/pipx,
+  // its home in older releases, exists.
   { path: ".cache/uv", what: UV_CACHE },
   { path: ".local/share/uv", what: UV_DATA },
   { path: ".config/uv", what: UV_SETTINGS },
+  { path: "Library/Caches/uv", what: UV_CACHE, platform: "darwin" },
+  { path: "Library/Application Support/uv", what: UV_DATA, platform: "darwin" },
   { path: "AppData/Local/uv", what: UV_CACHE, platform: "win32" },
   { path: "AppData/Roaming/uv", what: UV_SETTINGS_AND_DATA, platform: "win32" },
   { path: ".local/share/pipx", what: PIPX },
   { path: ".local/pipx", what: PIPX },
+  { path: "Library/Application Support/pipx", what: PIPX, platform: "darwin" },
 
   // More Docker sockets, which start containers with any part of the host mounted.
   { path: ".rd", what: "the Docker socket of Rancher Desktop" },
