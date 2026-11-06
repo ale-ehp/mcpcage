@@ -102,7 +102,11 @@ export interface ServerReport {
   problems: string[];
   /** For a `cmd /c npx` or `cmd /c uvx` entry on Windows that runs more than the runner, which one, and why it is not caged (see cmdRunner). */
   notPlain?: { runner: string; reason: string };
-  /** For a uvx entry: the PyPI package it installs, as the report names it (`mcp-server-time (PyPI)`, or `x==1.2 (PyPI), with y`). */
+  /**
+   * For a uvx entry: the requirements uvx asks PyPI for, as the report names them (`mcp-server-time`,
+   * or `x==1.2, with y`). Only a resolve finds whether PyPI has them: "package: pyodide (PyPI)" read
+   * as a package PyPI had, for a name uvx does not even ask PyPI for (see interpreterRequest).
+   */
   pypiPackage?: string;
   /** For a uvx entry that cannot be caged: why, in the words wrap and --fix use to leave it as it is. */
   cannotCage?: string;
@@ -430,7 +434,7 @@ function pypiOf(entry: ServerEntry, uv: UserUv, configFile: string, caged = fals
   if (uv.settings !== undefined) return { cannotCage: uv.settings };
   const pointed = entryUvSettingsReason(environment);
   if (pointed !== undefined) return { cannotCage: pointed };
-  return { pypiPackage: `${spec.requirement} (PyPI)${spec.with.length > 0 ? `, with ${spec.with.join(", ")}` : ""}` };
+  return { pypiPackage: `${spec.requirement}${spec.with.length > 0 ? `, with ${spec.with.join(", ")}` : ""}` };
 }
 
 /**
@@ -658,7 +662,7 @@ function serverLines(server: ServerReport, home: string): string[] {
   for (const path of server.broadAccess) details.push(`access: ${terminalSafe(path)}: ${broadAccessKind(path, home) ?? "a broad path"}`);
   if (server.secrets.length > 0) details.push(`${server.secrets.length === 1 ? "secret" : "secrets"} in clear text: ${server.secrets.map(terminalSafe).join(", ")}`);
   if (server.installScripts) details.push(installLine(server.installScripts));
-  if (server.pypiPackage !== undefined) details.push(`package: ${terminalSafe(server.pypiPackage)}`);
+  if (server.pypiPackage !== undefined) details.push(`asks PyPI for: ${terminalSafe(server.pypiPackage)}`);
   if (server.cannotCage !== undefined) details.push(`cannot be caged: ${terminalSafe(server.cannotCage)}`);
   // Before what --inspect found, whose signs belong under its own line.
   if (server.cmdInjection !== undefined) {
