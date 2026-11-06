@@ -4287,6 +4287,37 @@ describe("uvx servers in protect", () => {
     expect(clean).not.toContain("cannot start");
   });
 
+  it("words a refusal of your own uv variables and settings as run words it", () => {
+    const installed = fakeMcpcage();
+    const machine = uvxHome({ time: servers.time });
+    const caged = uvxHome({ time: { command: installed.command, args: ["run", "--", "uvx", "mcp-server-time"] } });
+    const settings = (home: string, text: string | undefined) => {
+      const file = join(home, ".config", "uv", "uv.toml");
+      if (text === undefined) rmSync(file, { force: true });
+      else writeText(file, text);
+    };
+    const own: Array<[Record<string, string>, string | undefined]> = [
+      [{ UV_DEFAULT_INDEX: "https://user:s3cret@pypi.corp.example/simple" }, undefined],
+      [{ UV_CONSTRAINT: join(machine.top, "constraints.txt") }, undefined],
+      [{ UV_PYTHON: "pypy3.10" }, undefined],
+      [{}, 'resolution = "lowest"\n'],
+      [{}, "[[index]]\nurl = 'https://user:s3cret@pypi.corp.example/simple'\n"],
+    ];
+    for (const [variables, text] of own) {
+      settings(machine.home, text);
+      settings(caged.home, text);
+      const report = mcpcageWithEnv({ ...machine.env, ...variables }, "protect", "--project", machine.project, "--offline");
+      const [detail] = detailsOf(report.stdout, "time");
+      expect(detail, JSON.stringify(variables)).toMatch(/^cannot be caged: /);
+      const why = detail!.slice("cannot be caged: ".length);
+      const started = mcpcageWithEnv({ ...machine.env, ...noDocker(machine.top), ...variables }, "run", "--", "uvx", "mcp-server-time");
+      expect(started.stderr, why).toBe(`mcpcage: ${why}\n`);
+      const stuck = mcpcageWithEnv({ ...caged.env, ...variables }, "protect", "--project", caged.project, "--offline", "--command", installed.command);
+      expect(lineOf(stuck.stdout, "time"), why).toMatch(new RegExp(` {2}cannot start: ${literal(why)}$`));
+      expect(`${report.stdout}${started.stderr}${stuck.stdout}`).not.toContain("s3cret");
+    }
+  });
+
   it("reads a uvx entry with its envFile and looks at the uv settings its variables point to: protect, --fix, wrap and run agree on each", () => {
     const installed = fakeMcpcage();
     const top = mkdtempSync(join(tmpdir(), "mcpcage-uvx-pointed-"));
@@ -4340,7 +4371,7 @@ describe("uvx servers in protect", () => {
         entry: { type: "stdio", ...time, envFile: "${workspaceFolder}/.env" },
         adds: { UV_INDEX_URL: "http://127.0.0.1:9/simple" },
         why: "its envFile (${workspaceFolder}/.env) sets UV_INDEX_URL: uvx installs from another index there",
-        run: "the environment mcpcage runs in sets UV_INDEX_URL: uvx installs from another index there",
+        run: "your environment sets UV_INDEX_URL: uvx installs from another index there",
       },
       pointed: {
         entry: { type: "stdio", ...time, envFile: "${workspaceFolder}/uv.env" },
@@ -4415,6 +4446,6 @@ describe("uvx servers in protect", () => {
     // UV_PYTHON is its Python, as `run` reads it from the environment VS Code gives it; the cage gets its env only.
     expect(sandbox.spec).toMatchObject({ kind: "pypi", project: "mcp-server-time", python: "3.12" });
     expect(sandbox.env).toEqual(["TZ=UTC"]);
-    expect(sandbox.serverId).toBe(serverIdFor(parseLaunch(["uvx", "mcp-server-time"], undefined, process.platform, [{ where: "the environment mcpcage runs in", variables: { UV_PYTHON: "3.12" }, own: true }])));
+    expect(sandbox.serverId).toBe(serverIdFor(parseLaunch(["uvx", "mcp-server-time"], undefined, process.platform, [{ where: "your environment", variables: { UV_PYTHON: "3.12" }, own: true }])));
   });
 });

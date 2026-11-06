@@ -150,12 +150,15 @@ function parseRun(argv: string[]) {
  * uvx would read it there: the same rules wrap and protect apply to the entry's env (see
  * parseLaunch), so a variable that makes uvx install from another index stops the server here too,
  * and UV_PYTHON is its --python. It is the user's own environment as protect reads it, so its
- * UV_CONFIG_FILE is a settings file to look at for an index (see uv-settings.ts), as protect does.
+ * UV_CONFIG_FILE is a settings file to look at for an index (see uv-settings.ts), as protect does,
+ * and a refusal is worded as protect words it for the user's own variables ("your environment sets
+ * UV_DEFAULT_INDEX: ..."): `run` said "the environment mcpcage runs in" for the same variable.
  */
 function launchSpec(server: string[], image: string | undefined, noSandbox: boolean): LaunchSpec {
   const [command] = server;
   if (noSandbox && image === undefined && command !== undefined && startsUv(server)) return { kind: "host", command, args: server.slice(1) };
-  return parseLaunch(server, image, process.platform, [{ where: "the environment mcpcage runs in", variables: process.env, own: true }]);
+  // The entry's env and envFile are in mcpcage's environment already: an entry of its own adds nothing.
+  return parseLaunch(server, image, process.platform, uvxEnvironment({}, process.env));
 }
 
 /** Builds and pins the sandbox image without starting the server (wrap does this for every server). */

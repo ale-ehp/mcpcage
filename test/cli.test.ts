@@ -362,10 +362,10 @@ describe("cli", () => {
     for (const command of ["run", "prepare"]) {
       const refused = mcpcageWithEnv(fakeUserEnv(join(top, "home"), join(top, "cage"), { ...noDocker(top), UV_INDEX_URL: index }), command, "--", "uvx", "mcp-server-time");
       expect(refused.code).toBe(1);
-      expect(refused.stderr).toBe("mcpcage: the environment mcpcage runs in sets UV_INDEX_URL: uvx installs from another index there\n");
+      expect(refused.stderr).toBe("mcpcage: your environment sets UV_INDEX_URL: uvx installs from another index there\n");
       const python = mcpcageWithEnv(fakeUserEnv(join(top, "home"), join(top, "cage"), { ...noDocker(top), UV_PYTHON: "pypy3.10" }), command, "--", "uvx", "mcp-server-time");
       expect(python.stderr).toBe(
-        "mcpcage: the environment mcpcage runs in sets UV_PYTHON to another value than a CPython version from 3.10 to 3.15 (such as 3.12 or 3.12.4), the only ones the cage runs\n",
+        "mcpcage: your environment sets UV_PYTHON to another value than a CPython version from 3.10 to 3.15 (such as 3.12 or 3.12.4), the only ones the cage runs\n",
       );
       // A valid one goes on to the build, which needs Docker.
       const valid = mcpcageWithEnv(fakeUserEnv(join(top, "home"), join(top, "cage"), { ...noDocker(top), UV_PYTHON: "3.12", UV_CACHE_DIR: top }), command, "--", "uvx", "mcp-server-time");
