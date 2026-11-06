@@ -171,11 +171,16 @@ export function lockPypi(
   spec: PypiLaunch,
   options: { log: (message: string) => void; runner?: DockerRunner; platform?: string },
 ): PypiResolution & { lockfileSha256: string } {
-  const resolution = resolvePypi(spec, options);
+  const resolution = keepLock(serverId, resolvePypi(spec, options));
+  return { ...resolution, lockfileSha256: sha256(resolution.lock) };
+}
+
+/** Keeps a lock as the server's `requirements.lock`, which the next start reuses with its record (see keptLock). */
+function keepLock<T extends { lock: string }>(serverId: string, locked: T): T {
   const dir = serverDir(serverId);
   ensureDir(dir);
-  writeFileSync(join(dir, "requirements.lock"), resolution.lock, { mode: 0o600 });
-  return { ...resolution, lockfileSha256: sha256(resolution.lock) };
+  writeFileSync(join(dir, "requirements.lock"), locked.lock, { mode: 0o600 });
+  return locked;
 }
 
 /** A pin of the lock: a package's normal name and its version. */
@@ -436,9 +441,9 @@ export function preparePypiImage(options: SandboxOptions, runner: DockerRunner =
   const kept = options.rebuild ? undefined : keptLock(options.serverId, spec, platform);
   const reuse = kept !== undefined && previous !== undefined;
   // A lock wrap or --fix made a moment ago (see checkPypi), for this very spec and platform: the
-  // image is built from it, not from a second resolve.
+  // image is built from it, not from a second resolve, and it is kept in the store only now.
   const fresh = options.pypiLock !== undefined && sameInstall(options.pypiLock.spec, spec) && options.pypiLock.platform === platform ? options.pypiLock : undefined;
-  const locked = kept ?? fresh ?? lockPypi(options.serverId, spec, { log: options.log, runner, platform });
+  const locked = kept ?? (fresh === undefined ? lockPypi(options.serverId, spec, { log: options.log, runner, platform }) : keepLock(options.serverId, fresh));
   const python = managedPython(locked.python);
   const dockerfile = pypiDockerfile({ command: spec.command, python });
   // The image is a function of the lock and the Dockerfile, which names the Python, the bases and the
@@ -521,11 +526,15 @@ export type PypiResolver = (serverId: string, spec: PypiLaunch) => PypiCheck;
 /**
  * The resolve of a uvx server that wrap and protect --fix run before they write its entry: seconds,
  * no build. A lock that `run` would reuse is reused, so that an entry caged again does not move to
- * a newer release; otherwise the server is resolved and its lock kept (see lockPypi), for the build
- * that follows. uv's "No solution found" is `unsolvable`, with mcpcage's words and uv's reason: such
- * a server would fail at every start of the client, and its entry is left as it is. Any other
- * failure (Docker stopped, no network) is `failed`: the entry is written, and resolved and built at
- * its first start, as an npx server whose build failed is.
+ * a newer release; otherwise the server is resolved, and its lock is handed to the build that follows
+ * a yes, which keeps it in the store (see preparePypiImage). Nothing is written there before: the
+ * plan's resolve kept its lock as the server's requirements.lock, and a plan the user declined left
+ * it, over the lock of a server caged already under the same id (another --python, say), which its
+ * next start then resolved and built again, at a newer release. uv's "No solution found" is
+ * `unsolvable`, with mcpcage's words and uv's reason: such a server would fail at every start of the
+ * client, and its entry is left as it is. Any other failure (Docker stopped, no network) is
+ * `failed`: the entry is written, and resolved and built at its first start, as an npx server whose
+ * build failed is.
  */
 export function checkPypi(serverId: string, spec: PypiLaunch, options: { log: (message: string) => void; runner?: DockerRunner }): PypiCheck {
   const runner = options.runner ?? realDocker;
@@ -533,7 +542,8 @@ export function checkPypi(serverId: string, spec: PypiLaunch, options: { log: (m
     const platform = wheelPlatform(runner);
     const kept = keptLock(serverId, spec, platform);
     if (kept !== undefined) return { locked: { ...kept, platform, lockfileSha256: sha256(kept.lock), spec } };
-    return { locked: { ...lockPypi(serverId, spec, { log: options.log, runner, platform }), spec } };
+    const resolution = resolvePypi(spec, { log: options.log, runner, platform });
+    return { locked: { ...resolution, lockfileSha256: sha256(resolution.lock), spec } };
   } catch (error) {
     if (error instanceof PypiUnsolvable) return { unsolvable: error.message };
     return { failed: error instanceof Error ? error.message : "an unexpected error" };

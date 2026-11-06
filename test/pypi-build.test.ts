@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -152,7 +152,8 @@ describe("the resolve wrap and --fix run before they write a uvx entry", () => {
       locked: { packageName: "mcp-server-time", version: "2026.11.4", python: "3.13", platform: "aarch64-manylinux_2_40", lock: lockOf("2026.11.4"), lockfileSha256: sha256(lockOf("2026.11.4")), spec },
     });
     expect(engine.builds()).toEqual([]);
-    expect(readFileSync(join(home, "servers", "time", "requirements.lock"), "utf8")).toBe(lockOf("2026.11.4"));
+    // The lock is kept in the store by the build that follows a yes, not by the plan.
+    expect(existsSync(join(home, "servers", "time"))).toBe(false);
     // PyPI moves on before the user says yes: the image is still the one of the plan's lock.
     state.version = "2026.12.1";
     engine.reset();
@@ -160,11 +161,32 @@ describe("the resolve wrap and --fix run before they write a uvx entry", () => {
     expect(record.version).toBe("2026.11.4");
     expect(engine.resolves()).toBe(0);
     expect(engine.builds()).toHaveLength(1);
+    expect(readFileSync(join(home, "servers", "time", "requirements.lock"), "utf8")).toBe(lockOf("2026.11.4"));
     // Kept as run keeps it: the next resolve of the same spec, by --fix again, reuses it.
     writeFileSync(join(home, "servers", "time", "server.json"), JSON.stringify(record));
     engine.reset();
     expect(checkPypi("time", spec, { log: () => {}, runner: engine.runner })).toMatchObject({ locked: { version: "2026.11.4", lock: lockOf("2026.11.4") } });
     expect(engine.resolves()).toBe(0);
+  });
+
+  it("writes nothing in the store for a plan the user declines: a server caged already keeps its lock and its record", () => {
+    const state = { arch: "arm64", version: "2026.11.4" };
+    const engine = fakeEngine(state);
+    const caged = pypi("uvx", "mcp-server-time");
+    const record = preparePypiImage(options(caged), engine.runner);
+    writeFileSync(join(home, "servers", "time", "server.json"), JSON.stringify(record));
+    const store = () => Object.fromEntries(readdirSync(join(home, "servers", "time")).map((name) => [name, readFileSync(join(home, "servers", "time", name), "utf8")]));
+    const before = store();
+    // --fix plans another spec of the same server (the id leaves --python out) and resolves it; the user says no.
+    state.version = "2026.12.1";
+    expect(checkPypi("time", pypi("uvx", "--python", "3.12", "mcp-server-time"), { log: () => {}, runner: engine.runner })).toMatchObject({ locked: { version: "2026.12.1" } });
+    expect(store()).toEqual(before);
+    expect(readdirSync(home)).toEqual(["servers"]);
+    // So the caged server starts from its own lock, as before the plan: nothing resolved, nothing built.
+    engine.reset();
+    expect(preparePypiImage(options(caged), engine.runner).version).toBe("2026.11.4");
+    expect(engine.resolves()).toBe(0);
+    expect(engine.builds()).toEqual([]);
   });
 
   it("does not build from a lock made for another spec or another platform", () => {
