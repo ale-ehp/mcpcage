@@ -4581,3 +4581,69 @@ describe("uvx servers in protect", () => {
     expect(sandbox.serverId).toBe(serverIdFor(parseLaunch(["uvx", "mcp-server-time"], undefined, process.platform, [{ where: "your environment", variables: { UV_PYTHON: "3.12" }, own: true }])));
   });
 });
+
+describe("what protect reads in a uvx entry and in a caged one", () => {
+  /** One configuration of `entries`, scanned in this process with the uv setup `uv`; mcpcage is the program at `command`. */
+  async function scanned(entries: Record<string, unknown>, uv: { environment: Record<string, string>; settings: string | undefined } = { environment: {}, settings: undefined }) {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-protect-uvx-"));
+    const command = idleProgram(join(dir, "bin"), "mcpcage");
+    const file = join(dir, "mcp.json");
+    const resolved = (value: unknown): unknown => JSON.parse(JSON.stringify(value).replaceAll("$MCPCAGE", JSON.stringify(command).slice(1, -1)).replaceAll("$DIR", JSON.stringify(dir).slice(1, -1)));
+    writeJsonFile(file, { mcpServers: resolved(entries) });
+    const location = { client: "cursor" as const, clientName: "Cursor", scope: "user" as const, file, key: "mcpServers" as const, jsonc: false, exists: true };
+    const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, ownCommand: command, uv });
+    return { dir, server: (name: string) => report.servers.find((server) => server.name === name)! };
+  }
+
+  it("counts a credential in the address of a variable of uv's as a secret in clear text, and nothing else of uv's", async () => {
+    const { server } = await scanned({
+      index: { command: "uvx", args: ["mcp-server-time"], env: { UV_INDEX_URL: "https://user:s3cret@pypi.corp.example/simple" } },
+      named: { command: "uvx", args: ["mcp-server-time"], env: { UV_INDEX: "public=https://pypi.org/simple  corp=https://user:s3cret@pypi.corp.example/simple" } },
+      lower: { command: "uvx", args: ["mcp-server-time"], env: { uv_extra_index_url: "https://user:s3cret@pypi.corp.example/simple" } },
+      plain: { command: "uvx", args: ["mcp-server-time"], env: { UV_EXTRA_INDEX_URL: "https://pypi.corp.example/simple", UV_PYTHON: "3.12", UV_CACHE_DIR: "=https://x" } },
+      other: { command: "uvx", args: ["mcp-server-time"], env: { MIRROR: "https://user:s3cret@mirror.example/simple", OLD_UV_INDEX_URL: "https://user:s3cret@mirror.example/simple", UV_NUMBER: 5 } },
+      caged: { command: "$MCPCAGE", args: ["run", "--env", "UV_INDEX_URL=https://user:s3cret@pypi.corp.example/simple", "--", "uvx", "mcp-server-time"] },
+    });
+    expect(server("index").secrets).toEqual(["UV_INDEX_URL"]);
+    expect(server("named").secrets).toEqual(["UV_INDEX"]);
+    expect(server("lower").secrets).toEqual(["uv_extra_index_url"]);
+    expect(server("plain").secrets).toEqual([]);
+    expect(server("other").secrets).toEqual([]);
+    expect(server("caged").secrets).toEqual(["UV_INDEX_URL"]);
+  });
+
+  it("says what a uvx entry asks PyPI for, or why it cannot be caged: the user's settings, then those its variables point to", async () => {
+    const { server } = await scanned({ time: { command: "uvx", args: ["--with", "rich", "--with", "tzdata", "mcp-server-time"] }, plain: { command: "uvx", args: ["mcp-server-time"] } });
+    expect(server("time").pypiPackage).toBe("mcp-server-time, with rich, tzdata");
+    expect(server("plain").pypiPackage).toBe("mcp-server-time");
+    const settings = "your uv settings (~/.config/uv/uv.toml) name a package index, and the cage builds from PyPI only";
+    const stopped = await scanned({ time: { command: "uvx", args: ["mcp-server-time"] } }, { environment: {}, settings });
+    expect(stopped.server("time")).toMatchObject({ cannotCage: settings });
+    expect(stopped.server("time").pypiPackage).toBeUndefined();
+    // Settings its own HOME points uvx to, off Windows, where uvx reads ~/.config/uv/uv.toml.
+    if (process.platform !== "win32") {
+      const home = mkdtempSync(join(tmpdir(), "mcpcage-protect-home-"));
+      writeText(join(home, ".config", "uv", "uv.toml"), "index-url = 'https://pypi.corp.example/simple'\n");
+      const pointed = await scanned({ time: { command: "uvx", args: ["mcp-server-time"], env: { HOME: home } } });
+      expect(pointed.server("time").cannotCage).toBe(`its env sets HOME, so uvx reads the uv settings in ${join(home, ".config", "uv", "uv.toml")}, which name a package index, and the cage builds from PyPI only`);
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("says a caged entry cannot start when run refuses its line, and reads its UV_CONFIG_FILE as run does", async () => {
+    const { dir, server } = await scanned({
+      node: { command: "$MCPCAGE", args: ["run", "--", "/usr/local/bin/node", "server.js"] },
+      slash: { command: "$MCPCAGE", args: ["run", "--", "tools/"] },
+      image: { command: "$MCPCAGE", args: ["run", "--image", "mcp/time", "--", "--tz", "UTC"] },
+      clean: { command: "$MCPCAGE", args: ["run", "--", "uvx", "mcp-server-time"], env: { UV_CONFIG_FILE: "$DIR/clean.toml" } },
+      corp: { command: "$MCPCAGE", args: ["run", "--", "uvx", "mcp-server-time"], env: { UV_CONFIG_FILE: "$DIR/corp.toml" } },
+    });
+    expect(server("node").runRefuses).toBe("node, not npx or uvx: mcpcage run cages only npx and uvx command lines, and images given with --image");
+    expect(server("slash").runRefuses).toBe("tools/, not npx or uvx: mcpcage run cages only npx and uvx command lines, and images given with --image");
+    expect(server("image").runRefuses).toBeUndefined();
+    // Neither file there: the one without an index is no reason, as run starts it.
+    expect(server("clean").runRefuses).toBeUndefined();
+    writeFileSync(join(dir, "corp.toml"), "index-url = 'https://pypi.corp.example/simple'\n");
+    const again = await scanned({ corp: { command: "$MCPCAGE", args: ["run", "--", "uvx", "mcp-server-time"], env: { UV_CONFIG_FILE: join(dir, "corp.toml") } } });
+    expect(again.server("corp").runRefuses).toBe(`its env sets UV_CONFIG_FILE, so uvx reads the uv settings in ${join(dir, "corp.toml")}, which name a package index, and the cage builds from PyPI only`);
+  });
+});
