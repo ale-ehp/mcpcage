@@ -51,7 +51,7 @@ export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Pla
     // uv reads flags before `tool run` itself: `uv --directory x tool run` installs and starts the
     // tool from another working directory, which is not what `uvx` does.
     const [first, ...more] = argv.slice(1);
-    if (isUv(command, platform) && first?.startsWith("-") && more.some((word, index) => word === "tool" && more[index + 1] === "run")) {
+    if (isUv(command, platform) && first?.startsWith("-") && more.some((word, index) => word === "tool" && TOOL_RUN.has(more[index + 1]!))) {
       throw new Error(`uv ${flagName(first)} before tool run: flags there are uv's own (--directory changes its working directory), and only \`uv tool run [flags] <package>\` is read as uvx`);
     }
     return { kind: "host", command, args: argv.slice(1) };
@@ -80,27 +80,35 @@ export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Pla
 }
 
 /**
- * The words uv's `tool run` reads in a server's command line: what follows `uvx`, `uv tool run`, or
- * on Windows the `uvx` of a plain `cmd /c uvx ...`. Undefined for any other line, `uv` with flags
- * before `tool run` included (see parseLaunch).
+ * The words uv's `tool run` reads in a server's command line: what follows `uvx`, `uv tool run`,
+ * `uv tool uvx`, or on Windows the `uvx` of a plain `cmd /c uvx ...`. Undefined for any other line,
+ * `uv` with flags before `tool run` included (see parseLaunch).
  */
 export function toolRunArgs(argv: readonly unknown[], platform: NodeJS.Platform = process.platform): string[] | undefined {
   const [command, ...args] = argv;
   if (typeof command !== "string") return undefined;
   if (isUvx(command, platform)) return args as string[];
-  if (isUv(command, platform) && args[0] === "tool" && args[1] === "run") return args.slice(2) as string[];
+  if (isUv(command, platform) && args[0] === "tool" && TOOL_RUN.has(args[1] as string)) return args.slice(2) as string[];
   // A plain `cmd /c uvx ...` on Windows: the uvx line cmd would start (see cmdRunner).
   const cmd = cmdRunner(argv, platform);
   return cmd !== undefined && cmd.runner === "uvx" && "line" in cmd ? cmd.line.slice(1) : undefined;
 }
 
 /**
- * Whether a command names uvx: `uvx` or `uvx.exe`, bare or as a path, in any case on Windows, which
- * compares file names without case (see isNpx). uv's installer puts uvx.exe in
+ * The words after `uv tool` that start uvx: `run`, and `uvx`, the hidden name of the same command
+ * that uvx itself calls (uv 0.13.7, crates/uv-cli: ToolCommand::Uvx, the arguments of `tool run`).
+ * `uv tool uvx mcp-server-time` ran as `uvx mcp-server-time` did, and protect counted it as another
+ * program, not running on the host.
+ */
+const TOOL_RUN: ReadonlySet<string> = new Set(["run", "uvx"]);
+
+/**
+ * Whether a command names uvx: `uvx` or `uvx.exe`, bare or as a path, in any case on Windows and
+ * macOS, whose file systems compare names without case (see isNpx). uv's installer puts uvx.exe in
  * %USERPROFILE%\.local\bin, and READMEs give that full path for clients that start with a short PATH.
  */
 export function isUvx(command: string, platform: NodeJS.Platform = process.platform): boolean {
-  return /(^|[/\\])uvx(\.exe)?$/.test(platform === "win32" ? command.toLowerCase() : command);
+  return /(^|[/\\])uvx(\.exe)?$/.test(withoutCase(command, platform));
 }
 
 /** Whether a command line starts uv: uvx, or uv itself with any arguments. */
@@ -111,7 +119,16 @@ export function startsUv(argv: readonly unknown[], platform: NodeJS.Platform = p
 
 /** Whether a command names uv itself: `uv` or `uv.exe`, as isUvx. */
 function isUv(command: string, platform: NodeJS.Platform): boolean {
-  return /(^|[/\\])uv(\.exe)?$/.test(platform === "win32" ? command.toLowerCase() : command);
+  return /(^|[/\\])uv(\.exe)?$/.test(withoutCase(command, platform));
+}
+
+/**
+ * A command as `platform` finds its file: in lowercase on Windows, and on macOS, whose APFS compares
+ * names without case unless formatted otherwise: a client started UVX and NPX there as it starts uvx
+ * and npx (an UVX in ~/.local/bin was uv's uvx), which protect did not count as running on the host.
+ */
+function withoutCase(command: string, platform: NodeJS.Platform): string {
+  return platform === "win32" || platform === "darwin" ? command.toLowerCase() : command;
 }
 
 // Why a uvx flag is refused, by what it would do: the cage builds the server from PyPI wheels, for
@@ -719,9 +736,10 @@ function isCmd(command: string): boolean {
  * Whether a command names npx: `npx` or `npx.cmd`, bare or as a path. Windows compares file names
  * without case, and starts NPX, npx.CMD and C:\NODEJS\NPX.CMD as it starts npx: they were taken for
  * other programs there, which protect could not count as npx servers and mcpcage could not cage.
+ * macOS too (see withoutCase).
  */
 export function isNpx(command: string, platform: NodeJS.Platform = process.platform): boolean {
-  return /(^|[/\\])npx(\.cmd)?$/.test(platform === "win32" ? command.toLowerCase() : command);
+  return /(^|[/\\])npx(\.cmd)?$/.test(withoutCase(command, platform));
 }
 
 /**

@@ -516,10 +516,11 @@ describe("wrapping one entry", () => {
     expect(wrapEntry({ serverUrl: "https://x" }, { command: "mcpcage" })).toEqual({ skip: "remote server: nothing runs locally to cage" });
   });
 
-  it("compares the names of npx, uvx, docker and mcpcage without case on Windows, as Windows does, and only there", () => {
+  it("compares the names of npx and uvx without case on Windows and macOS, docker's and mcpcage's on Windows, as their file systems do, and not on Linux", () => {
     for (const command of ["NPX", "npx.CMD", "Npx.Cmd", "C:\\Program Files\\nodejs\\NPX.CMD"]) {
       expect(serverType({ command, args: ["-y", "pkg"] }, "win32")).toBe("npx");
-      expect(serverType({ command, args: ["-y", "pkg"] }, "darwin")).toBe("other");
+      expect(serverType({ command, args: ["-y", "pkg"] }, "darwin")).toBe("npx");
+      expect(serverType({ command, args: ["-y", "pkg"] }, "linux")).toBe("other");
       expect(parseLaunch([command, "-y", "pkg@1"], undefined, "win32")).toEqual({ kind: "npm", packageName: "pkg", versionRange: "1", args: [] });
       expect(parseLaunch([command, "-y", "pkg@1"], undefined, "linux")).toEqual({ kind: "host", command, args: ["-y", "pkg@1"] });
       // Caged as npx is.
@@ -528,7 +529,7 @@ describe("wrapping one entry", () => {
     }
     expect([serverType({ command: "UVX.EXE" }, "win32"), serverType({ command: "C:\\Docker\\Docker.EXE" }, "win32")]).toEqual(["uvx", "docker"]);
     const uv = { command: "C:\\Users\\me\\.local\\bin\\UV.EXE", args: ["tool", "run", "mcp-server-time"] };
-    expect([serverType(uv, "win32"), serverType(uv, "darwin")]).toEqual(["uvx", "other"]);
+    expect([serverType(uv, "win32"), serverType(uv, "darwin"), serverType(uv, "linux")]).toEqual(["uvx", "uvx", "other"]);
     const mcpcage = { command: "C:\\npm\\MCPCAGE.CMD", args: ["run", "--", "npx", "-y", "pkg"] };
     expect([serverType(mcpcage, "win32"), serverType(mcpcage, "darwin")]).toEqual(["mcpcage", "other"]);
     expect([isWrapped(mcpcage, "win32"), isWrapped(mcpcage, "linux")]).toEqual([true, false]);
@@ -4350,13 +4351,13 @@ describe("uvx servers in protect", () => {
     const interpreter = "uvx <package>: uvx reads it as a Python interpreter to start (python, python3.13, python@3.12, cpython, pypy, graalpy, pyodide), not as a PyPI package, and the cage starts PyPI packages only";
     // Each entry, and what protect says of it: caged, or the reason it cannot start.
     const cases: Record<string, { entry: ServerEntry; says: string }> = {
-      // Windows compares file names without case: UVX is uvx there.
-      upper: { entry: caged(["UVX", "mcp-server-time"]), says: process.platform === "win32" ? "caged" : `cannot start: ${host("UVX")}` },
+      // Windows and macOS compare file names without case: UVX is uvx there.
+      upper: { entry: caged(["UVX", "mcp-server-time"]), says: process.platform === "linux" ? `cannot start: ${host("UVX")}` : "caged" },
       directory: { entry: caged(["uv", "--directory", top, "tool", "run", "mcp-server-time"]), says: `cannot start: ${directory}` },
       node: { entry: caged(["node", "server.js"]), says: `cannot start: ${host("node")}` },
       interpreter: { entry: caged(["uvx", "python3.13", "-c", "print(1)"]), says: `cannot start: ${interpreter}` },
       flag: { entry: caged(["npx", "-p", "x", "y"]), says: "cannot start: npx -p is not supported yet; use `npx <package> [args]`" },
-      alias: { entry: caged(["uv", "tool", "uvx", "mcp-server-time"]), says: `cannot start: ${host("uv")}` },
+      alias: { entry: caged(["uv", "tool", "uvx", "mcp-server-time"]), says: "caged" },
       empty: { entry: { command: installed.command, args: ["run"] }, says: "cannot start: missing the server command after `--`" },
       // run reads the entry's UV_CONFIG_FILE as the user's: it looks at that file, and starts the server when it names no index.
       config: { entry: caged(["uvx", "mcp-server-time"], ["--env", "UV_CONFIG_FILE"], { UV_CONFIG_FILE: clean }), says: "caged" },

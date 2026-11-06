@@ -390,6 +390,32 @@ describe("uvx command lines", () => {
     expect(() => parseLaunch(["uvx", "--from", "mcp-server-time", ".exe"], undefined, "win32")).toThrow(/^uvx --from: the command after its package must be a plain file name/);
   });
 
+  it("knows uvx, uv and npx in any case on macOS too, whose APFS compares names without case, and reads uv tool uvx as uv tool run", () => {
+    // An UVX in ~/.local/bin was uv's uvx on macOS, and a client started it.
+    for (const command of ["UVX", "Uvx", "/Users/me/.local/bin/UVX", "uvx.EXE"]) {
+      expect(parseLaunch([command, "mcp-server-time"], undefined, "darwin"), command).toEqual(time());
+      expect(serverType({ command, args: ["mcp-server-time"] }, "darwin"), command).toBe("uvx");
+      expect(serverType({ command }, "darwin"), command).toBe("uvx");
+    }
+    expect(parseLaunch(["UV", "tool", "run", "mcp-server-time"], undefined, "darwin")).toEqual(time());
+    expect(parseLaunch(["NPX", "-y", "@acme/notes-mcp"], undefined, "darwin")).toEqual({ kind: "npm", packageName: "@acme/notes-mcp", args: [] });
+    expect(serverType({ command: "/opt/homebrew/bin/NPX", args: ["-y", "@acme/notes-mcp"] }, "darwin")).toBe("npx");
+    // Linux compares names with case: those are other programs there.
+    expect(parseLaunch(["UVX", "mcp-server-time"], undefined, "linux")).toEqual({ kind: "host", command: "UVX", args: ["mcp-server-time"] });
+    expect(parseLaunch(["NPX", "-y", "x"], undefined, "linux")).toEqual({ kind: "host", command: "NPX", args: ["-y", "x"] });
+    expect(serverType({ command: "UVX" }, "linux")).toBe("other");
+    // `uv tool uvx` is the command uvx itself calls: `uv tool uvx --offline mcp-server-time` 0.13.7 ran it as uvx does.
+    for (const platform of ["linux", "darwin", "win32"] as const) {
+      expect(parseLaunch(["uv", "tool", "uvx", "mcp-server-time", "a"], undefined, platform), platform).toEqual(time({ args: ["a"] }));
+      expect(serverType({ command: "uv", args: ["tool", "uvx", "--from", "mcp-server-time", "mcp-server-time"] }, platform), platform).toBe("uvx");
+    }
+    expect(() => parseLaunch(["uv", "--directory", "/x", "tool", "uvx", "mcp-server-time"], undefined, "linux")).toThrow(/^uv --directory before tool run: /);
+    // uv's subcommands keep their case: uv 0.13.7 refused `uv tool UVX` and `uv TOOL run`.
+    for (const argv of [["uv", "tool", "UVX", "mcp-server-time"], ["uv", "TOOL", "run", "mcp-server-time"]]) {
+      expect(parseLaunch(argv, undefined, "darwin"), JSON.stringify(argv)).toEqual({ kind: "host", command: "uv", args: argv.slice(1) });
+    }
+  });
+
   it("gives a uvx server an id from its project, command and arguments, not from its version, extras, --with or --python", () => {
     const id = serverIdFor(uvx("mcp-server-time", "--local-timezone", "UTC"));
     // sha256 of {"args":["--local-timezone","UTC"],"command":"mcp-server-time","kind":"pypi","project":"mcp-server-time"}.

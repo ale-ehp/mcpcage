@@ -505,7 +505,7 @@ function offDriveMount(entry: ServerEntry): string | undefined {
  * starts only with --no-sandbox, on the host. A uvx line is read as pypiOf reads an entry not caged yet,
  * with the user's environment and uv settings, which `run` looks at again at every start (see
  * prepareSandbox), and the entry's variables, which it reads as the user's: its UV_CONFIG_FILE is a
- * settings file to look at, as run looks at it. protect said "caged" for `run -- UVX ...` on macOS,
+ * settings file to look at, as run looks at it. protect said "caged" for `run -- UVX ...` on Linux,
  * `run -- uv --directory x tool run ...` and `run -- node server.js`, which run refuses, and "cannot
  * start" for an entry whose UV_CONFIG_FILE named a file without an index, which run started.
  * Undefined for a line `run` starts, one started from --image, and when `run` would refuse its

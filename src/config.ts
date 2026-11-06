@@ -6,7 +6,7 @@ import type { ParseArgsOptionsConfig } from "node:util";
 import { batchFile, envFileOf, foreignPath, mcpcageAt, movedPlaces, nodeScript, type ForeignPath, type McpcageCommand } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
 import { NETWORK_PATH, networkPath } from "./network-path.js";
-import { cmdRunner, isNpx, npxArgv, parseLaunch, serverIdFor, toolRunArgs, type UvEnvironment } from "./launch.js";
+import { cmdRunner, isNpx, isUvx, npxArgv, parseLaunch, serverIdFor, toolRunArgs, type UvEnvironment } from "./launch.js";
 import type { PypiResolver } from "./pypi.js";
 import { NOT_ON_A_DRIVE, offDrive } from "./sandbox.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
@@ -608,7 +608,8 @@ export function hostPath(arg: unknown): string | undefined {
 /**
  * `remote` for servers reached over the network (nothing runs locally), `mcpcage` for entries that
  * already start through `mcpcage run`, otherwise the program that starts the server. `platform` is
- * the system the entry is started on: Windows compares file names without case (see isNpx).
+ * the system the entry is started on: Windows and macOS compare npx's and uvx's names without case
+ * (see isNpx).
  */
 export function serverType(entry: ServerEntry, platform: NodeJS.Platform = process.platform): ServerType {
   const type = typeof entry.type === "string" ? entry.type.toLowerCase() : undefined;
@@ -620,8 +621,8 @@ export function serverType(entry: ServerEntry, platform: NodeJS.Platform = proce
   if (Array.isArray(entry.args) && npxArgv([entry.command, ...entry.args], platform) !== undefined) return "npx";
   // `uv tool run ...`, which is uvx itself (see toolRunArgs).
   if (Array.isArray(entry.args) && toolRunArgs([entry.command, ...entry.args], platform) !== undefined) return "uvx";
+  if (isUvx(entry.command, platform)) return "uvx";
   const program = programName(entry.command, platform);
-  if (/^uvx(\.exe)?$/.test(program)) return "uvx";
   if (/^docker(\.exe)?$/.test(program)) return "docker";
   return "other";
 }
