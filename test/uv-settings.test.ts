@@ -88,6 +88,9 @@ describe("the scan of a uv.toml for what else uvx installs otherwise", () => {
       ['exclude-newer-package.idna = "2020-01-01T00:00:00Z"', versions("exclude-newer-package")],
       ["'exclude-newer-package' . \"idna\" = '2020-01-01T00:00:00Z'", versions("exclude-newer-package")],
       ['prerelease = "allow"', versions("prerelease")],
+      // uv 0.13.7 installed httpx 1.0.dev6 with it too, for that package alone.
+      ['prerelease-package = { httpx = "allow" }', versions("prerelease-package")],
+      ['prerelease-package.httpx = "allow"', versions("prerelease-package")],
       ['[[dependency-metadata]]\nname = "idna"\nversion = "3.10"\nrequires-dist = ["six"]', "set dependency-metadata: uvx installs other dependencies there than the cage builds"],
       ['dependency-metadata = [{ name = "idna", version = "3.10", requires-dist = ["six"] }]', "set dependency-metadata: uvx installs other dependencies there than the cage builds"],
       ["no-binary = true", source("no-binary")],

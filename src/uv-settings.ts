@@ -165,7 +165,9 @@ const INDEX_KEYS = ["index", "index-url", "extra-index-url", "default-index", "f
  * user's settings, so an entry is not caged while they set one. Each run with `uv tool run` 0.13.7 in
  * its image: resolution = "lowest" installed idna 2.0 for idna>=2 (3.20 without it); exclude-newer,
  * and exclude-newer-package for idna, of 2020-01-01 idna 2.8; prerelease = "allow" httpx 1.0.dev6
- * (0.28.1 without it); a [[dependency-metadata]] entry giving idna 3.10 requires-dist six installed
+ * (0.28.1 without it), and prerelease-package = { httpx = "allow" } the same for httpx alone (a key
+ * of uv.toml whose flag, --prerelease-package, uvx is refused with as unsupported); a
+ * [[dependency-metadata]] entry giving idna 3.10 requires-dist six installed
  * six with it; no-binary = true, and no-binary-package = ["idna"], chose idna-3.10.tar.gz over its
  * wheel. A value that is uv's default (resolution = "highest") counts too: a false positive leaves a
  * server uncaged, with the reason.
@@ -175,6 +177,7 @@ const FROM_SOURCE = "uvx builds packages from source there, and the cage install
 const INSTALL_KEYS: ReadonlyMap<string, string> = new Map([
   ["resolution", "uvx chooses other versions there than the newest, which the cage installs"],
   ["prerelease", OTHER_VERSIONS],
+  ["prerelease-package", OTHER_VERSIONS],
   ["exclude-newer", OTHER_VERSIONS],
   ["exclude-newer-package", OTHER_VERSIONS],
   ["dependency-metadata", "uvx installs other dependencies there than the cage builds"],
