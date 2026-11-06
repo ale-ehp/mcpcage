@@ -138,6 +138,7 @@ export function resolvePypi(spec: PypiLaunch, options: { log: (message: string) 
   const parsed = checkedRequirement(spec.requirement);
   for (const requirement of spec.with) checkedRequirement(requirement);
   options.log(`mcpcage: resolving ${spec.project} from PyPI, wheels only...`);
+  pullResolveImage(runner, options.log);
   const { root, python } = choosePython(spec, platform, runner, options.log);
   const extras = parsed.extras.length > 0 ? `[${parsed.extras.join(",")}]` : "";
   const input = [`${root.name}${extras}==${root.version}`, ...spec.with].map((line) => `${line}\n`).join("");
@@ -146,6 +147,19 @@ export function resolvePypi(spec: PypiLaunch, options: { log: (message: string) 
   checkLock(answer.stdout, root);
   options.log(`mcpcage: ${root.name} ${root.version} on Python ${python}, ${pins(answer.stdout)} packages locked with their hashes`);
   return { packageName: root.name, version: root.version, python, platform, lock: answer.stdout };
+}
+
+/**
+ * Pulls the resolve image when Docker does not have it, and says so. `docker run` pulled it by itself
+ * at the first resolve on a machine, what it printed kept with the rest of the resolve's stderr and
+ * never shown, so the user waited on "resolving ..." for as long as uv's image (61 MB unpacked) took
+ * to come, with no word of why. It is pinned by its digest: once there, it is never pulled again.
+ * Quietly, as Docker prints one line for a pull with --quiet; its error, when it fails.
+ */
+function pullResolveImage(runner: DockerRunner, log: (message: string) => void): void {
+  if (runner(["image", "inspect", "--format", "{{.Id}}", PYPI_RESOLVE_BASE]).status === 0) return;
+  log(`mcpcage: pulling uv's image, which PyPI servers are resolved in, once: ${PYPI_RESOLVE_BASE}...`);
+  if (runner(["pull", "--quiet", PYPI_RESOLVE_BASE], { stream: true }).status !== 0) throw new Error(`docker pull ${PYPI_RESOLVE_BASE} failed`);
 }
 
 /**

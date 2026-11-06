@@ -14,6 +14,7 @@ import { PYPI_RESOLVE_BASE } from "../src/sandbox.js";
 interface Call {
   args: string[];
   input?: string;
+  stream?: boolean;
 }
 
 const hex = (seed: number) => seed.toString(16).padStart(2, "0").repeat(32);
@@ -43,11 +44,19 @@ function flag(args: string[], name: string): string | undefined {
  * A docker whose engine is `arch`, whose uv answers step 1 (--no-deps) with `roots[python]` and step
  * 3 with `lock(input, python)`.
  */
-function fakeDocker(answers: { arch?: string; roots?: Record<string, DockerResult>; lock?: (input: string, python: string) => DockerResult }) {
+function fakeDocker(answers: { arch?: string; roots?: Record<string, DockerResult>; lock?: (input: string, python: string) => DockerResult; resolveImage?: boolean; pull?: DockerResult }) {
   const calls: Call[] = [];
+  // Docker has the resolve image unless `resolveImage` is false; a pull gets it, unless `pull` says otherwise.
+  let present = answers.resolveImage ?? true;
   const runner: DockerRunner = (args, options = {}) => {
-    calls.push({ args, input: options.input });
+    calls.push({ args, input: options.input, stream: options.stream });
     if (args[0] === "version") return ok(`${answers.arch ?? "arm64"}\n`);
+    if (args[0] === "image" && args[1] === "inspect" && args.at(-1) === PYPI_RESOLVE_BASE) return present ? ok("sha256:resolve\n") : { status: 1, stdout: "", stderr: "Error: No such image" };
+    if (args[0] === "pull") {
+      const pulled = answers.pull ?? ok(`${PYPI_RESOLVE_BASE}\n`);
+      present = pulled.status === 0;
+      return pulled;
+    }
     const python = flag(args, "--python-version") ?? "";
     if (args.includes("--no-deps")) return answers.roots?.[python] ?? noSolution(`error: No solution found when resolving dependencies\n  cause: nothing on ${python}\n`);
     if (args.includes("--generate-hashes")) return answers.lock?.(options.input ?? "", python) ?? { status: 2, stdout: "", stderr: "unexpected" };
@@ -66,6 +75,31 @@ const TIME_LOCK = lockOf([["annotated-types", "0.8.0"], ["mcp-server-time", "202
 const timeDocker = () => fakeDocker({ roots: { "3.13": ok("mcp-server-time==2026.11.4\n"), "3.15": ok("mcp-server-time==2026.11.4\n") }, lock: () => ok(TIME_LOCK) });
 
 describe("resolving a PyPI server", () => {
+  it("pulls uv's image first when Docker does not have it, saying so, and only then", () => {
+    const docker = fakeDocker({ resolveImage: false, roots: { "3.13": ok("mcp-server-time==2026.11.4\n"), "3.15": ok("mcp-server-time==2026.11.4\n") }, lock: () => ok(TIME_LOCK) });
+    const log: string[] = [];
+    resolvePypi(pypi("uvx", "mcp-server-time"), { log: (line) => log.push(line), runner: docker.runner });
+    expect(log.slice(0, 2)).toEqual([
+      "mcpcage: resolving mcp-server-time from PyPI, wheels only...",
+      `mcpcage: pulling uv's image, which PyPI servers are resolved in, once: ${PYPI_RESOLVE_BASE}...`,
+    ]);
+    const pulls = docker.calls.filter((call) => call.args[0] === "pull");
+    // Its progress on mcpcage's stderr (stdout is the MCP channel), before the first docker run.
+    expect(pulls).toEqual([{ args: ["pull", "--quiet", PYPI_RESOLVE_BASE], input: undefined, stream: true }]);
+    expect(docker.calls.indexOf(pulls[0]!)).toBeLessThan(docker.calls.findIndex((call) => call.args[0] === "run"));
+    // The next resolve finds it.
+    log.length = 0;
+    resolvePypi(pypi("uvx", "mcp-server-time"), { log: (line) => log.push(line), runner: docker.runner });
+    expect(log.join("\n")).not.toContain("pulling");
+    expect(docker.calls.filter((call) => call.args[0] === "pull")).toHaveLength(1);
+  });
+
+  it("stops at a pull that fails, before any docker run", () => {
+    const docker = fakeDocker({ resolveImage: false, pull: { status: 1, stdout: "", stderr: "" } });
+    expect(() => resolvePypi(pypi("uvx", "mcp-server-time"), { log: () => {}, runner: docker.runner })).toThrow(`docker pull ${PYPI_RESOLVE_BASE} failed`);
+    expect(docker.compiles()).toEqual([]);
+  });
+
   it("pins the server's own version first, without its dependencies, then locks that version with hashes", () => {
     const docker = timeDocker();
     const resolved = resolvePypi(pypi("uvx", "mcp-server-time"), { log: () => {}, runner: docker.runner });

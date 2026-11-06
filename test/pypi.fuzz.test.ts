@@ -90,6 +90,8 @@ describe("uv's reasons, fuzzed", () => {
         fc.property(fc.array(anyText(40), { maxLength: 6 }), (reason) => {
           const runner: DockerRunner = (args) => {
             if (args[0] === "version") return { status: 0, stdout: "arm64\n", stderr: "" };
+            // Docker has the resolve image (see pullResolveImage).
+            if (args[0] === "image") return { status: 0, stdout: "sha256:resolve\n", stderr: "" };
             return { status: 1, stdout: "", stderr: `error: No solution found when resolving dependencies\n${reason.join("\n")}` };
           };
           expect(() => resolvePypi(pypi("uvx", "--python", "3.12", "mcp-server-time"), { log: () => {}, runner })).toThrow(

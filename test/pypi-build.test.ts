@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sha256 } from "../src/canonical.js";
 import { parseLaunch, type PypiLaunch } from "../src/launch.js";
 import { checkPypi, managedPython, preparePypiImage, pypiDockerfile, uvVersion, type DockerResult, type DockerRunner } from "../src/pypi.js";
-import { PYPI_INSTALL_BASE, PYPI_RUNTIME_BASE, UV_BASE, type SandboxOptions, type ServerRecord } from "../src/sandbox.js";
+import { PYPI_INSTALL_BASE, PYPI_RESOLVE_BASE, PYPI_RUNTIME_BASE, UV_BASE, type SandboxOptions, type ServerRecord } from "../src/sandbox.js";
 
 /*
  * How a PyPI server's image is built from its lock: the Dockerfile mcpcage writes, and when it
@@ -179,12 +179,14 @@ describe("the resolve wrap and --fix run before they write a uvx entry", () => {
 
   it("gives uv's reason when it finds no solution from wheels, and any other failure as one", () => {
     const uv = "  x No solution found when resolving dependencies:\n  `-> Because uuid==1.30 has no usable wheels and all versions of dbtlabs-vortex depend on uuid==1.30, we can conclude that all versions of dbtlabs-vortex cannot be used.\n";
-    const unsolvable: DockerRunner = (args) => (args[0] === "version" ? { status: 0, stdout: "arm64\n", stderr: "" } : { status: 1, stdout: "", stderr: uv });
+    // Docker answers its version, and has the resolve image; uv answers the rest.
+    const known = (args: string[]) => (args[0] === "version" ? { status: 0, stdout: "arm64\n", stderr: "" } : args[0] === "image" ? { status: 0, stdout: "sha256:resolve\n", stderr: "" } : undefined);
+    const unsolvable: DockerRunner = (args) => known(args) ?? { status: 1, stdout: "", stderr: uv };
     const answer = checkPypi("dbt", pypi("uvx", "dbt-mcp==2.10.1"), { log: () => {}, runner: unsolvable });
     expect(answer).toEqual({ unsolvable: expect.stringMatching(/^dbt-mcp cannot be installed from PyPI wheels on Python 3\.13, and the cage never builds a package from source: .*Because uuid==1\.30 has no usable wheels/) });
     const stopped: DockerRunner = () => ({ status: 1, stdout: "", stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" });
     expect(checkPypi("time", pypi("uvx", "mcp-server-time"), { log: () => {}, runner: stopped })).toEqual({ failed: expect.stringMatching(/^docker version failed: Cannot connect to the Docker daemon/) });
-    const offline: DockerRunner = (args) => (args[0] === "version" ? { status: 0, stdout: "arm64\n", stderr: "" } : { status: 2, stdout: "", stderr: "error: Failed to fetch: `https://pypi.org/simple/mcp-server-time/`" });
+    const offline: DockerRunner = (args) => known(args) ?? { status: 2, stdout: "", stderr: "error: Failed to fetch: `https://pypi.org/simple/mcp-server-time/`" };
     expect(checkPypi("time", pypi("uvx", "mcp-server-time"), { log: () => {}, runner: offline })).toEqual({ failed: expect.stringMatching(/^the resolve of mcp-server-time failed \(exit code 2\): error: Failed to fetch/) });
   });
 });
@@ -197,7 +199,8 @@ const lockOf = (version: string) => `mcp-server-time==${version} \\\n    --hash=
  * the images by tag, and gives each build a new id.
  */
 function fakeEngine(state: { arch: string; version: string }) {
-  const images = new Map<string, string>();
+  // It has the resolve image, which a test that clears `images` takes away: a pull brings it back.
+  const images = new Map<string, string>([[PYPI_RESOLVE_BASE, "sha256:resolve"]]);
   const calls: string[][] = [];
   let built = 0;
   const runner: DockerRunner = (args, options = {}) => {
@@ -209,6 +212,11 @@ function fakeEngine(state: { arch: string; version: string }) {
     if (args[0] === "image" && args[1] === "inspect") {
       const id = images.get(args.at(-1)!);
       return id === undefined ? { status: 1, stdout: "", stderr: "No such image" } : ok(`${id}\n`);
+    }
+    if (args[0] === "pull") {
+      expect(options.stream).toBe(true);
+      images.set(args.at(-1)!, "sha256:resolve");
+      return ok(`${args.at(-1)}\n`);
     }
     if (args[0] === "build") {
       expect(options.stream).toBe(true);
