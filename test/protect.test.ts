@@ -18,6 +18,7 @@ import { cageHome } from "../src/paths.js";
 import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs, writableMounts, type Inspector } from "../src/protect.js";
 import { PypiUnsolvable, type PypiResolver } from "../src/pypi.js";
 import { offDrive, parseMount, runArgs } from "../src/sandbox.js";
+import { uvConfigFiles, uvSettingsReason } from "../src/uv-settings.js";
 import { idleProgram, noDocker, onWindows, onWindowsUntilDone } from "./fake-programs.js";
 import { asStored, cli, fakeServer, fakeUserEnv, hostileServer, literal, mcpcageWithEnv, native, root, stubHome, written, writtenEntry } from "./helpers.js";
 
@@ -4216,5 +4217,73 @@ describe("uvx servers in protect", () => {
     expect(detailsOf(mcpcageWithEnv({ ...machine.env, UV_DEFAULT_INDEX: "https://pypi.corp.example/simple" }, "protect", "--project", machine.project, "--offline").stdout, "time")).toEqual([
       "cannot be caged: your environment sets UV_DEFAULT_INDEX: uvx installs from another index there",
     ]);
+
+    // A server caged before the settings named an index: `run` refuses it, and protect says so in its words.
+    const caged = uvxHome({ time: { command: installed.command, args: ["run", "--", "uvx", "mcp-server-time"] } });
+    writeText(join(caged.home, ".config", "uv", "uv.toml"), '[[index]]\nname = "corp"\nurl = "https://user:s3cret@pypi.corp.example/simple"\n');
+    const stuck = mcpcageWithEnv(caged.env, "protect", "--project", caged.project, "--offline", "--command", installed.command);
+    expect(lineOf(stuck.stdout, "time")).toMatch(new RegExp(` {2}cannot start: ${literal(why)}$`));
+    expect(stuck.stdout).toContain("  0 already run through mcpcage.\n  1 cannot start: mcpcage run refuses its uvx command line, for the reason shown above.");
+    expect(mcpcageWithEnv(caged.env, "run", "--", "uvx", "mcp-server-time").stderr).toBe(`mcpcage: ${why}\n`);
+  });
+
+  it("says a caged uvx server cannot start while your uv settings or your environment name an index, as run refuses it, and does not count it as caged", async () => {
+    const installed = fakeMcpcage();
+    const machine = uvxHome({
+      time: { command: installed.command, args: ["run", "--", "uvx", "mcp-server-time"] },
+      duck: { command: installed.command, args: ["run", "--", "uv", "tool", "run", "duckduckgo-mcp-server"] },
+      notes: { command: installed.command, args: ["run", "--", "npx", "-y", "@acme/notes-mcp"] },
+      host: { command: installed.command, args: ["run", "--no-sandbox", "--", "uvx", "mcp-server-fetch"] },
+    });
+    // The user's uv.toml, where uv looks for it on this system: under APPDATA on Windows, which Windows' own places give.
+    const places = { platform: process.platform, env: {}, home: machine.home, windows: { appData: join(machine.home, "AppData", "Roaming") } };
+    writeText(uvConfigFiles(places)[0]!, '[[index]]\nname = "corp"\nurl = "https://user:s3cret@pypi.corp.example/simple"\n');
+    const settings = uvSettingsReason(places);
+    const why = `your uv settings (${native(process.platform === "win32" ? "~/AppData/Roaming/uv/uv.toml" : "~/.config/uv/uv.toml")}) name a package index, and the cage builds from PyPI only`;
+    expect(settings).toBe(why);
+    const started: string[][] = [];
+    const inspect: Inspector = async (launch) => {
+      started.push(launch.argv);
+      return [];
+    };
+    const scan = (uv: { environment: Record<string, string>; settings: string | undefined }) =>
+      scanConfigs({ locations: discoverConfigs({ platform: process.platform, home: machine.home, env: {}, project: machine.project }), home: machine.home, offline: true, cacheDir: join(machine.top, "cache"), npmRunner: noNpm, uv, ownCommand: installed.command, inspect });
+
+    const report = await scan({ environment: {}, settings });
+    const text = renderReport(report, { home: machine.home });
+    // --inspect does not start them either: it would stop where `run` does.
+    expect(started).toContainEqual(["npx", "-y", "@acme/notes-mcp"]);
+    expect(started).not.toContainEqual(["uvx", "mcp-server-time"]);
+    expect(started).not.toContainEqual(["uv", "tool", "run", "duckduckgo-mcp-server"]);
+    // `run` refuses both at every start, before Docker is needed, with these words.
+    expect(lineOf(text, "time")).toMatch(new RegExp(` {2}cannot start: ${literal(why)}$`));
+    expect(lineOf(text, "duck")).toMatch(new RegExp(` {2}cannot start: ${literal(why)}$`));
+    expect(detailsOf(text, "time")).toEqual([]);
+    // An npx server is not read with uv's settings, and one with --no-sandbox runs uvx itself, on the host.
+    expect(lineOf(text, "notes")).toMatch(/ {2}caged$/);
+    expect(lineOf(text, "host")).toMatch(/ {2}mcpcage --no-sandbox: pinning and audit only, no isolation$/);
+    expect(text).toMatch(/\n {2}1 already runs through mcpcage\.\n {2}2 cannot start: mcpcage run refuses their uvx command lines, for the reasons shown above\.$/);
+    expect(text).not.toContain("s3cret");
+    // --fix leaves them to the user, with the same words, and changes nothing else in them.
+    const plan: string[] = [];
+    fixConfigs({ report, command: installed.command, claudeCodeRunning: false, dryRun: true, home: machine.home, log: (line) => plan.push(line), uv: { environment: {}, settings } });
+    const where = tilde(machine.cursor, machine.home);
+    expect(plan).toEqual([
+      `  not changed: time in ${where}: it cannot start: ${why}`,
+      `  not changed: duck in ${where}: it cannot start: ${why}`,
+      `  not changed: host in ${where}: it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand`,
+    ]);
+
+    // A variable of your own environment that names an index stops it the same way.
+    const variable = renderReport(await scan({ environment: { UV_DEFAULT_INDEX: "https://user:s3cret@pypi.corp.example/simple" }, settings: undefined }), { home: machine.home });
+    expect(lineOf(variable, "time")).toMatch(/ {2}cannot start: your environment sets UV_DEFAULT_INDEX: uvx installs from another index there$/);
+    expect(variable).toContain("  1 already runs through mcpcage.\n  2 cannot start:");
+    expect(variable).not.toContain("s3cret");
+
+    // Without them, caged.
+    const clean = renderReport(await scan({ environment: {}, settings: undefined }), { home: machine.home });
+    expect(lineOf(clean, "time")).toMatch(/ {2}caged$/);
+    expect(clean).toMatch(/\n {2}3 already run through mcpcage\.$/);
+    expect(clean).not.toContain("cannot start");
   });
 });
