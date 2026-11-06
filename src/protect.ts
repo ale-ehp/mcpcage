@@ -1057,9 +1057,22 @@ function secretNames(entry: ServerEntry): string[] {
   const names: string[] = [];
   for (const values of [entry.env, entry.headers]) {
     if (!isJsonObject(values)) continue;
-    for (const [name, value] of Object.entries(values)) if (SECRET_NAME.test(name) && looksLikeSecret(value)) names.push(name);
+    for (const [name, value] of Object.entries(values)) if (secretVariable(name, value)) names.push(name);
   }
   return names;
+}
+
+/**
+ * Whether a variable holds a secret written out in full: by its name (SECRET_NAME) and a value that
+ * looks like one, or, for one of uv's variables, an address in its value with a credential in it
+ * (see maskUrl). UV_INDEX_URL=https://user:pass@... has no secret's name, and protect counted no
+ * secret in clear text for it, where the same address as an argument was counted. UV_INDEX takes
+ * name=address, and it and UV_EXTRA_INDEX_URL several, separated by spaces.
+ */
+function secretVariable(name: string, value: unknown): boolean {
+  if (SECRET_NAME.test(name) && looksLikeSecret(value)) return true;
+  if (!/^UV_/i.test(name) || typeof value !== "string") return false;
+  return value.split(/\s+/).some((part) => maskUrl(part.replace(/^[^=]*=(?=[a-z][a-z0-9+.-]*:\/\/)/i, "")).hidden.length > 0);
 }
 
 /** A value written out in full: not a placeholder that the client fills in, nor a path, number or plain address. */
@@ -1129,7 +1142,7 @@ function maskArgs(args: string[], wrapped = false): { shown: string[]; secrets: 
     if (variable !== undefined) {
       shown[index] = `${variable.prefix}${variable.name}=${MASK}`;
       hidden.push(variable.value);
-      if (SECRET_NAME.test(variable.name) && looksLikeSecret(variable.value)) secrets.push(variable.name);
+      if (secretVariable(variable.name, variable.value)) secrets.push(variable.name);
       continue;
     }
     const next = args[index + 1];

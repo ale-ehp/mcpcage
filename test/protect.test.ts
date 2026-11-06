@@ -4038,7 +4038,7 @@ describe("uvx servers in protect", () => {
     for (const name of ["time", "git", "corp", "duck", "tuned"]) expect(lineOf(out, name), name).toMatch(/ NOT CAGED$/);
     expect(detailsOf(out, "time")).toEqual(["package: mcp-server-time (PyPI)"]);
     expect(detailsOf(out, "git")).toEqual(["cannot be caged: uvx --from: builds or installs code from outside PyPI, and the cage installs PyPI wheels only"]);
-    expect(detailsOf(out, "corp")).toEqual(["cannot be caged: its env sets UV_INDEX_URL: uvx installs from another index there"]);
+    expect(detailsOf(out, "corp")).toEqual(["secret in clear text: UV_INDEX_URL", "cannot be caged: its env sets UV_INDEX_URL: uvx installs from another index there"]);
     expect(detailsOf(out, "duck")).toEqual(["package: duckduckgo-mcp-server (PyPI), with duckduckgo-mcp-server[browser]"]);
     // Its env acts on the host as an npx entry's does, and is named as such.
     expect(detailsOf(out, "tuned")).toEqual(["package: mcp-server-fetch (PyPI)", "env NODE_OPTIONS: can make Node run code on your machine before the cage starts"]);
@@ -4285,6 +4285,24 @@ describe("uvx servers in protect", () => {
     expect(lineOf(clean, "time")).toMatch(/ {2}caged$/);
     expect(clean).toMatch(/\n {2}3 already run through mcpcage\.$/);
     expect(clean).not.toContain("cannot start");
+  });
+
+  it("counts a credential in an address of uv's variables as a secret in clear text, and never prints it", () => {
+    const installed = fakeMcpcage();
+    const machine = uvxHome({
+      index: { command: "uvx", args: ["corp-mcp"], env: { UV_INDEX_URL: "https://user:s3cret@pypi.corp.example/simple" } },
+      named: { command: "uvx", args: ["corp-mcp"], env: { UV_INDEX: "corp=https://__token__:s3cret@pypi.corp.example/simple" } },
+      extra: { command: "uvx", args: ["corp-mcp"], env: { UV_EXTRA_INDEX_URL: "https://pypi.example/simple https://user:s3cret@pypi.corp.example/simple" } },
+      plain: { command: "uvx", args: ["corp-mcp"], env: { UV_INDEX_URL: "https://pypi.corp.example/simple" } },
+      caged: { command: installed.command, args: ["run", "--env", "UV_DEFAULT_INDEX=https://user:s3cret@pypi.corp.example/simple", "--", "uvx", "corp-mcp"] },
+    });
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--command", installed.command);
+    for (const [name, variable] of [["index", "UV_INDEX_URL"], ["named", "UV_INDEX"], ["extra", "UV_EXTRA_INDEX_URL"], ["caged", "UV_DEFAULT_INDEX"]]) {
+      expect(detailsOf(result.stdout, name!), name).toContain(`secret in clear text: ${variable}`);
+    }
+    expect(detailsOf(result.stdout, "plain").join("\n")).not.toContain("secret");
+    expect(result.stdout).toContain("  4 keep a secret in clear text in a configuration file.\n");
+    expect(`${result.stdout}${result.stderr}`).not.toContain("s3cret");
   });
 
   it("words a refusal of your own uv variables and settings as run words it", () => {
