@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseArgs } from "node:util";
-import { cageCheck, escapeRegExp, hostVariable, RUN_OPTIONS, unwrapEntry, wrapEntry, type ServerEntry } from "../src/config.js";
+import { cageCheck, entryEnvironment, escapeRegExp, hostVariable, RUN_OPTIONS, unwrapEntry, userUvHere, uvxEnvironment, wrapConfig, wrapEntry, type ServerEntry } from "../src/config.js";
 import { WINDOWS_PLACES } from "../src/windows-places.js";
 import { idleProgram, onWindows } from "./fake-programs.js";
 
@@ -199,6 +199,66 @@ describe("a uvx entry", () => {
     expect(wrapEntry({ command: "uvx", args: ["--from", "git+https://github.com/x/y", "y"] }, { command: "mcpcage" })).toEqual({
       skip: "uvx --from: builds or installs code from outside PyPI, and the cage installs PyPI wheels only",
     });
+  });
+});
+
+describe("a uvx entry and the uv settings it would read", () => {
+  const index = "index-url = 'https://pypi.corp.example/simple'\n";
+  const SETTINGS = "your uv settings (~/.config/uv/uv.toml) name a package index, and the cage builds from PyPI only";
+
+  it("stays as it is while the user's own uv settings stop the cage, and an npx entry is wrapped all the same", () => {
+    const uv = { environment: {}, settings: SETTINGS };
+    expect(wrapEntry({ command: "uvx", args: ["mcp-server-time"] }, { command: "mcpcage", uv })).toEqual({ skip: SETTINGS });
+    expect(wrapEntry({ command: "npx", args: ["-y", "@acme/notes-mcp"] }, { command: "mcpcage", uv })).toEqual({ entry: { command: "mcpcage", args: ["run", "--", "npx", "-y", "@acme/notes-mcp"] } });
+    // The user's own UV_CONFIG_FILE is their settings file, looked at as their uv.toml is: not refused as an entry's would be.
+    expect(wrapEntry({ command: "uvx", args: ["mcp-server-time"] }, { command: "mcpcage", uv: { environment: { UV_CONFIG_FILE: "/home/me/uv.toml" }, settings: undefined } })).toEqual({
+      entry: { command: "mcpcage", args: ["run", "--", "uvx", "mcp-server-time"] },
+    });
+  });
+
+  it.skipIf(process.platform === "win32")("stays as it is when its own variables point uvx at uv settings that name an index", () => {
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-uv-home-"));
+    mkdirSync(join(home, ".config", "uv"), { recursive: true });
+    writeFileSync(join(home, ".config", "uv", "uv.toml"), index);
+    const uv = { environment: {}, settings: undefined };
+    expect(wrapEntry({ command: "uvx", args: ["mcp-server-time"], env: { HOME: home } }, { command: "mcpcage", uv })).toEqual({
+      skip: `its env sets HOME, so uvx reads the uv settings in ${join(home, ".config", "uv", "uv.toml")}, which name a package index, and the cage builds from PyPI only`,
+    });
+  });
+
+  it("reads an entry's envFile before its env, as VS Code loads them, when the configuration holding it is given", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-envfile-"));
+    const envFile = join(dir, "server.env");
+    writeFileSync(envFile, "UV_PYTHON=3.12\nOTHER=x\n");
+    const entry = { command: "uvx", args: ["mcp-server-time"], envFile, env: { UV_PYTHON: "3.13" } };
+    expect(entryEnvironment(entry, join(dir, "mcp.json"))).toEqual([
+      { where: `its envFile (${envFile})`, variables: { UV_PYTHON: "3.12", OTHER: "x" } },
+      { where: "its env", variables: { UV_PYTHON: "3.13" } },
+    ]);
+    // Without the configuration, the envFile cannot be found: the env alone.
+    expect(entryEnvironment(entry)).toEqual([{ where: "its env", variables: { UV_PYTHON: "3.13" } }]);
+    // The user's environment first, as their own.
+    expect(uvxEnvironment(entry, { PATH: "/usr/bin" })[0]).toEqual({ where: "your environment", variables: { PATH: "/usr/bin" }, own: true });
+  });
+
+  it.skipIf(process.platform === "win32")("reads this machine's uv setup from mcpcage's environment and the user's uv settings", () => {
+    const home = mkdtempSync(join(tmpdir(), "mcpcage-uv-user-"));
+    mkdirSync(join(home, ".config", "uv"), { recursive: true });
+    writeFileSync(join(home, ".config", "uv", "uv.toml"), index);
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("XDG_CONFIG_HOME", undefined);
+    vi.stubEnv("UV_CONFIG_FILE", undefined);
+    try {
+      expect(userUvHere()).toEqual({ environment: process.env, settings: SETTINGS });
+      // wrap reads it once, at the first uvx entry, and leaves the entry with the reason.
+      const file = join(home, "claude_desktop_config.json");
+      writeFileSync(file, JSON.stringify({ mcpServers: { time: { command: "uvx", args: ["mcp-server-time"] } } }));
+      expect(wrapConfig(file, { dryRun: true, command: "mcpcage" }).skipped).toEqual([{ name: "time", reason: SETTINGS }]);
+      // A setup given is the one read, this machine's never.
+      expect(wrapConfig(file, { dryRun: true, command: "mcpcage", uv: { environment: {}, settings: undefined } }).changed.map((change) => change.name)).toEqual(["time"]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
