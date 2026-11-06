@@ -185,14 +185,16 @@ const INSTALL_KEYS: ReadonlyMap<string, string> = new Map([
 /**
  * A scan of the text of a uv.toml for the first of `keys` it sets, or opens as a table ([[index]],
  * [[dependency-metadata]], [exclude-newer-package]), under any table and as a dotted or quoted key
- * too. Strings are read first, so that a # or a key's name inside a value is neither a comment nor a
+ * too, or as the first part of a dotted key: uv 0.13.7 read `exclude-newer-package.idna = <date>` as
+ * exclude-newer-package = { idna = <date> }, which the scan, looking for an = after the name, did not
+ * find. Strings are read first, so that a # or a key's name inside a value is neither a comment nor a
  * key; a quoted key keeps its name, its escapes decoded as uv decodes them (see unescaped); what
  * follows a # outside a string is a comment. Keys of [pip], which uvx does not read, count too: a
  * false positive leaves a server uncaged, with the reason.
  */
 function scanFor(keys: readonly string[]): (text: string) => string | undefined {
   const names = keys.join("|");
-  const key = new RegExp(`(?:^|[\\s{,.])(${names})\\s*=`);
+  const key = new RegExp(`(?:^|[\\s{,.])(${names})\\s*[=.]`);
   const table = new RegExp(`^\\s*\\[{1,2}\\s*(?:[A-Za-z0-9_-]+\\s*\\.\\s*)*(${names})\\s*\\]{1,2}`);
   return (text) => {
     for (const raw of text.split(/\r?\n/)) {

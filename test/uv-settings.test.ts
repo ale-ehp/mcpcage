@@ -84,6 +84,9 @@ describe("the scan of a uv.toml for what else uvx installs otherwise", () => {
       ['exclude-newer = "2020-01-01T00:00:00Z"', versions("exclude-newer")],
       ['exclude-newer-package = { idna = "2020-01-01T00:00:00Z" }', versions("exclude-newer-package")],
       ['[exclude-newer-package]\nidna = "2020-01-01T00:00:00Z"', versions("exclude-newer-package")],
+      // A table of packages written as dotted keys: uv 0.13.7 read each as exclude-newer-package = { idna = ... }.
+      ['exclude-newer-package.idna = "2020-01-01T00:00:00Z"', versions("exclude-newer-package")],
+      ["'exclude-newer-package' . \"idna\" = '2020-01-01T00:00:00Z'", versions("exclude-newer-package")],
       ['prerelease = "allow"', versions("prerelease")],
       ['[[dependency-metadata]]\nname = "idna"\nversion = "3.10"\nrequires-dist = ["six"]', "set dependency-metadata: uvx installs other dependencies there than the cage builds"],
       ['dependency-metadata = [{ name = "idna", version = "3.10", requires-dist = ["six"] }]', "set dependency-metadata: uvx installs other dependencies there than the cage builds"],
