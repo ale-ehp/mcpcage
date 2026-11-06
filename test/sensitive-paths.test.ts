@@ -192,6 +192,13 @@ describe("each place mcpcage will not mount", () => {
       [".local/share/pipx", "the programs pipx installs and runs", ""],
       [".local/pipx", "the programs pipx installs and runs", ""],
       ["Library/Application Support/pipx", "the programs pipx installs and runs", "darwin"],
+      ["AppData/Local/pipx", "the programs pipx installs and runs", "win32"],
+      ["pipx", "the programs pipx installs and runs", "win32"],
+      [".cache/pipx", "the environments `pipx run` starts, in pipx's cache", ""],
+      ["Library/Caches/pipx", "the environments `pipx run` starts, in pipx's cache", "darwin"],
+      [".local/share/bash-completion/completions", "the completion scripts your shell runs", ""],
+      [".local/share/fish/vendor_completions.d", "the completion scripts your shell runs", ""],
+      [".local/share/zsh/site-functions", "the completion scripts your shell runs", ""],
       [".rd", "the Docker socket of Rancher Desktop", ""],
       [".lima", "the Docker socket of Lima", ""],
       ["Library/Containers/com.docker.docker", "the Docker socket of Docker Desktop", "darwin"],
@@ -235,6 +242,7 @@ describe("each place mcpcage will not mount", () => {
       ["/sbin", "the system's programs"],
       ["/usr/local", "the programs you run"],
       ["/opt/homebrew", "the programs Homebrew installs"],
+      ["/opt/pipx", "the programs pipx installs for every user"],
       ["/Applications", "your applications", "darwin"],
       ["/Library", "the programs and settings of every user", "darwin"],
     ];
@@ -271,6 +279,7 @@ describe("uv's and pipx's places where the environment moves them", () => {
       { path: "/x/data/uv", what: "the tools and the Pythons uv installs" },
       { path: "/x/config/uv", what: "your uv settings, which choose where uvx takes its packages from" },
       { path: "/x/data/pipx", what: "the programs pipx installs and runs" },
+      { path: "/x/cache/pipx", what: "the environments `pipx run` starts, in pipx's cache" },
     ]);
     expect(sensitivePath("/x/data/uv/tools/mcp-server-time", { ...linux, tools })).toBe("the tools and the Pythons uv installs in /x/data/uv");
     expect(sensitivePath("/x/config", { ...linux, tools })).toBe("your uv settings, which choose where uvx takes its packages from in /x/config, which holds /x/config/uv");
@@ -282,6 +291,7 @@ describe("uv's and pipx's places where the environment moves them", () => {
       { path: "D:\\xdg\\..\\bin", what: "the programs uv installs, which you run" },
       { path: "D:\\Local\\uv", what: "the environments uvx runs, in uv's cache" },
       { path: "D:\\Roaming\\uv", what: "your uv settings, and the tools and the Pythons uv installs" },
+      { path: "D:\\Local\\pipx", what: "the programs pipx installs and runs" },
     ]);
     // A place set to the home directory counts as the home directory, not as every path in it.
     expect(sensitivePath("/home/me/projects/notes", { ...linux, tools: toolPlaces({ platform: "linux", env: { UV_CACHE_DIR: "/home/me" } }) })).toBeUndefined();
@@ -305,6 +315,45 @@ describe("uv's and pipx's places where the environment moves them", () => {
     // UV_* directory from the directory it runs in: for `uv tool install` that is wherever the user's
     // shell was, which mcpcage cannot know, so any directory it guessed would be a wrong one.
     expect(toolPlaces({ platform: "linux", env: { UV_TOOL_BIN_DIR: "bin", UV_PYTHON_BIN_DIR: "./py", UV_INSTALL_DIR: "../uv", XDG_BIN_HOME: "xbin", XDG_DATA_HOME: "share" } })).toEqual([]);
+  });
+
+  it("count pipx's places that decide what runs: its apps, its shared pip, its cache, the completion scripts it links, and the same for every user", () => {
+    const env = {
+      HOME: "/home/me",
+      PIPX_HOME: "~/pipx-home",
+      PIPX_BIN_DIR: "/srv/pipx-bin",
+      PIPX_SHARED_LIBS: "/srv/pipx-shared",
+      PIPX_COMPLETION_DIR: "/srv/share",
+      PIPX_GLOBAL_HOME: "/srv/pipx-global",
+      PIPX_GLOBAL_BIN_DIR: "/srv/global-bin",
+      PIPX_GLOBAL_COMPLETION_DIR: "~",
+      PIPX_MAN_DIR: "/srv/man",
+      XDG_CACHE_HOME: "/srv/cache",
+    };
+    const tools = toolPlaces({ platform: "linux", env });
+    const named = (path: string) => sensitivePath(path, { ...linux, tools });
+    const pipx = "the programs pipx installs and runs";
+    const global = "the programs pipx installs for every user";
+    const completions = "the completion scripts your shell runs";
+    expect(named("/srv/pipx-bin/pycowsay")).toBe(`${pipx} in /srv/pipx-bin`);
+    expect(named("/srv/pipx-shared/lib")).toBe(`${pipx} in /srv/pipx-shared`);
+    expect(named("/srv/pipx-global/venvs")).toBe(`${global} in /srv/pipx-global`);
+    expect(named("/srv/global-bin")).toBe(`${global} in /srv/global-bin`);
+    expect(named("/srv/cache/pipx/0123456789abcde")).toBe("the environments `pipx run` starts, in pipx's cache in /srv/cache/pipx");
+    for (const section of ["bash-completion/completions", "fish/vendor_completions.d", "zsh/site-functions"]) {
+      expect(named(`/srv/share/${section}/pycowsay`), section).toBe(`${completions} in /srv/share/${section}`);
+      // ~ is the home directory, as pipx expands it.
+      expect(named(`/home/me/${section}`), section).toBe(`${completions} in ~/${section}`);
+    }
+    expect(named("/home/me/pipx-home/venvs")).toBe(`${pipx} in ~/pipx-home`);
+    // The rest of the completion directory is not pipx's, and man pages are read, not run: groff runs
+    // no command of a page in its safer mode, man's default.
+    expect(named("/srv/share/notes")).toBeUndefined();
+    expect(named("/srv/man/man1")).toBeUndefined();
+    // A relative value, or ~ without a HOME, names no place; nor does ~other, another account's home,
+    // which pipx would look up and mcpcage does not.
+    expect(toolPlaces({ platform: "linux", env: { PIPX_BIN_DIR: "bin", PIPX_HOME: "~/x", PIPX_SHARED_LIBS: "~other/x" } })).toEqual([]);
+    expect(toolPlaces({ platform: "win32", env: { USERPROFILE: "C:\\Users\\me", PIPX_BIN_DIR: "~\\bin" } })).toContainEqual({ path: "C:\\Users\\me\\bin", what: pipx });
   });
 
   it.skipIf(process.platform === "win32")("count XDG_DATA_HOME's ../bin where the system goes up from a symlinked XDG_DATA_HOME, as uv leaves it to the system", () => {

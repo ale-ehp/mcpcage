@@ -84,9 +84,19 @@ export function thisMachine(): SensitiveOptions {
  * else XDG_DATA_HOME's ../bin, else ~/.local/bin (in IN_HOME). Each that is set counts, not only the
  * one uv would take first: another uv command, or the installer, can take another.
  *
+ * And pipx's other places (pipx 1.18.15, paths.py, docs/how-to/configure-paths.rst): PIPX_BIN_DIR,
+ * where it links the apps the user runs; PIPX_SHARED_LIBS, the pip every one of its environments
+ * imports; its cache, the environments `pipx run` starts again, under XDG_CACHE_HOME (platformdirs
+ * reads it on Linux and macOS) or LOCALAPPDATA; PIPX_COMPLETION_DIR, where it links the completion
+ * scripts of the apps, which bash and fish source when the user presses Tab, and zsh once on its
+ * fpath; and the same for every user, PIPX_GLOBAL_HOME, PIPX_GLOBAL_BIN_DIR and
+ * PIPX_GLOBAL_COMPLETION_DIR. PIPX_MAN_DIR is left out: man shows a page through groff, which runs no
+ * command of the page in its safer mode, man's default. pipx expands a leading ~ in its variables
+ * (expanduser, from HOME, or USERPROFILE on Windows), and so does mcpcage for them.
+ *
  * Absolute values only. uv takes a relative XDG directory for none, and reads a relative UV_* one from
  * the directory it runs in, which for `uv tool install` is wherever the user's shell was: mcpcage has
- * no way to know it.
+ * no way to know it. pipx reads a relative one from its own, likewise.
  */
 export function toolPlaces(options: { platform: NodeJS.Platform; env: NodeJS.ProcessEnv }): Array<{ path: string; what: string }> {
   const windows = options.platform === "win32";
@@ -96,10 +106,21 @@ export function toolPlaces(options: { platform: NodeJS.Platform; env: NodeJS.Pro
     if (dir !== undefined && dir !== "" && syntax.isAbsolute(dir)) places.push({ path: syntax.join(dir, ...below), what });
   };
   const env = options.env;
+  // pipx's variables with a leading ~ as pipx reads them.
+  const home = windows ? env.USERPROFILE : env.HOME;
+  const tilde = windows ? /^~(?=$|[\\/])/ : /^~(?=$|\/)/;
+  const pipx = (dir: string | undefined) => (dir !== undefined && home !== undefined && home !== "" && tilde.test(dir) ? `${home}${dir.slice(1)}` : dir);
   add(env.UV_CACHE_DIR, UV_CACHE);
   add(env.UV_TOOL_DIR, UV_DATA);
   add(env.UV_PYTHON_INSTALL_DIR, UV_DATA);
-  add(env.PIPX_HOME, PIPX);
+  add(pipx(env.PIPX_HOME), PIPX);
+  add(pipx(env.PIPX_BIN_DIR), PIPX);
+  add(pipx(env.PIPX_SHARED_LIBS), PIPX);
+  add(pipx(env.PIPX_GLOBAL_HOME), PIPX_GLOBAL);
+  add(pipx(env.PIPX_GLOBAL_BIN_DIR), PIPX_GLOBAL);
+  for (const completions of [pipx(env.PIPX_COMPLETION_DIR), pipx(env.PIPX_GLOBAL_COMPLETION_DIR)]) {
+    for (const section of COMPLETION_SECTIONS) add(completions, COMPLETIONS, ...section.split("/"));
+  }
   add(env.UV_TOOL_BIN_DIR, UV_PROGRAMS);
   add(env.UV_PYTHON_BIN_DIR, UV_PROGRAMS);
   add(env.UV_INSTALL_DIR, UV_PROGRAMS);
@@ -111,11 +132,13 @@ export function toolPlaces(options: { platform: NodeJS.Platform; env: NodeJS.Pro
   if (windows) {
     add(env.LOCALAPPDATA, UV_CACHE, "uv");
     add(env.APPDATA, UV_SETTINGS_AND_DATA, "uv");
+    add(env.LOCALAPPDATA, PIPX, "pipx");
   } else {
     add(env.XDG_CACHE_HOME, UV_CACHE, "uv");
     add(env.XDG_DATA_HOME, UV_DATA, "uv");
     add(env.XDG_CONFIG_HOME, UV_SETTINGS, "uv");
     add(env.XDG_DATA_HOME, PIPX, "pipx");
+    add(env.XDG_CACHE_HOME, PIPX_CACHE, "pipx");
   }
   return places;
 }
@@ -145,6 +168,11 @@ const UV_DATA = "the tools and the Pythons uv installs";
 const UV_SETTINGS = "your uv settings, which choose where uvx takes its packages from";
 const UV_SETTINGS_AND_DATA = "your uv settings, and the tools and the Pythons uv installs";
 const PIPX = "the programs pipx installs and runs";
+const PIPX_CACHE = "the environments `pipx run` starts, in pipx's cache";
+const PIPX_GLOBAL = "the programs pipx installs for every user";
+const COMPLETIONS = "the completion scripts your shell runs";
+/** Where pipx links completion scripts, below PIPX_COMPLETION_DIR (~/.local/share): one section per shell. */
+const COMPLETION_SECTIONS = ["bash-completion/completions", "fish/vendor_completions.d", "zsh/site-functions"];
 const UV_PROGRAMS = "the programs uv installs, which you run";
 
 /** Where other tools keep keys, tokens, sockets and what they run, from the home directory, in plain words. */
@@ -251,8 +279,11 @@ const IN_HOME: ReadonlyArray<{ path: string; what: string; platform?: NodeJS.Pla
   // places of its first releases when they exist (uv 0.13.7, uv-cache and uv-state: the legacy
   // directories of uv-dirs), ~/Library/Caches/uv for its cache and ~/Library/Application Support/uv
   // for its tools and Pythons. pipx's home is platformdirs' data directory (pipx 1.18.15, paths.py:
-  // ~/.local/share/pipx on Linux, ~/Library/Application Support/pipx on macOS) unless ~/.local/pipx,
-  // its home in older releases, exists.
+  // ~/.local/share/pipx on Linux, ~/Library/Application Support/pipx on macOS, AppData\Local\pipx\pipx
+  // on Windows) unless ~/.local/pipx, its home in older releases, exists, or on Windows ~\pipx; its
+  // cache, which holds the environments `pipx run` starts again, platformdirs' cache directory
+  // (~/.cache/pipx, ~/Library/Caches/pipx, AppData\Local\pipx\pipx\Cache). It links the apps' completion
+  // scripts below ~/.local/share on every system, where bash and fish load them at the user's Tab.
   { path: ".cache/uv", what: UV_CACHE },
   { path: ".local/share/uv", what: UV_DATA },
   { path: ".config/uv", what: UV_SETTINGS },
@@ -263,6 +294,11 @@ const IN_HOME: ReadonlyArray<{ path: string; what: string; platform?: NodeJS.Pla
   { path: ".local/share/pipx", what: PIPX },
   { path: ".local/pipx", what: PIPX },
   { path: "Library/Application Support/pipx", what: PIPX, platform: "darwin" },
+  { path: "AppData/Local/pipx", what: PIPX, platform: "win32" },
+  { path: "pipx", what: PIPX, platform: "win32" },
+  { path: ".cache/pipx", what: PIPX_CACHE },
+  { path: "Library/Caches/pipx", what: PIPX_CACHE, platform: "darwin" },
+  ...COMPLETION_SECTIONS.map((section) => ({ path: `.local/share/${section}`, what: COMPLETIONS })),
 
   // More Docker sockets, which start containers with any part of the host mounted.
   { path: ".rd", what: "the Docker socket of Rancher Desktop" },
@@ -284,6 +320,8 @@ const SYSTEM: ReadonlyArray<{ path: string; what: string; platform?: NodeJS.Plat
   { path: "/sbin", what: "the system's programs" },
   { path: "/usr/local", what: "the programs you run" },
   { path: "/opt/homebrew", what: "the programs Homebrew installs" },
+  // pipx's home for every user (pipx --global); its programs and completions go below /usr/local.
+  { path: "/opt/pipx", what: PIPX_GLOBAL },
   { path: "/Applications", what: "your applications", platform: "darwin" },
   { path: "/Library", what: "the programs and settings of every user", platform: "darwin" },
   // Rootless Docker and Podman keep their sockets under /run/user. macOS has no /run.
