@@ -122,7 +122,7 @@ const AT_VERSION = "after @, uvx takes only an exact version or latest, and read
 const PLAIN_COMMAND = "the command after its package must be a plain file name (no / or \\, no leading -, no control characters, not . or ..)";
 
 /** What a flag of `uv tool run` does in the cage: read into the spec, ignored, or refused with the reason. */
-type UvxFlag = { value: boolean; read?: "from" | "with" | "python" | "prerelease" | "exclude-newer" | "color" } | { refused: string };
+type UvxFlag = { value: boolean; read?: "from" | "with" | "python" | "prerelease" | "exclude-newer" | "color" | "link-mode" } | { refused: string };
 
 /**
  * The flags of `uv tool run` (uv 0.13.7, `uv tool run --help`) that the cage reads, those it can
@@ -138,7 +138,12 @@ const UVX_FLAGS = new Map<string, UvxFlag>([
   ["--color", { value: true, read: "color" }],
   ["--refresh-package", { value: true }],
   ["--cache-dir", { value: true }],
-  ...["--no-build", "--no-config", "--isolated", "--refresh", "--no-cache", "--offline", "--managed-python", "--no-managed-python", "--no-python-downloads", "--system-certs", "--quiet", "--verbose", "--no-progress"].map((flag): [string, UvxFlag] => [flag, { value: false }]),
+  // How uv installs into its cache on the host, and whether it compiles bytecode there, which runs
+  // the environment's Python with its .pth files: the cage's build does neither (it compiles with
+  // python -I -S itself), and reads no .env file. Each run with uv 0.13.7.
+  ["--reinstall-package", { value: true }],
+  ["--link-mode", { value: true, read: "link-mode" }],
+  ...["--no-build", "--no-config", "--isolated", "--refresh", "--no-cache", "--offline", "--managed-python", "--no-managed-python", "--no-python-downloads", "--system-certs", "--quiet", "--verbose", "--no-progress", "--no-env-file", "--compile-bytecode", "--reinstall"].map((flag): [string, UvxFlag] => [flag, { value: false }]),
   ...["--with-editable", "--with-requirements"].map((flag): [string, UvxFlag] => [flag, { refused: OUTSIDE_PYPI }]),
   ...["--index", "--default-index", "--index-url", "--extra-index-url", "--find-links", "--no-index", "--index-strategy", "--keyring-provider", "--torch-backend"].map((flag): [string, UvxFlag] => [flag, { refused: OTHER_INDEX }]),
   ...["--constraints", "--overrides", "--build-constraints", "--config-file", "--env-file", "--directory", "--project"].map((flag): [string, UvxFlag] => [flag, { refused: HOST_FILE }]),
@@ -250,6 +255,9 @@ function parseUvx(words: string[], platform: NodeJS.Platform, environment: UvEnv
       withs.push(...splitWith(value));
     } else if (flag.read === "color") {
       if (!["auto", "always", "never"].includes(value)) throw new Error("uvx --color: give auto, always or never");
+    } else if (flag.read === "link-mode") {
+      // uv refuses any other value, so a line with one never started uncaged either.
+      if (!["clone", "copy", "hardlink", "symlink"].includes(value)) throw new Error("uvx --link-mode: give clone, copy, hardlink or symlink");
     } else if (flag.read !== undefined) {
       if (once.has(name)) throw new Error(`uvx ${name} is given twice`);
       once.set(name, value);

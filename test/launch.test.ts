@@ -200,6 +200,14 @@ describe("uvx command lines", () => {
     ];
     expect(uvx(...flags, "mcp-server-time", "a")).toEqual(time({ args: ["a"] }));
     expect(() => uvx("--color", "red", "mcp-server-time")).toThrow(/^uvx --color: give auto, always or never$/);
+    // uv 0.13.7 takes these too (`uv tool run --help`, and a run of each): they tune how uv installs
+    // into its cache on the host, which the cage's build does on its own (bytecode with -I -S).
+    const installer = ["--no-env-file", "--compile-bytecode", "--reinstall", "--reinstall-package", "idna", "--reinstall-package=x", "--link-mode", "copy", "--link-mode=hardlink"];
+    expect(uvx(...installer, "mcp-server-time", "a")).toEqual(time({ args: ["a"] }));
+    for (const mode of ["clone", "copy", "hardlink", "symlink"]) expect(uvx("--link-mode", mode, "mcp-server-time")).toEqual(time());
+    expect(() => uvx("--link-mode", "weird", "mcp-server-time")).toThrow(/^uvx --link-mode: give clone, copy, hardlink or symlink$/);
+    expect(() => uvx("--reinstall-package", "--offline", "mcp-server-time")).toThrow(/^uvx --reinstall-package needs a value$/);
+    expect(() => uvx("--compile-bytecode=1", "mcp-server-time")).toThrow(/^uvx --compile-bytecode takes no value$/);
     expect(() => uvx("--offline=true", "mcp-server-time")).toThrow(/^uvx --offline takes no value$/);
   });
 
@@ -221,7 +229,7 @@ describe("uvx command lines", () => {
       [["--lfs"], `uvx --lfs: ${SOURCE}`],
       [["--allow-insecure-host", "x"], `uvx --allow-insecure-host: ${INSECURE}`],
       // Any other: what uv would do with it is not something the cage reproduces.
-      ...["--upgrade", "--upgrade-package", "--reinstall", "--link-mode", "--compile-bytecode", "--no-sources", "--resolution", "--no-env-file", "--help", "--bogus"].map((flag): [string[], string] => [[flag, "x"], `unsupported uvx flag ${flag}`]),
+      ...["--upgrade", "--upgrade-package", "--no-sources", "--resolution", "--help", "--bogus"].map((flag): [string[], string] => [[flag, "x"], `unsupported uvx flag ${flag}`]),
       [["-U"], "unsupported uvx flag -U"],
       [["-h"], "unsupported uvx flag -h"],
       [["-qx"], "unsupported uvx flag -x"],
