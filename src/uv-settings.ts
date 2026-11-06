@@ -122,8 +122,12 @@ function variableIn(env: Readonly<Record<string, unknown>>, name: string, platfo
   return written !== undefined && typeof value === "string" && value !== "" ? { name: written, value } : undefined;
 }
 
-/** The settings of uv.toml that choose where packages come from (an [[index]] table, or one of these keys). */
-const INDEX_KEYS = ["index", "index-url", "extra-index-url", "default-index", "find-links", "no-index", "index-strategy", "keyring-provider"];
+/**
+ * The settings of uv.toml that choose where packages come from (an [[index]] table, or one of these
+ * keys). With torch-backend = "cpu", uv 0.13.7 asked download.pytorch.org for torch, as with
+ * --torch-backend, which the cage refuses.
+ */
+const INDEX_KEYS = ["index", "index-url", "extra-index-url", "default-index", "find-links", "no-index", "index-strategy", "keyring-provider", "torch-backend"];
 const INDEX_KEY = new RegExp(`(?:^|[\\s{,.])(?:${INDEX_KEYS.join("|")})\\s*=`);
 const INDEX_TABLE = /^\s*\[{1,2}\s*(?:[A-Za-z0-9_-]+\s*\.\s*)*index\s*\]{1,2}/;
 
@@ -131,8 +135,9 @@ const INDEX_TABLE = /^\s*\[{1,2}\s*(?:[A-Za-z0-9_-]+\s*\.\s*)*index\s*\]{1,2}/;
  * Whether the text of a uv.toml names a package index: a line that opens an [[index]] table, or sets
  * one of INDEX_KEYS, under any table and as a dotted or quoted key too. Strings are read first, so
  * that a # or a key's name inside a value is neither a comment nor a key; a quoted key keeps its
- * name; what follows a # outside a string is a comment. `no-index = false` and the keys of [pip],
- * which uvx does not read, count too: a false positive leaves a server uncaged, with the reason.
+ * name, its escapes decoded as uv decodes them (see unescaped); what follows a # outside a string is
+ * a comment. `no-index = false` and the keys of [pip], which uvx does not read, count too: a false
+ * positive leaves a server uncaged, with the reason.
  */
 export function namesIndex(text: string): boolean {
   for (const raw of text.split(/\r?\n/)) {
@@ -146,13 +151,32 @@ export function namesIndex(text: string): boolean {
       }
       let end = at + 1;
       while (end < raw.length && raw[end] !== character) end += character === '"' && raw[end] === "\\" ? 2 : 1;
-      const inner = raw.slice(at + 1, end);
+      const inner = character === '"' ? unescaped(raw.slice(at + 1, end)) : raw.slice(at + 1, end);
       line += INDEX_KEYS.includes(inner) ? inner : "_";
       at = end;
     }
     if (INDEX_TABLE.test(line) || INDEX_KEY.test(line)) return true;
   }
   return false;
+}
+
+/** The one-letter escapes of a TOML basic string, TOML 1.1's \e among them. */
+const ONE_LETTER: Readonly<Record<string, string>> = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", e: "\u001b", '"': '"', "\\": "\\" };
+
+/**
+ * The text of a TOML basic string (between double quotes) with its escapes decoded, as uv's TOML
+ * parser reads it: uv 0.13.7 took "index\u002Durl", "index\U0000002Durl" and "index\x2Durl" for
+ * index-url, and [["ind\u0065x"]] for [[index]], and asked the index they named for the server. The
+ * scan compared the raw text, and found none of them. An escape TOML does not have is left as it is:
+ * uv 0.13.7 refuses the whole file for it ("missing escaped value"), so it installs nothing from it.
+ */
+function unescaped(text: string): string {
+  return text.replace(/\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|x([0-9A-Fa-f]{2})|(.))/gs, (whole, four?: string, eight?: string, two?: string, letter?: string) => {
+    const hex = four ?? eight ?? two;
+    if (hex === undefined) return ONE_LETTER[letter!] ?? whole;
+    const code = Number.parseInt(hex, 16);
+    return code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
 }
 
 /**

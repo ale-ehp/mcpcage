@@ -24,8 +24,25 @@ describe("the scan of a uv.toml for a package index", () => {
       '"index-url" = "https://pypi.corp.example/simple"',
       "pip = { extra-index-url = ['x'] }",
       "\r\nno-cache = true\r\nfind-links = []\r\n",
+      // uv 0.13.7 asks download.pytorch.org for torch and its kin with it, as --torch-backend.
+      'torch-backend = "cpu"',
     ];
     for (const text of found) expect(namesIndex(text), text).toBe(true);
+  });
+
+  it("decodes the escapes of a quoted key or table name, as uv's TOML parser does", () => {
+    // The first four made uv 0.13.7 ask http://127.0.0.1:9/simple for the server, as the plain names do.
+    const found = [
+      '"index\\u002Durl" = "https://pypi.corp.example/simple"',
+      '[["ind\\u0065x"]]\nurl = "https://pypi.corp.example/simple"',
+      '"index\\U0000002Durl" = "https://pypi.corp.example/simple"',
+      '"index\\x2Durl" = "https://pypi.corp.example/simple"',
+      'pip."find\\u002dlinks" = []',
+    ];
+    for (const text of found) expect(namesIndex(text), text).toBe(true);
+    // A literal string has no escapes, and a value with backslashes is a value (a Windows path).
+    const clean = ["'index\\u002Durl' = 1", 'cache-dir = "C:\\\\Users\\\\me\\\\uv"', '"index\\\\u002Durl" = 1'];
+    for (const text of clean) expect(namesIndex(text), text).toBe(false);
   });
 
   it("skips comments, and keys' names inside values, and other keys", () => {
