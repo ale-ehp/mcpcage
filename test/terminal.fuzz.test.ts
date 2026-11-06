@@ -79,13 +79,16 @@ describe("streamSafely's lines, fuzzed", () => {
   );
 
   it(
-    "lose, repeat and reorder nothing when they wait longer than a line may, and never cut a character in two",
+    "lose, repeat and reorder nothing when they wait longer than a line may, never cut a line within the limit, nor a character in two",
     () => {
       check(
         fc.property(output, fc.integer({ min: 2, max: 8 }), ([[out, err], outPieces, errPieces, order], max) => {
           const lines = shown(interleaved(outPieces, errPieces, order), max);
+          const whole = shown([[1, out], [2, err]], max);
           for (const [stream, text] of [[1, out], [2, err]] as const) {
             expect(lines.get(stream)!.join(""), JSON.stringify(text)).toBe(text.replace(/[\n\r]/g, ""));
+            // A line no longer than the limit is never cut, however its pieces come: the lines of the whole text.
+            if (text.split("\n").every((line) => line.length <= max)) expect(lines.get(stream), JSON.stringify(text)).toEqual(whole.get(stream));
             // Each line is whole characters: no half of a pair at either end.
             for (const line of lines.get(stream)!) expect(line, JSON.stringify(line)).not.toMatch(/^[\udc00-\udfff]|[\ud800-\udbff]$/);
           }
