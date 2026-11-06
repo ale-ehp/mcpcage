@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { serverType } from "../src/config.js";
 import { cmdNpx, cmdRunner, imageRepository, isLocalPath, npxArgv, parseLaunch, serverIdFor, splitPackageSpec, type LaunchSpec } from "../src/launch.js";
 
+/** `run` with the host's time zone set to `zone`, as TZ sets it for node and for uv. */
+function inZone<T>(zone: string, run: () => T): T {
+  const before = process.env.TZ;
+  process.env.TZ = zone;
+  try {
+    return run();
+  } finally {
+    if (before === undefined) delete process.env.TZ;
+    else process.env.TZ = before;
+  }
+}
+
 describe("the server id", () => {
   it("stays the same from one version of mcpcage to the next, for each kind of server", () => {
     // The pins and the audit log of a server are kept under its id: an id computed another way is a
@@ -186,7 +198,7 @@ describe("uvx command lines", () => {
       [["--python=3.15", "mcp-server-time"], time({ python: "3.15" })],
       [["-p3.10", "mcp-server-time"], time({ python: "3.10" })],
       [["-p=3.13", "mcp-server-time"], time({ python: "3.13" })],
-      [["--prerelease", "allow", "--exclude-newer", "2026-10-01", "mcp-server-time"], time({ resolution: { prerelease: "allow", excludeNewer: "2026-10-01" } })],
+      [["--prerelease", "allow", "--exclude-newer", "2026-10-01T00:00:00Z", "mcp-server-time"], time({ resolution: { prerelease: "allow", excludeNewer: "2026-10-01T00:00:00Z" } })],
       [["--prerelease=if-necessary-or-explicit", "--exclude-newer=P30D", "mcp-server-time"], time({ resolution: { prerelease: "if-necessary-or-explicit", excludeNewer: "P30D" } })],
     ];
     for (const [words, spec] of forms) expect(uvx(...words), JSON.stringify(words)).toEqual(spec);
@@ -338,12 +350,37 @@ describe("uvx command lines", () => {
     }
     expect(() => uvx("--prerelease", "sometimes", "mcp-server-time")).toThrow(/^uvx --prerelease: give one of disallow, allow, if-necessary, explicit, if-necessary-or-explicit$/);
     // Forms uv 0.13.7 takes, a zone required on a time: without one, uv reads it in the host's zone, and the cage has another.
-    for (const date of ["2026-01-01", "2024-02-29", "2026-01-01T00:00:00Z", "2026-01-01t12:30:59.5+02:00", "2026-01-01T00:00z", "3 days", "1 day", "2 weeks", "24 hours", "3d", "3h", "2w", "30s", "3 days ago", "5 minutes", "3 mins", "3 hrs", "3 secs", "1 wk", "99999 days", "P3D", "PT1H30M", "P2W3D", "p3d", "pt1h", "P1DT12H"]) {
+    for (const date of ["2026-01-01T00:00:00Z", "2026-01-01t12:30:59.5+02:00", "2026-01-01T00:00z", "3 days", "1 day", "2 weeks", "24 hours", "3d", "3h", "2w", "30s", "3 days ago", "5 minutes", "3 mins", "3 hrs", "3 secs", "1 wk", "99999 days", "P3D", "PT1H30M", "P2W3D", "p3d", "pt1h", "P1DT12H"]) {
       expect(uvx("--exclude-newer", date, "mcp-server-time"), date).toEqual(time({ resolution: { excludeNewer: date } }));
     }
     for (const date of ["2023-02-29", "2026-13-01", "2026-1-1", "2026-01-01T25:00:00Z", "2026-01-01T00:00", "2026-01-01 00:00:00Z", "1 month", "1 year", "P1Y", "P1M", "P", "PT", "1.5 days", "999999 days", "3 DAYS", "friday", ""]) {
       expect(() => uvx("--exclude-newer", date, "mcp-server-time"), JSON.stringify(date)).toThrow(new Error("uvx --exclude-newer: give a date (2026-01-31), a time with its zone (2026-01-31T12:00:00Z) or a duration (30 days, P30D)"));
     }
+  });
+
+  it("gives the cage the instant uv reads a date of --exclude-newer as on the host: the start of the next day in its time zone", () => {
+    // What uv 0.13.7 wrote into a uv.lock for `--exclude-newer 2026-01-01` with each TZ; the cage's uv runs in UTC.
+    const lock: Array<[string, string, string]> = [
+      ["Europe/Rome", "2026-01-01", "2026-01-01T23:00:00Z"],
+      ["Europe/Rome", "2026-07-01", "2026-07-01T22:00:00Z"],
+      ["America/New_York", "2026-01-01", "2026-01-02T05:00:00Z"],
+      ["Asia/Tokyo", "2026-01-01", "2026-01-01T15:00:00Z"],
+      ["UTC", "2026-01-01", "2026-01-02T00:00:00Z"],
+      ["UTC", "2024-02-29", "2024-03-01T00:00:00Z"],
+      ["UTC", "2026-12-31", "2027-01-01T00:00:00Z"],
+    ];
+    for (const [zone, date, instant] of lock) {
+      inZone(zone, () => {
+        expect(uvx("--exclude-newer", date, "mcp-server-time"), `${zone} ${date}`).toEqual(time({ resolution: { excludeNewer: instant } }));
+        expect(uvx(`--exclude-newer=${date}`, "mcp-server-time"), `${zone} ${date}`).toEqual(time({ resolution: { excludeNewer: instant } }));
+        // UV_EXCLUDE_NEWER is read as uv reads the flag.
+        expect(parseLaunch(["uvx", "mcp-server-time"], undefined, "linux", [{ where: "its env", variables: { UV_EXCLUDE_NEWER: date } }]), `${zone} ${date}`).toEqual(time({ resolution: { excludeNewer: instant } }));
+      });
+    }
+    // A time with its zone and a duration mean the same in the cage: as written.
+    inZone("Asia/Tokyo", () => {
+      for (const value of ["2026-01-01T00:00:00Z", "2026-01-01T12:30:00+02:00", "30 days", "P3D"]) expect(uvx("--exclude-newer", value, "mcp-server-time"), value).toEqual(time({ resolution: { excludeNewer: value } }));
+    });
   });
 
   it("refuses a flag that misses its value or is given twice, as uv does", () => {
@@ -498,8 +535,8 @@ describe("uv's environment on a uvx line", () => {
     expect(started({ UV_PYTHON: "3.12", UV_PRERELEASE: "allow", UV_EXCLUDE_NEWER: "P7D" })).toEqual(time({ python: "3.12", resolution: { prerelease: "allow", excludeNewer: "P7D" } }));
     expect(started({ UV_PYTHON: "3.11.4" })).toEqual(time({ python: "3.11.4" }));
     // The flag wins, whatever the variable says: uv does not read the variable then.
-    expect(started({ UV_PYTHON: "pypy3.10", UV_PRERELEASE: "sometimes", UV_EXCLUDE_NEWER: "1 year" }, ["--python", "3.13", "--prerelease", "explicit", "--exclude-newer", "2026-01-01", "mcp-server-time"])).toEqual(
-      time({ python: "3.13", resolution: { prerelease: "explicit", excludeNewer: "2026-01-01" } }),
+    expect(started({ UV_PYTHON: "pypy3.10", UV_PRERELEASE: "sometimes", UV_EXCLUDE_NEWER: "1 year" }, ["--python", "3.13", "--prerelease", "explicit", "--exclude-newer", "P1D", "mcp-server-time"])).toEqual(
+      time({ python: "3.13", resolution: { prerelease: "explicit", excludeNewer: "P1D" } }),
     );
     const python = "its env sets UV_PYTHON to another value than a CPython version from 3.10 to 3.15 (such as 3.12 or 3.12.4), the only ones the cage runs";
     for (const value of ["3.9", "pypy3.10", "/usr/bin/python3", ">=3.12", "3.12t", 3.12, ["3.12"]]) expect(() => started({ UV_PYTHON: value }), JSON.stringify(value)).toThrow(new Error(python));

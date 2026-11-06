@@ -19,6 +19,7 @@ export type LaunchSpec =
       with: string[];
       /** The CPython version --python asks for: 3.12 or 3.12.4. */
       python?: string;
+      /** --prerelease, and --exclude-newer as uv reads it on the host: a date made the instant it stands for there (see excludeNewerInstant). */
       resolution: { prerelease?: string; excludeNewer?: string };
       args: string[];
     }
@@ -373,7 +374,7 @@ function parseUvx(words: string[], platform: NodeJS.Platform, environment: UvEnv
     command: from === undefined ? tool.name : toolCommand(target, platform),
     with: withs,
     ...(python === undefined ? {} : { python }),
-    resolution: { ...(prerelease === undefined ? {} : { prerelease }), ...(excludeNewer === undefined ? {} : { excludeNewer }) },
+    resolution: { ...(prerelease === undefined ? {} : { prerelease }), ...(excludeNewer === undefined ? {} : { excludeNewer: excludeNewerInstant(excludeNewer) }) },
     args: words.slice(index + 1),
   };
 }
@@ -610,10 +611,10 @@ function normalizedName(name: string): string {
 }
 
 /**
- * A value of --exclude-newer that uv 0.13.7 takes and that means the same in the cage as on the host:
- * a date, a time with its zone (without one, uv reads it in the host's zone), or a duration in
- * seconds to weeks, friendly (`30 days`, `3d`, `2 weeks ago`) or ISO 8601 (`P30D`, `PT12H`). uv refuses
- * months and years, whose length varies.
+ * A value of --exclude-newer that uv 0.13.7 takes and that can mean the same in the cage as on the
+ * host: a date (see excludeNewerInstant), a time with its zone (without one, uv reads it in the
+ * host's zone), or a duration in seconds to weeks, friendly (`30 days`, `3d`, `2 weeks ago`) or ISO
+ * 8601 (`P30D`, `PT12H`). uv refuses months and years, whose length varies.
  */
 function isExcludeNewer(value: string): boolean {
   const moment = /^([0-9]{4})-([0-9]{2})-([0-9]{2})(?:[Tt]([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.[0-9]{1,9})?)?(?:[Zz]|[+-]([0-9]{2}):([0-9]{2})))?$/.exec(value);
@@ -624,6 +625,26 @@ function isExcludeNewer(value: string): boolean {
   }
   if (/^[0-9]{1,5} ?(?:s|secs?|seconds?|min|mins|minutes?|h|hrs?|hours?|d|days?|w|wk|weeks?)(?: ago)?$/.test(value)) return true;
   return /^P(?=[0-9]|T[0-9])(?:[0-9]{1,5}W)?(?:[0-9]{1,5}D)?(?:T(?=[0-9])(?:[0-9]{1,5}H)?(?:[0-9]{1,5}M)?(?:[0-9]{1,5}S)?)?$/i.test(value);
+}
+
+/**
+ * The instant uv gives --exclude-newer (or UV_EXCLUDE_NEWER) on the host, for the cage's resolve,
+ * whose uv runs in UTC: a date is the start of the next day in the host's time zone for uv 0.13.7
+ * (ExcludeNewerValue::from_str adds a day and reads it in TimeZone::system()), so it is given as that
+ * instant in UTC. uv 0.13.7 wrote 2026-01-01 into a uv.lock as 2026-01-01T23:00:00Z with
+ * TZ=Europe/Rome, 2026-01-02T05:00:00Z with America/New_York, 2026-01-01T15:00:00Z with Asia/Tokyo,
+ * and 2026-01-02T00:00:00Z without TZ in its image: in the cage, with the date as written, a server
+ * resolved on a host in Rome took one more hour of releases than uvx there. A time with its zone and a
+ * duration (from the time of the resolve) are the same in both, and stay as written.
+ */
+function excludeNewerInstant(value: string): string {
+  const date = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(value);
+  if (date === null) return value;
+  // setFullYear, not the Date constructor, which reads a year below 100 as 19xx.
+  const next = new Date(0);
+  next.setFullYear(Number(date[1]), Number(date[2]) - 1, Number(date[3]) + 1);
+  next.setHours(0, 0, 0, 0);
+  return next.toISOString().replace(/\.000Z$/, "Z");
 }
 
 /**

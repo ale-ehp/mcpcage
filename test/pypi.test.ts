@@ -166,6 +166,21 @@ describe("resolving a PyPI server", () => {
     expect(resolveArgs(["--no-deps"])).toEqual(expect.arrayContaining(["--entrypoint", "uv", PYPI_RESOLVE_BASE, "pip", "compile", "--no-deps", "-"]));
   });
 
+  it("gives the resolve's uv, which runs in UTC, the instant a date of --exclude-newer stands for on the host, as uv reads it there", () => {
+    const before = process.env.TZ;
+    process.env.TZ = "Europe/Rome";
+    try {
+      const docker = timeDocker();
+      resolvePypi(pypi("uvx", "--exclude-newer", "2026-01-01", "mcp-server-time"), { log: () => {}, runner: docker.runner });
+      expect(docker.compiles().length).toBeGreaterThan(0);
+      // uv 0.13.7 with TZ=Europe/Rome read 2026-01-01 as 2026-01-01T23:00:00Z, and in its image without TZ as 2026-01-02T00:00:00Z.
+      for (const { args } of docker.compiles()) expect(flag(args, "--exclude-newer")).toBe("2026-01-01T23:00:00Z");
+    } finally {
+      if (before === undefined) delete process.env.TZ;
+      else process.env.TZ = before;
+    }
+  });
+
   it("refuses a server whose dependencies have no wheel, with uv's reason on one line", () => {
     const docker = fakeDocker({ roots: { "3.13": ok("dbt-mcp==2.10.1\n"), "3.15": ok("dbt-mcp==2.10.1\n") }, lock: () => noSolution(DBT_NO_SOLUTION) });
     const refused = () => resolvePypi(pypi("uvx", "dbt-mcp==2.10.1"), { log: () => {}, runner: docker.runner });
