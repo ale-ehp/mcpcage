@@ -300,3 +300,89 @@ describe("command lines, fuzzed", () => {
     TIMEOUT,
   );
 });
+
+/** Time zones whose midnight moves: DST at midnight (a day without one, a day with two), a day skipped, offsets of minutes and of seconds before 1900. */
+const ZONES = [
+  "UTC", "Europe/Rome", "America/New_York", "Asia/Tokyo", "America/Havana", "America/Santiago", "America/Asuncion", "Asia/Beirut", "America/Sao_Paulo",
+  "Africa/Cairo", "Pacific/Apia", "Pacific/Kiritimati", "Pacific/Niue", "Asia/Kathmandu", "Australia/Lord_Howe", "America/St_Johns", "Europe/Dublin", "Antarctica/Troll",
+];
+
+const formats = new Map<string, Intl.DateTimeFormat>();
+
+/** The offset of `zone` from UTC at the instant `at` (milliseconds, whole seconds), from Intl's own reading of the zone. */
+function offsetAt(at: number, zone: string): number {
+  let format = formats.get(zone);
+  if (format === undefined) {
+    format = new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" });
+    formats.set(zone, format);
+  }
+  const parts = Object.fromEntries(
+    format
+      .formatToParts(new Date(at))
+      .map((part) => [part.type, Number(part.value)]),
+  );
+  const wall = new Date(0);
+  wall.setUTCFullYear(parts.year!, parts.month! - 1, parts.day!);
+  wall.setUTCHours(parts.hour!, parts.minute!, parts.second!, 0);
+  return wall.getTime() - Math.floor(at / 1000) * 1000;
+}
+
+/**
+ * The instant of midnight at the start of the day after `date` in `zone`, as uv 0.13.7 reads a date of
+ * --exclude-newer (see excludeNewerInstant): the instant whose wall clock there reads that midnight,
+ * the earlier one where it reads it twice, and where it never does (a clock moved forward over it)
+ * the instant the moment before the change gives it, which the clock shows later by the change.
+ * Every offset is within 15 hours of UTC: at most one change happens around it.
+ */
+function nextMidnight(date: string, zone: string): string {
+  const [year, month, day] = date.split("-").map(Number);
+  const wall = new Date(0);
+  wall.setUTCFullYear(year!, month! - 1, day! + 1);
+  const target = wall.getTime();
+  const before = offsetAt(target - 15 * 3600_000, zone);
+  const after = offsetAt(target + 15 * 3600_000, zone);
+  const fits = [target - before, target - after].filter((at) => offsetAt(at, zone) === target - at);
+  const instant = fits.length > 0 ? Math.min(...fits) : target - before;
+  return new Date(instant).toISOString().replace(/\.000Z$/, "Z");
+}
+
+/** A date uv 0.13.7 and mcpcage both take: years 100 to 9998 (mcpcage refuses 0000 to 0099, which uv takes; uv refuses 9999-12-30 and after). */
+const date = fc.date({ min: new Date(Date.UTC(100, 0, 1)), max: new Date(Date.UTC(9998, 11, 31)), noInvalidDate: true }).map((day) => day.toISOString().slice(0, 10));
+
+describe("--exclude-newer, fuzzed", () => {
+  it(
+    "gives the cage, for a date, the instant of the next midnight in the host's time zone, and anything else as written",
+    () => {
+      const before = process.env.TZ;
+      try {
+        // A zone at a time: setting TZ takes about a millisecond.
+        for (const zone of ZONES) {
+          process.env.TZ = zone;
+          check(
+            fc.property(
+              fc.array(fc.oneof({ weight: 3, arbitrary: date }, { weight: 1, arbitrary: fc.constantFrom("2026-03-07", "2025-11-01", "2011-12-29", "2011-12-30", "2026-09-05", "2026-04-04", "1900-12-31", "1847-11-30") }), { minLength: 1, maxLength: 4 }),
+              fc.constantFrom("flag", "variable"),
+              (days, how) => {
+                for (const day of days) {
+                  const environment = how === "variable" ? [{ where: "its env", variables: { UV_EXCLUDE_NEWER: day } }] : [];
+                  const spec = parseLaunch(["uvx", ...(how === "flag" ? ["--exclude-newer", day] : []), "mcp-server-time"], undefined, "linux", environment) as PypiLaunch;
+                  expect(spec.resolution.excludeNewer, `${day} in ${zone}`).toBe(nextMidnight(day, zone));
+                }
+              },
+            ),
+            50,
+            ZONES.length,
+          );
+          // A time with its zone, and a duration, mean the same in the cage: as written.
+          for (const value of ["2026-01-01T00:00:00Z", "2026-01-01T12:30:00+02:00", "2026-03-08T00:00:00-05:00", "30 days", "P3D", "PT12H", "2 weeks ago"]) {
+            expect((parseLaunch(["uvx", "--exclude-newer", value, "mcp-server-time"], undefined, "linux") as PypiLaunch).resolution.excludeNewer, `${value} in ${zone}`).toBe(value);
+          }
+        }
+      } finally {
+        if (before === undefined) delete process.env.TZ;
+        else process.env.TZ = before;
+      }
+    },
+    TIMEOUT,
+  );
+});
