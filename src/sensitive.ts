@@ -2,6 +2,7 @@ import { realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { posix, win32 } from "node:path";
 import { CLIENT_NAMES, userConfigs } from "./clients.js";
+import { networkPath } from "./network-path.js";
 import { cageHome } from "./paths.js";
 
 /*
@@ -446,8 +447,9 @@ function spellings(path: string, syntax: Syntax, darwin: boolean, missing: Set<s
  * exist: what is inside it does not exist either, and is not asked about again.
  */
 function realPath(path: string, syntax: Syntax, missing: Set<string>): string | undefined {
-  // A Windows path names nothing on macOS or Linux, and the other way round.
-  if ((syntax === win32) !== (process.platform === "win32")) return undefined;
+  // A Windows path names nothing on macOS or Linux, and the other way round. A network path, and so
+  // each of its parents, is never looked at (see networkPath): only how it is written counts.
+  if ((syntax === win32) !== (process.platform === "win32") || networkPath(path)) return undefined;
   const rest: string[] = [];
   let current = path;
   for (;;) {

@@ -1,6 +1,7 @@
 import { win32 } from "node:path";
 import { canonicalJson, sha256 } from "./canonical.js";
 import { isJsonObject } from "./jsonc.js";
+import { NETWORK_PATH, networkPath } from "./network-path.js";
 
 /** What the MCP client asked to start, after `mcpcage run --`. */
 export type LaunchSpec =
@@ -69,7 +70,11 @@ export function parseLaunch(argv: string[], image?: string, platform: NodeJS.Pla
   const spec = rest[index];
   if (!spec) throw new Error("npx needs a package name");
   const args = rest.slice(index + 1);
-  if (isLocalPath(spec, platform)) return { kind: "npm", packageName: "", localPath: spec, args };
+  if (isLocalPath(spec, platform)) {
+    // `run` packs a local package with npm on the host, which would look at it there (see networkPath).
+    if (networkPath(spec, platform)) throw new Error(`the package after npx is ${NETWORK_PATH}`);
+    return { kind: "npm", packageName: "", localPath: spec, args };
+  }
   const { name, range } = splitPackageSpec(spec);
   return { kind: "npm", packageName: name, versionRange: range, args };
 }

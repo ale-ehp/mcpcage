@@ -3,8 +3,9 @@ import { posix, win32 } from "node:path";
 import { readConfigFile } from "./clients.js";
 import { isJsonObject } from "./jsonc.js";
 import type { UvEnvironment } from "./launch.js";
+import { NETWORK_PATH, networkPath } from "./network-path.js";
 import { terminalSafe } from "./terminal.js";
-import { windowsPlaces } from "./windows-places.js";
+import { windowsPlaces, windowsRedirectedAppData } from "./windows-places.js";
 
 /*
  * uvx reads the user's own uv settings, which can name a package index: then it installs a server
@@ -25,8 +26,12 @@ export interface UvPlaces {
   /** The user's own environment: protect's and wrap's, run in the user's terminal, or what `run` was started with. */
   env: Readonly<Record<string, string | undefined>>;
   home: string;
-  /** On Windows, APPDATA and ProgramData as Windows has them (see windowsPlaces): looked at whatever the environment says, the environment's APPDATA too. */
-  windows?: { appData?: string; programData?: string };
+  /**
+   * On Windows, APPDATA and ProgramData as Windows has them (see windowsPlaces): looked at whatever the
+   * environment says, the environment's APPDATA too; and `redirected`, the user's AppData\Roaming
+   * where folder redirection puts it on a share (see redirectedAppData), the one network path read.
+   */
+  windows?: { appData?: string; programData?: string; redirected?: string };
 }
 
 /** The places of this machine: mcpcage's environment and home directory, and Windows' own places there. */
@@ -34,7 +39,8 @@ export function uvPlacesHere(): UvPlaces {
   const places: UvPlaces = { platform: process.platform, env: process.env, home: homedir() };
   if (process.platform === "win32") {
     const windows = windowsPlaces();
-    places.windows = { appData: windows.APPDATA, programData: windows.ProgramData };
+    const redirected = windowsRedirectedAppData();
+    places.windows = { appData: windows.APPDATA, programData: windows.ProgramData, ...(redirected === undefined ? {} : { redirected }) };
   }
   return places;
 }
@@ -50,27 +56,54 @@ export function uvPlacesHere(): UvPlaces {
  * or XDG_CONFIG_DIRS and a terminal with them are both covered.
  */
 export function uvConfigFiles(places: UvPlaces): string[] {
+  return settingsPlaces(places).files;
+}
+
+/**
+ * The files of uvConfigFiles, and the first variable of the environment that points uv to a network
+ * path (see networkPath), which is not one of them: never opened, it stops the cage (see
+ * uvSettingsReason). The user's AppData\Roaming on a share, as the registry gives it, is read: Windows
+ * itself reads it in every program of the session, and the environment's APPDATA is read when it is
+ * that folder. Any other network path of the environment is not, the user's own included, because
+ * `run` cannot tell the user's variables from an entry's: the client starts it with both in one
+ * environment, and an entry's APPDATA on its author's share would get the user's credentials from
+ * every start. protect reads the user's environment by the same rule, so that both say the same.
+ */
+function settingsPlaces(places: UvPlaces): { files: string[]; network?: string } {
   // Every path is read by the rules of the system asked about. On that system's own machine, the
   // only one uv reads these files on, they are the host's rules, with its current directory for a
   // relative UV_CONFIG_FILE, as uv takes it. Read by the host's rules whatever the system, /x/uv.toml
   // became C:\x\uv.toml on Windows when Linux was asked about, and on macOS D:\uv.toml became a
   // name relative to the current directory when Windows was.
   const syntax = places.platform === "win32" ? win32 : posix;
+  const redirected = places.windows?.redirected;
+  const own = redirected === undefined ? undefined : win32.join(redirected, "uv", "uv.toml").toLowerCase();
   const files: string[] = [];
-  const pointed = (name: string) => {
-    const value = valueIn(places.env, name, places.platform);
-    return value === undefined ? [] : settingsFiles(name, value, places.platform);
+  let network: string | undefined;
+  const add = (name: string, found: string[]) => {
+    for (const file of found) {
+      if (!networkPath(file, places.platform) || (name === "APPDATA" && file.toLowerCase() === own)) files.push(file);
+      else network ??= name;
+    }
   };
-  const given = valueIn(places.env, "UV_CONFIG_FILE", places.platform);
-  if (given !== undefined) files.push(syntax.resolve(given));
+  const pointed = (name: string) => {
+    const variable = variableIn(places.env, name, places.platform);
+    if (variable !== undefined) add(variable.name, settingsFiles(name, variable.value, places.platform));
+  };
+  const given = variableIn(places.env, "UV_CONFIG_FILE", places.platform);
+  if (given !== undefined) add(given.name, [syntax.resolve(given.value)]);
   if (places.platform === "win32") {
-    for (const name of SETTINGS_VARIABLES.win32) files.push(...pointed(name));
+    for (const name of SETTINGS_VARIABLES.win32) pointed(name);
     for (const dir of [places.windows?.appData, places.windows?.programData]) if (dir !== undefined && win32.isAbsolute(dir)) files.push(win32.join(dir, "uv", "uv.toml"));
-    return [...new Set(files)];
+    if (redirected !== undefined) files.push(win32.join(redirected, "uv", "uv.toml"));
+  } else {
+    pointed("XDG_CONFIG_HOME");
+    pointed("HOME");
+    add("HOME", [posix.join(places.home, ".config", "uv", "uv.toml")]);
+    pointed("XDG_CONFIG_DIRS");
+    files.push("/etc/xdg/uv/uv.toml", "/etc/uv/uv.toml");
   }
-  files.push(...pointed("XDG_CONFIG_HOME"), ...pointed("HOME"), posix.join(places.home, ".config", "uv", "uv.toml"), ...pointed("XDG_CONFIG_DIRS"));
-  files.push("/etc/xdg/uv/uv.toml", "/etc/uv/uv.toml");
-  return [...new Set(files)];
+  return { files: [...new Set(files)], ...(network === undefined ? {} : { network }) };
 }
 
 /**
@@ -110,12 +143,7 @@ function settingsFiles(name: string, value: string, platform: NodeJS.Platform): 
   return [];
 }
 
-/** The value of a variable of `env`, compared without case on Windows, as uv's reads of them are there; undefined when it is not set, empty, or not a string. */
-function valueIn(env: Readonly<Record<string, unknown>>, name: string, platform: NodeJS.Platform): string | undefined {
-  return variableIn(env, name, platform)?.value;
-}
-
-/** A variable of `env` as valueIn reads it, with its name as written. */
+/** A variable of `env`, compared without case on Windows, as uv's reads of them are there, with its name as written; undefined when it is not set, empty, or not a string. */
 function variableIn(env: Readonly<Record<string, unknown>>, name: string, platform: NodeJS.Platform): { name: string; value: string } | undefined {
   const written = platform === "win32" ? Object.keys(env).find((key) => key.toUpperCase() === name) : Object.hasOwn(env, name) ? name : undefined;
   const value = written === undefined ? undefined : env[written];
@@ -231,7 +259,9 @@ function unescaped(text: string): string {
  * readable), whose settings are then unknown. Undefined when none does.
  */
 export function uvSettingsReason(places: UvPlaces = uvPlacesHere()): string | undefined {
-  for (const file of uvConfigFiles(places)) {
+  const { files, network } = settingsPlaces(places);
+  if (network !== undefined) return `your environment sets ${network} to ${NETWORK_PATH}, and the cage builds from PyPI only`;
+  for (const file of files) {
     const found = readSettings(file);
     const what = `your uv settings (${shown(file, places.home, places.platform)})`;
     if (found === "unreadable") return `${what} could not be read, so whether they name a package index is unknown, and the cage builds from PyPI only`;
@@ -257,6 +287,8 @@ export function entryUvSettingsReason(environment: UvEnvironment, platform: Node
       const variable = variableIn(layer.variables, name, platform);
       if (variable === undefined) continue;
       for (const file of settingsFiles(name, variable.value, platform)) {
+        // Never from an entry: its author's share would get the user's credentials (see networkPath, and settingsPlaces).
+        if (networkPath(file, platform)) return `${layer.where} sets ${variable.name} to ${NETWORK_PATH}, and the cage builds from PyPI only`;
         const found = readSettings(file);
         const what = `${layer.where} sets ${variable.name}, so uvx reads the uv settings in ${shown(file, home, platform)}`;
         if (found === "unreadable") return `${what}, which could not be read: whether they name a package index is unknown, and the cage builds from PyPI only`;

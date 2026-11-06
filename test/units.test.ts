@@ -52,10 +52,13 @@ describe("launch parsing", () => {
   });
 
   it("takes a Windows path for a local package on Windows, and only there", () => {
-    for (const spec of [".\\server", "..\\server", "C:\\work\\server", "c:/work/server", "\\work\\server", "\\\\host\\share\\server"]) {
+    for (const spec of [".\\server", "..\\server", "C:\\work\\server", "c:/work/server", "\\work\\server"]) {
       expect(parseLaunch(["npx", "-y", spec, "--dir", "x"], undefined, "win32")).toEqual({ kind: "npm", packageName: "", localPath: spec, args: ["--dir", "x"] });
       expect(isLocalPath(spec, "linux")).toBe(false);
     }
+    // A share is a local path too, which `run` would pack on the host, looking at it: refused instead.
+    expect(isLocalPath("\\\\host\\share\\server", "win32")).toBe(true);
+    expect(() => parseLaunch(["npx", "-y", "\\\\host\\share\\server"], undefined, "win32")).toThrow(new Error("the package after npx is a network path, which mcpcage does not open"));
     // The forms every system knows stay local on Windows too, and a name stays a name.
     expect(["./server", "/work/server", "~/server", "server.tgz"].map((spec) => isLocalPath(spec, "win32"))).toEqual([true, true, true, true]);
     expect(parseLaunch(["npx", "-y", "@scope/server@1.2.3"], undefined, "win32")).toMatchObject({ packageName: "@scope/server", versionRange: "1.2.3" });

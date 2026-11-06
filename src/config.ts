@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ParseArgsOptionsConfig } from "node:util";
 import { batchFile, envFileOf, foreignPath, mcpcageAt, movedPlaces, nodeScript, type ForeignPath, type McpcageCommand } from "./installed.js";
 import { isJsonObject } from "./jsonc.js";
+import { NETWORK_PATH, networkPath } from "./network-path.js";
 import { cmdRunner, isNpx, npxArgv, parseLaunch, serverIdFor, toolRunArgs, type UvEnvironment } from "./launch.js";
 import type { PypiResolver } from "./pypi.js";
 import { NOT_ON_A_DRIVE, offDrive } from "./sandbox.js";
@@ -132,7 +133,8 @@ export function cageCheck(entry: ServerEntry, options: { command: McpcageCommand
     return `its env sets a PATH that makes the client start another program than mcpcage: check that PATH, or remove it from its "env" by hand`;
   }
   const envFile = envFileOf(entry, options.configFile);
-  const fromFile = envFile === undefined ? undefined : { path: envFile.path, ...(envFile.variables === undefined ? {} : { effects: envEffects(envFile.variables) }) };
+  const fromFile =
+    envFile === undefined ? undefined : { path: envFile.path, ...(envFile.network ? { network: true } : {}), ...(envFile.variables === undefined ? {} : { effects: envEffects(envFile.variables) }) };
   return envReason(envEffects(entry.env), fromFile);
 }
 
@@ -191,9 +193,10 @@ export function actsOnHost(effects: EnvEffects): boolean {
  * in words that say what to do, worst first; undefined when nothing does. The variables of `env`
  * that act on the host are left out: wrap and --fix move them into the cage. Those of an envFile
  * stay where they are, in a file VS Code loads as it is. `envFile` is undefined for an entry
- * without one, and its `effects` when it could not be read.
+ * without one, and its `effects` when it could not be read; `network` when it is on a network path,
+ * which is never opened (see networkPath), and named without its value.
  */
-export function envReason(env: EnvEffects, envFile: { path?: string; effects?: EnvEffects } | undefined): string | undefined {
+export function envReason(env: EnvEffects, envFile: { path?: string; effects?: EnvEffects; network?: boolean } | undefined): string | undefined {
   const file = envFile?.path === undefined ? "its envFile" : terminalSafe(envFile.path);
   const fromFile = envFile?.effects;
   if (fromFile !== undefined && fromFile.hostEnv.length > 0) {
@@ -202,7 +205,7 @@ export function envReason(env: EnvEffects, envFile: { path?: string; effects?: E
     return `its envFile sets ${listOf(names)}, which ${names.length === 1 ? "acts" : "act"} on your machine before the cage starts: move ${them} from ${file} into its "env", or remove ${them}`;
   }
   if (envFile !== undefined && fromFile === undefined) {
-    const what = envFile.path === undefined ? "its envFile is not a string" : `its envFile ${file} could not be read`;
+    const what = envFile.path === undefined ? "its envFile is not a string" : envFile.network ? `its envFile is ${NETWORK_PATH}` : `its envFile ${file} could not be read`;
     return `${what}, so what it sets is unknown: check that file, or move what it sets into its "env"`;
   }
   const sources: Array<[string, EnvEffects | undefined, string]> = [["env", env, 'its "env"'], ["envFile", fromFile, file]];
@@ -410,6 +413,7 @@ export function wrapEntry(entry: ServerEntry, options: { command: McpcageCommand
   // the values of --from and --with), which are never mounted.
   const runnerPart = args.slice(0, args.length - serverArgs.length);
   const paths = serverArgs.map((arg) => hostPath(arg));
+  if (paths.some((path) => path !== undefined && networkPath(path))) return { skip: `one of its args is ${NETWORK_PATH}` };
   const machine = thisMachine();
   for (const path of paths) {
     if (path !== undefined && offDrive(path)) return { skip: `needs ${path}, which ${NOT_ON_A_DRIVE}` };
@@ -595,6 +599,9 @@ export function withoutEnvValues(args: string[]): string[] {
 export function hostPath(arg: unknown): string | undefined {
   if (typeof arg !== "string") return undefined; // configuration files are not type-checked
   const path = arg.startsWith("~/") ? join(homedir(), arg.slice(2)) : arg;
+  // A network path is given back unlooked at (see networkPath), for the caller to refuse: existsSync
+  // connected to its server, with the user's credentials, before wrap found it was not on a drive.
+  if (networkPath(path)) return path;
   return isAbsolute(path) && existsSync(offDrive(path) ? path : resolve(path)) ? path : undefined;
 }
 

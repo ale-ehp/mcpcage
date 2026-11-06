@@ -53,6 +53,8 @@ export interface WindowsSources {
   home: string;
   /** What `reg query <key>` prints, or undefined when the key could not be read. */
   registry: (key: string) => string | undefined;
+  /** The account's name, from the system (os.userInfo), which folder redirection writes as %USERNAME%. */
+  user?: string;
 }
 
 /** The registry keys Windows makes those variables from, for every program it starts. */
@@ -80,22 +82,12 @@ const FOLDERS_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explore
  */
 export function windowsEnv(sources: WindowsSources): Record<string, string | undefined> {
   const { windows, home } = sources;
-  const drive = /^[A-Za-z]:/.exec(windows)?.[0] ?? "C:";
-  const known: Record<string, string> = { SYSTEMDRIVE: drive, SYSTEMROOT: windows, WINDIR: windows, USERPROFILE: home };
+  const drive = driveOf(windows);
   const read = (key: string) => {
-    const values = new Map<string, string>();
-    for (const line of (sources.registry(key) ?? "").split(/\r?\n/)) {
-      const found = /^ {4}(.+?) {4}REG_(?:EXPAND_)?SZ {4}(.*)$/.exec(line);
-      if (found !== null) values.set(found[1]!, found[2]!);
-    }
+    const filled = registryValues(sources, key);
     return (name: string, otherwise: string) => {
-      let whole = true;
-      const value = (values.get(name) ?? "").replace(/%([^%]*)%/g, (variable, inner: string) => {
-        const filled = known[inner.toUpperCase()];
-        if (filled === undefined) whole = false;
-        return filled ?? variable;
-      });
-      return whole && FULL_PATH.test(value) ? value : otherwise;
+      const value = filled(name);
+      return value !== undefined && FULL_PATH.test(value) ? value : otherwise;
     };
   };
   const programs = read(PROGRAMS_KEY);
@@ -138,6 +130,51 @@ export function windowsEnv(sources: WindowsSources): Record<string, string | und
 /** A full path on a drive, as Windows' places are: no variable left to fill in, nothing that was not read whole. */
 const FULL_PATH = /^[A-Za-z]:\\[^%"*<>?|\u0000-\u001f\uFFFD]*$/;
 
+/** A full path on a share, \\server\share\..., read whole: no device path (\\?\, \\.\), no variable left. */
+const SHARE_PATH = /^\\\\[^\\/?.%"*<>|\u0000-\u001f\uFFFD][^\\/%"*<>?|\u0000-\u001f\uFFFD]*\\[^\\/%"*<>?|\u0000-\u001f\uFFFD]+(?:\\[^%"*<>?|\u0000-\u001f\uFFFD]*)?$/;
+
+/** The drive Windows is on, as SystemDrive names it. */
+function driveOf(windows: string): string {
+  return /^[A-Za-z]:/.exec(windows)?.[0] ?? "C:";
+}
+
+/**
+ * The values of a registry key, each with the variables Windows fills in for them filled in from
+ * Windows' own places (SystemDrive, SystemRoot, windir, USERPROFILE, and with `user` USERNAME from
+ * the account): undefined for a value that is not there, or that has another variable in it.
+ */
+function registryValues(sources: WindowsSources, key: string, user = false): (name: string) => string | undefined {
+  const known: Record<string, string> = { SYSTEMDRIVE: driveOf(sources.windows), SYSTEMROOT: sources.windows, WINDIR: sources.windows, USERPROFILE: sources.home };
+  if (user && sources.user !== undefined) known.USERNAME = sources.user;
+  const values = new Map<string, string>();
+  for (const line of (sources.registry(key) ?? "").split(/\r?\n/)) {
+    const found = /^ {4}(.+?) {4}REG_(?:EXPAND_)?SZ {4}(.*)$/.exec(line);
+    if (found !== null) values.set(found[1]!, found[2]!);
+  }
+  return (name) => {
+    let whole = true;
+    const value = (values.get(name) ?? "").replace(/%([^%]*)%/g, (variable, inner: string) => {
+      const filled = known[inner.toUpperCase()];
+      if (filled === undefined) whole = false;
+      return filled ?? variable;
+    });
+    return whole ? value : undefined;
+  };
+}
+
+/**
+ * The user's AppData\Roaming where folder redirection puts it, on a share: the value of the user's
+ * shell folders that Windows sets APPDATA from in every program of the session, its variables filled
+ * in (\\fs01\profiles$\%USERNAME%\AppData\Roaming). windowsEnv leaves such a value for the
+ * folder's default place, which docker and npm are given; uv reads its settings from the APPDATA
+ * variable first, the share (see uv-settings.ts). Undefined when the folder is on a drive, or the
+ * value cannot be read whole.
+ */
+export function redirectedAppData(sources: WindowsSources): string | undefined {
+  const value = registryValues(sources, FOLDERS_KEY, true)("AppData");
+  return value !== undefined && SHARE_PATH.test(value) ? value : undefined;
+}
+
 /**
  * Where Windows' places are on this machine, from Windows itself: its own directory as the object
  * manager names it (\SystemRoot, a link Windows makes as it starts: no variable is read), the
@@ -157,17 +194,26 @@ export function windowsSources(): WindowsSources {
     // Not on Windows, where only the tests ask: Windows' own default.
   }
   const reg = win32.join(windows, "System32", "reg.exe");
+  const read = new Map<string, string | undefined>();
+  const account = userInfo();
   return {
     windows,
-    home: userInfo().homedir,
+    home: account.homedir,
+    user: account.username,
+    // Each key read once: windowsEnv and redirectedAppData both read the user's shell folders.
     registry: (key) => {
-      const listed = spawnSync(reg, ["query", key, "/reg:64"], { encoding: "utf8", env: {}, cwd: windows, windowsHide: true, timeout: 10_000 });
-      return listed.status === 0 ? listed.stdout : undefined;
+      if (!read.has(key)) {
+        const listed = spawnSync(reg, ["query", key, "/reg:64"], { encoding: "utf8", env: {}, cwd: windows, windowsHide: true, timeout: 10_000 });
+        read.set(key, listed.status === 0 ? listed.stdout : undefined);
+      }
+      return read.get(key);
     },
   };
 }
 
+let sources: WindowsSources | undefined;
 let asked: Record<string, string | undefined> | undefined;
+let redirected: { appData: string | undefined } | undefined;
 
 /**
  * Windows' places on this machine (see windowsEnv), asked once: the registry takes a program for each
@@ -175,6 +221,12 @@ let asked: Record<string, string | undefined> | undefined;
  * own settings (see uv-settings.ts), which an environment's APPDATA adds a place to, but never moves.
  */
 export function windowsPlaces(): Record<string, string | undefined> {
-  asked ??= windowsEnv(windowsSources());
+  asked ??= windowsEnv((sources ??= windowsSources()));
   return asked;
+}
+
+/** The user's AppData\Roaming on a share on this machine (see redirectedAppData), asked once. */
+export function windowsRedirectedAppData(): string | undefined {
+  redirected ??= { appData: redirectedAppData((sources ??= windowsSources())) };
+  return redirected.appData;
 }

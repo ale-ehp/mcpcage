@@ -617,7 +617,8 @@ describe("wrapping one entry", () => {
     const share = `/${dir}`;
     const reason = "is not a path on a drive, and only those have a place in the cage on Windows";
     const entry = { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", share] };
-    expect(onWindows(() => wrapEntry(entry, { command: "mcpcage" }))).toEqual({ skip: `needs ${share}, which ${reason}` });
+    // Never looked at: on Windows looking at a share hands its server the user's credentials.
+    expect(onWindows(() => wrapEntry(entry, { command: "mcpcage" }))).toEqual({ skip: "one of its args is a network path, which mcpcage does not open" });
     expect([offDrive("\\\\localhost\\C$\\notes", "win32"), offDrive("\\\\?\\C:\\notes", "win32"), offDrive("C:\\notes", "win32"), offDrive(share, "linux")]).toEqual([true, true, false, false]);
 
     // A caged entry that mounts one cannot start: said, not counted as caged, and left for the user by --fix.
@@ -3167,14 +3168,14 @@ describe("a share given to a server on Windows", () => {
     const env = fakeUserEnv(home, join(top, "cage"), { CLAUDECODE: "1", PATH: installed.path });
 
     const wrap = mcpcageWithEnv(env, "wrap", cursor, "--dry-run", "--command", installed.command);
-    expect(wrap.stdout).toContain(`  skipped shared: needs ${share}, which ${reason}\n`);
+    expect(wrap.stdout).toContain("  skipped shared: one of its args is a network path, which mcpcage does not open\n");
     const scan = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--command", installed.command);
     expect(lineOf(scan.stdout, "shared")).toMatch(/ {2}NOT CAGED$/);
     expect(lineOf(scan.stdout, "mounted")).toMatch(new RegExp(` {2}cannot start: --mount ${literal(share)} ${reason}$`));
     expect(scan.stdout).toContain("  0 already run through mcpcage.\n  1 cannot start: it mounts a path that is not on a drive.\n");
     const fix = mcpcageWithEnv(env, "protect", "--project", project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
     const where = tilde(cursor, home);
-    expect(fix.stdout).toContain(`  not changed: shared in ${where}: needs ${share}, which ${reason}\n`);
+    expect(fix.stdout).toContain(`  not changed: shared in ${where}: one of its args is a network path, which mcpcage does not open\n`);
     expect(fix.stdout).toContain(`  not changed: mounted in ${where}: it cannot start: --mount ${share} ${reason}; remove that --mount by hand\n`);
     expect(readFileSync(cursor)).toEqual(original);
   });

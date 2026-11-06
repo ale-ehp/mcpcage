@@ -14,6 +14,7 @@ import type { Redact } from "./inspect.js";
 import { installScripts, type InstallScripts, type NpmRunner } from "./npm-scripts.js";
 import { cageHome } from "./paths.js";
 import { noWheel, PypiUnsolvable, type PypiResolver } from "./pypi.js";
+import { NETWORK_PATH, networkPath } from "./network-path.js";
 import { hostMount, NOT_ON_A_DRIVE, offDrive, type SandboxOptions } from "./sandbox.js";
 import { accountHome, clientPlaces, sensitivePath, thisMachine, toolPlaces } from "./sensitive.js";
 import { describeFindings, highSeveritySigns, scanTool, type Finding } from "./suspicious.js";
@@ -66,7 +67,10 @@ export interface ServerReport {
   cmdInjection?: string;
   /** For a caged entry: each run option that opens its cage, in plain words. */
   opened: string[];
-  /** For a caged entry on Windows, a path it mounts that is not on a drive (see offDrive), so it cannot start. */
+  /**
+   * For a caged entry, a path it mounts that `run` refuses as it is written, so it cannot start: on
+   * Windows one that is not on a drive (see offDrive), on macOS one under /net (see networkPath).
+   */
   offDrive?: string;
   /** For a caged uvx entry: why `run` refuses its uvx line at every start, so it cannot start (see uvxRefusal). */
   uvxRefused?: string;
@@ -93,7 +97,7 @@ export interface ServerReport {
    * variables do on this machine, as those of `env` above; `effects` is missing when the file could
    * not be read, and `path` when the value is not a string.
    */
-  envFile?: { path?: string; effects?: EnvEffects };
+  envFile?: { path?: string; effects?: EnvEffects; network?: boolean };
   /** What in the entry is not as a client expects it, such as an argument that is not a string. */
   problems: string[];
   /** For a `cmd /c npx` or `cmd /c uvx` entry on Windows that runs more than the runner, which one, and why it is not caged (see cmdRunner). */
@@ -246,7 +250,9 @@ async function describeServer(
       Object.assign(server, effectsOf(entry.env, installed));
       // VS Code adds the variables of the file an envFile names to those of env: they act the same way.
       const envFile = envFileOf(entry, file.file);
-      if (envFile !== undefined) server.envFile = envFile.variables === undefined ? { path: envFile.path } : { path: envFile.path, effects: effectsOf(envFile.variables, installed) };
+      if (envFile !== undefined) {
+        server.envFile = envFile.variables === undefined ? { path: envFile.path, ...(envFile.network ? { network: true } : {}) } : { path: envFile.path, effects: effectsOf(envFile.variables, installed) };
+      }
     }
     const cmd = type === "other" && Array.isArray(entry.args) ? cmdRunner([entry.command, ...entry.args]) : undefined;
     if (cmd !== undefined && "notPlain" in cmd) server.notPlain = { runner: cmd.runner, reason: cmd.notPlain };
@@ -379,7 +385,7 @@ function inspectionPlan<Spec extends CageableLaunch>(spec: Spec): { spec: Spec; 
   for (const path of new Set(paths.filter((path): path is string => path !== undefined))) {
     // Off any drive on Windows, a path has no place in the cage: hostMount would refuse it, and the
     // inspection would fail instead of going on without it.
-    const reason = offDrive(path) ? `it ${NOT_ON_A_DRIVE}` : sensitivePath(path, thisMachine());
+    const reason = offDrive(path) ? `it ${NOT_ON_A_DRIVE}` : networkPath(path) ? `it is ${NETWORK_PATH}` : sensitivePath(path, thisMachine());
     if (reason === undefined) mounted.push(path);
     else skipped.push({ path, reason });
   }
@@ -477,7 +483,8 @@ function openedBy(entry: ServerEntry): string[] {
 }
 
 /**
- * The first path a caged entry mounts that is not on a drive, on Windows (see offDrive): `run`
+ * The first path a caged entry mounts that is not on a drive, on Windows (see offDrive), or under
+ * /net on macOS (see networkPath), which `run` refuses without looking at it: `run`
  * cannot give it a place in the cage, so the entry never starts. Undefined when there is none, and
  * when `run` would refuse its options anyway.
  */
@@ -485,7 +492,7 @@ function offDriveMount(entry: ServerEntry): string | undefined {
   const args = fromRun(entry);
   const separator = args.indexOf("--");
   try {
-    return runValues(args.slice(1, separator === -1 ? args.length : separator)).mount.map((mount) => mount.replace(/:(?:rw|ro)$/, "")).find((path) => offDrive(path));
+    return runValues(args.slice(1, separator === -1 ? args.length : separator)).mount.map((mount) => mount.replace(/:(?:rw|ro)$/, "")).find((path) => offDrive(path) || networkPath(path));
   } catch {
     return undefined;
   }
@@ -513,6 +520,11 @@ function uvxRefusal(entry: ServerEntry, userUv: () => UserUv, configFile: string
   if (image !== undefined || toolRunArgs(server) === undefined) return undefined;
   const read = pypiOf({ ...entry, command: server[0], args: server.slice(1) }, userUv(), configFile);
   return "cannotCage" in read ? read.cannotCage : undefined;
+}
+
+/** Why `run` refuses a mount offDriveMount found, by how it is written: not on a drive (Windows), or a network path (macOS). */
+function unmountable(path: string): string {
+  return offDrive(path, "win32") ? NOT_ON_A_DRIVE : `is ${NETWORK_PATH}`;
 }
 
 function runValues(own: string[]) {
@@ -640,7 +652,8 @@ function serverLines(server: ServerReport, home: string): string[] {
   details.push(...effectLines("env", server));
   if (server.envFile?.effects !== undefined) details.push(...effectLines("envFile", server.envFile.effects));
   else if (server.envFile !== undefined) {
-    details.push(`envFile: ${server.envFile.path === undefined ? "its value is not a string" : `${terminalSafe(server.envFile.path)} could not be read`}, so what it sets is unknown`);
+    const why = server.envFile.path === undefined ? "its value is not a string" : server.envFile.network ? NETWORK_PATH : `${terminalSafe(server.envFile.path)} could not be read`;
+    details.push(`envFile: ${why}, so what it sets is unknown`);
   }
   details.push(...server.opened);
   for (const skipped of server.inspection?.skipped ?? []) details.push(`inspected without ${terminalSafe(tilde(skipped.path, home))}: ${terminalSafe(skipped.reason)}`);
@@ -673,16 +686,19 @@ function status(server: ServerReport): string {
       const command = terminalSafe(commandOf(server.command));
       if (server.script !== undefined) {
         const started = `starts ${terminalSafe(server.script)} with ${command}`;
+        // Not looked at (see networkPath), so not known to be mcpcage's.
+        if (server.mcpcage === "other program" && (networkPath(server.script) || networkPath(commandOf(server.command)))) return `${started}, one of which is ${NETWORK_PATH}`;
         if (server.mcpcage === "other program") return `${started}, which are not mcpcage's cli.js and your node`;
         if (server.mcpcage === "not found") return `${started}, one of which was not found`;
       }
       if (server.mcpcage === "other program" && process.platform === "win32" && !/[/\\]/.test(command)) {
         return `starts ${command} by name, which Windows looks for in the client's current directory first`;
       }
+      if (server.mcpcage === "other program" && networkPath(commandOf(server.command))) return `starts ${command}, ${NETWORK_PATH}`;
       if (server.mcpcage === "other program") return `starts ${command}, which is not the mcpcage on your PATH`;
       if (server.mcpcage === "not found") return `starts ${command}, which ${/[/\\]/.test(command) ? "was not found" : "is not on your PATH"}`;
       if (!server.protectedByMcpcage) return "mcpcage --no-sandbox: pinning and audit only, no isolation";
-      if (server.offDrive !== undefined) return `cannot start: --mount ${terminalSafe(server.offDrive)} ${NOT_ON_A_DRIVE}`;
+      if (server.offDrive !== undefined) return `cannot start: --mount ${terminalSafe(server.offDrive)} ${unmountable(server.offDrive)}`;
       if (server.uvxRefused !== undefined) return `cannot start: ${terminalSafe(server.uvxRefused)}`;
       // The env acts first, on the host, before any cage exists.
       const fromFile = server.envFile?.effects;
@@ -800,7 +816,12 @@ function summary(report: ProtectReport): string[] {
     lines.push(`  ${many(batch, "starts", "start")} mcpcage through a .cmd or .bat file, which some clients cannot start: protect --fix rewrites ${batch === 1 ? "it" : "them"}.`);
   }
   if (missing > 0) lines.push(`  ${many(missing, "starts", "start")} an mcpcage that could not be found.`);
-  if (stuck > 0) lines.push(`  ${stuck} cannot start: ${stuck === 1 ? "it mounts a path" : "they mount paths"} that ${stuck === 1 ? "is" : "are"} not on a drive.`);
+  if (stuck > 0 && servers.every((server) => server.offDrive === undefined || offDrive(server.offDrive, "win32"))) {
+    lines.push(`  ${stuck} cannot start: ${stuck === 1 ? "it mounts a path" : "they mount paths"} that ${stuck === 1 ? "is" : "are"} not on a drive.`);
+  } else if (stuck > 0) {
+    // On macOS, under /net (see networkPath).
+    lines.push(`  ${stuck} cannot start: ${stuck === 1 ? "it mounts a network path" : "they mount network paths"}.`);
+  }
   if (refused > 0) {
     lines.push(`  ${refused} cannot start: mcpcage run refuses ${refused === 1 ? "its uvx command line, for the reason" : "their uvx command lines, for the reasons"} shown above.`);
   }
@@ -933,7 +954,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   for (const server of onHost) {
     const reason =
       server.offDrive !== undefined
-        ? `it cannot start: --mount ${server.offDrive} ${NOT_ON_A_DRIVE}; remove that --mount by hand`
+        ? `it cannot start: --mount ${server.offDrive} ${unmountable(server.offDrive)}; remove that --mount by hand`
         : server.uvxRefused !== undefined
           ? `it cannot start: ${server.uvxRefused}`
           : "it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand";

@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { readConfigFile } from "./clients.js";
 import { isJsonObject } from "./jsonc.js";
+import { networkPath } from "./network-path.js";
 import { clientPlaces } from "./sensitive.js";
 
 /*
@@ -155,6 +156,8 @@ export function mcpcageAt(entry: { command: string; args?: unknown; env?: unknow
  */
 function nodeAt(node: string, script: string, own: McpcageCommand | undefined): McpcageKind {
   if (!isAbsolute(node) || !isAbsolute(script)) return "other program";
+  // Never looked at (see networkPath): what is there is not known, so it is not mcpcage.
+  if (networkPath(node) || networkPath(script)) return "other program";
   const realNode = realFile(node);
   const realScript = realFile(script);
   if (realNode === undefined || realScript === undefined) return "not found";
@@ -202,7 +205,8 @@ export function foreignPath(env: unknown): ForeignPath | undefined {
 function dirKey(dir: string): string {
   let real: string;
   try {
-    real = realpathSync.native(dir);
+    // A network directory is compared as written, never looked at (see networkPath).
+    real = networkPath(dir) ? resolve(dir) : realpathSync.native(dir);
   } catch {
     // Not there, or not yet: compared as written, `..` and a final separator resolved.
     real = resolve(dir);
@@ -244,6 +248,8 @@ export interface EnvFile {
   path?: string;
   /** Its variables, when the file could be read; undefined when it could not, so what it sets is unknown. */
   variables?: Record<string, string>;
+  /** The file is on a network path, never opened (see networkPath): what it sets is unknown. */
+  network?: true;
 }
 
 /** The most an envFile may weigh for mcpcage to read it: a .env file holds a few lines. */
@@ -265,6 +271,8 @@ export function envFileOf(entry: { [field: string]: unknown }, configFile: strin
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string") return {};
   const file = envFilePath(value, configFile);
+  // Looking at it would hand its host the user's credentials (see networkPath): what it sets stays unknown.
+  if (file !== undefined && networkPath(file)) return { path: value, network: true };
   return { path: value, variables: file === undefined ? undefined : readEnvFile(file) };
 }
 
@@ -429,14 +437,17 @@ function pathOf(env: unknown): string | typeof UNKNOWN | undefined {
  * entry sets (`strict`), reached before a match, it makes the result unknown.
  */
 function onPath(command: string, path: string | typeof UNKNOWN, strict: boolean): string | typeof UNKNOWN | undefined {
-  if (isAbsolute(command)) return existsSync(command) ? command : undefined;
+  // A program on a network path is never looked at (see networkPath): what it is, is not known.
+  if (isAbsolute(command)) return networkPath(command) ? UNKNOWN : existsSync(command) ? command : undefined;
   // A relative path depends on the directory the client starts it from, which is not known here.
   if (/[/\\]/.test(command)) return UNKNOWN;
   if (path === UNKNOWN) return UNKNOWN;
   const windows = process.platform === "win32";
   const extensions = windows && !/\.[^.]+$/.test(command) ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean) : [""];
   for (const dir of path.split(delimiter)) {
-    if (!isAbsolute(dir)) {
+    // A network directory of an entry's PATH is never looked in (see networkPath): what it would
+    // find there is not known. One of the user's own PATH is theirs, which they look in every day.
+    if (!isAbsolute(dir) || (strict && networkPath(dir))) {
       if (strict) return UNKNOWN;
       continue;
     }

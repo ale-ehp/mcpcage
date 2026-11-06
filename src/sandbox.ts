@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { sha256 } from "./canonical.js";
 import { hostEnvName } from "./config.js";
 import type { LaunchSpec } from "./launch.js";
+import { NETWORK_PATH, networkPath } from "./network-path.js";
 import { cageHome, serverDir } from "./paths.js";
 import { readJson, writeJson } from "./pinstore.js";
 import { preparePypiImage, type PypiLock } from "./pypi.js";
@@ -196,8 +197,8 @@ function cageArgs(args: string[], mounts: Mount[], platform: NodeJS.Platform): s
   };
   return args.map((arg) => {
     const written = arg.startsWith("~/") ? win32.join(homedir(), arg.slice(2)) : arg;
-    // \\server\share and the like are on no drive, so in no mount.
-    if (!win32.isAbsolute(written) || /^[\\/]{2}/.test(written)) return arg;
+    // \\server\share and the like are on no drive, so in no mount, and never looked at (see networkPath).
+    if (!win32.isAbsolute(written) || networkPath(written, "win32")) return arg;
     const below: string[] = [];
     for (let dir = win32.resolve(written); ; dir = win32.dirname(dir)) {
       const mount = mounted.get(dir.toLowerCase()) ?? mounted.get(onDisk(dir)?.toLowerCase() ?? "");
@@ -236,8 +237,10 @@ export function hostMount(written: string, readOnly: boolean): Mount {
   // A path off any drive is refused as written: resolved, \\ alone (or //, \\.) became C:\, and the
   // whole drive was mounted.
   const path = offDrive(written) ? written : resolve(written);
-  // Checked before the disk is asked: a network path makes existsSync wait on the network.
+  // Checked before the disk is asked: a network path makes existsSync wait on the network, and hands
+  // its server the user's credentials (see networkPath); on macOS /net/<host> mounts that host.
   if (process.platform === "win32") cagePath(path);
+  if (networkPath(path)) throw new Error(NETWORK_PATH);
   if (!existsSync(path)) throw new Error(`${path} does not exist`);
   const source = process.platform === "win32" ? realpathSync.native(path) : path;
   // A folder on a mapped network drive is spelled on disk as the share it is on.
@@ -489,8 +492,9 @@ export function withSettingsReadOnly(mounts: Mount[], limits = SETTINGS_LIMITS, 
           }
         });
       } catch (error) {
-        if (!(error as NodeJS.ErrnoException).code) throw error;
-        throw refuse(from, `cannot follow ${file} to the repository it names (${(error as NodeJS.ErrnoException).code})`, "Fix or remove it");
+        const code = (error as NodeJS.ErrnoException).code;
+        if (!code) throw error;
+        throw refuse(from, `cannot follow ${file} to the repository it names (${code === NETWORK_CODE ? `it leads to ${NETWORK_PATH}` : code})`, "Fix or remove it");
       }
       if (!found.exists) {
         if (changeable(found.real)) {
@@ -578,6 +582,9 @@ function below(path: string, dir: string): string {
 /** Longer than any path a .git file or a commondir file holds. */
 const MAX_POINTER_BYTES = 64 * 1024;
 
+/** The code of locate's error for a path it does not look at (see networkPath). */
+const NETWORK_CODE = "ENETWORKPATH";
+
 /**
  * The path a `.git` file (`gitdir: <path>`) or a `commondir` file (the path alone) names, read the
  * way git reads it: the prefix exactly, then everything up to the line endings at the end.
@@ -629,6 +636,9 @@ function locate(base: string, path: string, link: (at: string) => void): { real:
   // `C:` is no name to look for in it: taken for one, every absolute path, which is how git writes
   // a worktree's or a separate repository's on Windows, led to a `C:\C:` that does not exist.
   const names = (spelled: string) => (isAbsolute(spelled) ? spelled.slice(parse(spelled).root.length) : spelled).split(sep === "\\" ? /[\\/]/ : "/");
+  // A .git file, a commondir file or a link in a writable mount can name a share: never looked at (see networkPath).
+  const network = () => Object.assign(new Error(`${path} leads to ${NETWORK_PATH}`), { code: NETWORK_CODE });
+  if (isAbsolute(path) && networkPath(path)) throw network();
   let current = isAbsolute(path) ? parse(path).root : base;
   const pending = names(path);
   let links = 0;
@@ -640,6 +650,7 @@ function locate(base: string, path: string, link: (at: string) => void): { real:
       continue;
     }
     const next = join(current, name);
+    if (networkPath(next)) throw network();
     let stat;
     try {
       stat = lstatSync(next);
@@ -1025,9 +1036,14 @@ function searchPath(): string[] {
   return (process.env.PATH ?? "").split(delimiter).filter((dir) => isAbsolute(dir));
 }
 
-/** The first file named `name` in `dirs` that can be run, symlinks followed; undefined when none has it. */
+/**
+ * The first file named `name` in `dirs` that can be run, symlinks followed; undefined when none has
+ * it. A network directory is never looked in (see networkPath): `run` gets its PATH from the client,
+ * with the entry's own PATH in it.
+ */
 function findProgram(name: string, dirs: string[]): string | undefined {
   for (const dir of dirs) {
+    if (networkPath(dir)) continue;
     const file = join(dir, name);
     try {
       if (!statSync(file).isFile()) continue;

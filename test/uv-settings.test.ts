@@ -156,9 +156,11 @@ describe("where uv's settings are looked for", () => {
   it("on Windows: %APPDATA% as the environment has it and as Windows has it, and %PROGRAMDATA% as Windows has it", () => {
     const windows = { appData: "C:\\Users\\me\\AppData\\Roaming", programData: "C:\\ProgramData" };
     // uv reads the APPDATA variable first (etcetera's Windows strategy), which folder redirection sets
-    // to a share, or to a folder named after the user, which the registry gives with %USERNAME% in it.
-    const env = { APPDATA: "\\\\fs01\\profiles$\\me\\AppData\\Roaming", XDG_CONFIG_HOME: "C:\\elsewhere" };
-    expect(uvConfigFiles({ platform: "win32", env, home: "C:\\Users\\me", windows })).toEqual([
+    // to a share, or to a folder named after the user, which the registry gives with %USERNAME% in it:
+    // the share is read when it is the user's own AppData, as the registry gives it (see networkPath).
+    const share = "\\\\fs01\\profiles$\\me\\AppData\\Roaming";
+    const env = { APPDATA: share, XDG_CONFIG_HOME: "C:\\elsewhere" };
+    expect(uvConfigFiles({ platform: "win32", env, home: "C:\\Users\\me", windows: { ...windows, redirected: share } })).toEqual([
       "\\\\fs01\\profiles$\\me\\AppData\\Roaming\\uv\\uv.toml",
       "C:\\Users\\me\\AppData\\Roaming\\uv\\uv.toml",
       "C:\\ProgramData\\uv\\uv.toml",
