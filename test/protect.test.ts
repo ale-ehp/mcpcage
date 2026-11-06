@@ -15,7 +15,7 @@ import { cmdNpx, parseLaunch, serverIdFor, type PypiLaunch } from "../src/launch
 import { tooDeep } from "../src/manifest.js";
 import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
-import { broadAccessKind, fixConfigs, inspectionSandbox, renderReport, scanConfigs, writableMounts, type Inspector } from "../src/protect.js";
+import { broadAccessKind, fixConfigs, inspectionSandbox, pasteable, renderReport, scanConfigs, writableMounts, type Inspector } from "../src/protect.js";
 import { PypiUnsolvable, type PypiResolver } from "../src/pypi.js";
 import { offDrive, parseMount, runArgs } from "../src/sandbox.js";
 import { uvConfigFiles, uvSettingsReason } from "../src/uv-settings.js";
@@ -1886,8 +1886,9 @@ describe("mcpcage protect", () => {
     // Each reason is printed once, with the plan.
     expect(result.stdout.match(/Claude Code is running/g)).toHaveLength(1);
     expect(result.code).toBe(1); // five npx servers and a uvx one are still outside the cage
-    // The uvx server of ~/.claude.json is in the plan, with the command to give it by hand.
-    expect(result.stdout).toContain(`    time: ${installed} run -- uvx mcp-server-time\n`);
+    // The uvx server of ~/.claude.json is in the plan, with the command to give it by hand, quoted for
+    // a shell: on Windows -- in quotes, which PowerShell drops bare.
+    expect(result.stdout).toContain(`    time: ${installed} run ${process.platform === "win32" ? '"--"' : "--"} uvx mcp-server-time\n`);
 
     const again = mcpcageWithEnv(machine.env, "protect", "--project", project, "--offline", "--command", installed);
     const statuses = Object.fromEntries(
@@ -1902,6 +1903,37 @@ describe("mcpcage protect", () => {
     expect(again.stdout).toContain("  6 run on your machine with your permissions and no cage.");
     expect(again.stdout).toContain("  5 already run through mcpcage.");
     expect(again.code).toBe(1);
+  });
+
+  it("prints the commands to add again with claude mcp add quoted for a shell, so that pasting one runs nothing an argument holds", () => {
+    const hostile = "$(id)'\"`x`";
+    // What --fix prints while Claude Code runs: the argument was printed as written, for a shell to run $(id) and `x`.
+    const machine = fakeMachine();
+    writeJsonFile(machine.files.claudeJson, { mcpServers: { t: { type: "stdio", command: "uvx", args: ["mcp-server-time", "--local-timezone", hostile], env: {} } } });
+    const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", machine.installed);
+    expect(result.stdout).toContain(
+      process.platform === "win32"
+        ? "    t: one of its arguments is empty, ends with \\, or holds $, `, \", %, ! or a control character, which PowerShell or cmd would read: close Claude Code and run mcpcage protect --fix again\n"
+        : `    t: ${machine.installed} run -- uvx mcp-server-time --local-timezone '$(id)'\\''"\`x\`'\n`,
+    );
+    expect(result.stdout).toContain("or add the servers again with claude mcp add using the commands above");
+
+    const words = ["/opt/mcpcage", "run", "--env", "NAME=***", "--", "uvx", "mcp-server-time", "--local-timezone", hostile, "a b", "", "~", "=ls", "*", "{a,b}", "!!", "a;b", "it's", "%1", "@u", "-", "a=b"];
+    // POSIX single quotes: sh, bash and zsh give each word back as it is.
+    const posix = "/opt/mcpcage run --env 'NAME=***' -- uvx mcp-server-time --local-timezone '$(id)'\\''\"`x`' 'a b' '' '~' '=ls' '*' '{a,b}' '!!' 'a;b' 'it'\\''s' %1 @u - 'a=b'";
+    expect(pasteable(words, "darwin")).toBe(posix);
+    expect(pasteable(words, "linux")).toBe(posix);
+    if (process.platform !== "win32") {
+      for (const shell of ["sh", "bash", "zsh"].filter((name) => spawnSync(name, ["-c", "true"]).status === 0)) {
+        const given = spawnSync(shell, ["-c", `"$0" -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- ${posix}`, process.execPath], { encoding: "utf8" });
+        expect(JSON.parse(given.stdout), shell).toEqual(words);
+      }
+    }
+    // Windows: plain words as they are, others in double quotes, which PowerShell and cmd both leave as
+    // they are inside; a word they would read even there cannot be pasted.
+    const windows = ["C:\\Program Files\\nodejs\\node.exe", "C:\\npm\\cli.js", "run", "--", "npx", "-y", "@acme/x@1.0", "a&calc", "b|more", "f^g", "(h)", "i'j", "k;l", "q r", "1.0", "C:\\dir\\"];
+    expect(pasteable(windows, "win32")).toBe('"C:\\Program Files\\nodejs\\node.exe" C:\\npm\\cli.js run "--" npx "-y" "@acme/x@1.0" "a&calc" "b|more" "f^g" "(h)" "i\'j" "k;l" "q r" 1.0 C:\\dir\\');
+    for (const word of ["a$b", "a%b%", "a!b", 'a"b', "", "C:\\My Notes\\", "a`b", "a\u201Cb", "a\nb"]) expect(pasteable(["npx", word], "win32"), JSON.stringify(word)).toBeUndefined();
   });
 
   it("wrap --dry-run takes a Devin project file like a Cursor file and writes nothing", () => {

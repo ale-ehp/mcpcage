@@ -981,13 +981,18 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   // Said with the plan, before the question, for each mount --writable made writable. An entry that was
   // caged already keeps the mounts it had, which the report names.
   const warnings = (change: FixedFile["changed"][number]) => (options.writable && !change.alreadyCaged ? writableMounts(change.after).map((path) => writableWarning(change.name, path)) : []);
-  // When the file cannot be rewritten, the exact command each server should run instead.
-  const byHand = fixed.changed.flatMap((change) => {
-    const line = `    ${terminalSafe(change.name)}${change.label === undefined ? "" : ` (project ${terminalSafe(change.label)})`}: ${terminalSafe(shownCommand(change.after, "mcpcage").line)}`;
-    const names = removed.get(change.after) ?? [];
-    return [line, ...(names.length === 0 ? [] : [`      and remove from its "env": ${names.map(terminalSafe).join(", ")}`]), ...warnings(change).map((warning) => `      ${warning}`)];
-  });
-  if (byHand.some((line) => line.includes(MASK))) byHand.push(`    (${MASK} stands for the value already in the file, which is not shown)`);
+  // When the file cannot be rewritten, the exact command each server should run instead, as `shown`
+  // writes it: for a file edited by hand, or for a shell (see pasteable).
+  const commands = (shown: (entry: ServerEntry) => string) => {
+    const lines = fixed.changed.flatMap((change) => {
+      const line = `    ${terminalSafe(change.name)}${change.label === undefined ? "" : ` (project ${terminalSafe(change.label)})`}: ${shown(change.after)}`;
+      const names = removed.get(change.after) ?? [];
+      return [line, ...(names.length === 0 ? [] : [`      and remove from its "env": ${names.map(terminalSafe).join(", ")}`]), ...warnings(change).map((warning) => `      ${warning}`)];
+    });
+    if (lines.some((line) => line.includes(MASK))) lines.push(`    (${MASK} stands for the value already in the file, which is not shown)`);
+    return lines;
+  };
+  const byHand = commands((entry) => terminalSafe(shownCommand(entry, "mcpcage").line));
   if (hasComments(text)) {
     fixed.refused = "it has comments";
     fixed.changed = [];
@@ -1006,8 +1011,13 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   }
   if (file.client === "claude-code" && file.scope === "user" && options.claudeCodeRunning) {
     fixed.refused = "Claude Code is running";
+    // Lines the user pastes into a shell: an argument the shell would read stays an argument.
+    const pasted = commands((entry) => {
+      const line = pasteable(shownWords(entry));
+      return line === undefined ? UNPASTEABLE : terminalSafe(line);
+    });
     fixed.changed = [];
-    for (const line of byHand) options.log(line);
+    for (const line of pasted) options.log(line);
     options.log(
       "  not changed: Claude Code is running and rewrites ~/.claude.json while it runs: close it and run mcpcage protect --fix again, or add the servers again with claude mcp add using the commands above",
     );
@@ -1160,6 +1170,41 @@ function shownCommand(entry: ServerEntry, type: ServerType): { line: string; sec
   const masked = maskArgs(stringArgs(entry), type === "mcpcage");
   return { line: [entry.command, ...masked.shown].map((part) => (part === "" || /\s/.test(part) ? `"${part}"` : part)).join(" "), ...masked };
 }
+
+/** The words of a command line as the report shows them, credentials masked (see shownCommand). */
+function shownWords(entry: ServerEntry): string[] {
+  return [entry.command as string, ...maskArgs(stringArgs(entry), isWrapped(entry)).shown];
+}
+
+/**
+ * A command line as words to paste into a shell after `claude mcp add <name> --`, so that the shell
+ * runs nothing an argument holds and gives each word as it is; undefined on Windows for one that
+ * cannot be pasted so. On macOS and Linux a word of plain characters stays as it is, and any other
+ * goes in single quotes, inside which a POSIX shell (sh, bash, zsh) reads only the quote itself,
+ * written '\''. On Windows the line may be pasted into PowerShell or into cmd: a plain word stays as
+ * it is, and any other goes in double quotes, inside which PowerShell reads only $, `, " and its
+ * typographic double quotes, and cmd only %, ! and ". A word with one of those or a control
+ * character, an empty word, or a quoted one that ends with \ (which the program reads with the closing
+ * quote as a quote) cannot be pasted. Measured with Windows PowerShell 5.1 and npm's claude.ps1 shim:
+ * a bare -- was dropped (`mcp add t -- run -y` reached the program as `mcp add t run -y`), a quoted
+ * one was not; '' was dropped; 'x"y' 'a b"c' reached it as `xy a` and `bc`; 'a$(Write-Host x)b' was
+ * given as written, and printed nothing. The command was printed as written, `$(id)` and backquotes
+ * in it, for a POSIX shell to run.
+ */
+export function pasteable(words: readonly string[], platform: NodeJS.Platform = process.platform): string | undefined {
+  if (platform !== "win32") return words.map((word) => (/^[A-Za-z0-9_@%+,.:/-]+$/.test(word) ? word : `'${word.replace(/'/g, "'\\''")}'`)).join(" ");
+  const shown: string[] = [];
+  for (const word of words) {
+    if (/^[A-Za-z0-9][A-Za-z0-9_.:\\/-]*$/.test(word)) shown.push(word);
+    else if (word === "" || /[$`"\u201C\u201D\u201E%!\u0000-\u001F\u007F]|\\$/.test(word)) return undefined;
+    else shown.push(`"${word}"`);
+  }
+  return shown.join(" ");
+}
+
+/** For a server whose command line pasteable cannot give a shell as it is. */
+const UNPASTEABLE =
+  "one of its arguments is empty, ends with \\, or holds $, `, \", %, ! or a control character, which PowerShell or cmd would read: close Claude Code and run mcpcage protect --fix again";
 
 /**
  * `--api-key sk-...`, `--token=...`, `API_KEY=...`, `Authorization: Bearer ...` and credentials in
