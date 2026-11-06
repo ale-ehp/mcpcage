@@ -4499,7 +4499,9 @@ describe("uvx servers in protect", () => {
     const report = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline");
     for (const [name, { why }] of refused) expect(detailsOf(report.stdout, name), name).toContain(`cannot be caged: ${why}`);
     const unrefused = ["clean", ...(linux ? ["moved"] : [])];
-    for (const name of unrefused) expect(detailsOf(report.stdout, name), name).toEqual(["asks PyPI for: mcp-server-time"]);
+    // On Windows APPDATA is also one of Windows' places, which acts on the host, and which --fix moves into the cage.
+    const appData = "env APPDATA: tells docker, npm and node on your machine where to find programs, plugins and settings";
+    for (const name of unrefused) expect(detailsOf(report.stdout, name), name).toEqual(["asks PyPI for: mcp-server-time", ...(windows ? [appData] : [])]);
     const fix = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
     const where = (name: string) => (Object.hasOwn(vscode, name) ? vscodeFile : tilde(machine.cursor, machine.home));
     for (const [name, { why }] of refused) expect(fix.stdout, name).toContain(`  not changed: ${name} in ${where(name)}: ${why}\n`);
