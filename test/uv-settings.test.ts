@@ -27,6 +27,8 @@ describe("the scan of a uv.toml for a package index", () => {
       "pip = { python-version = 'abc', index-url = \"x\" }",
       'pip = { python-version = "abc", index-url = "x" }',
       'pip = { python-version = "a\\\\", index-url = "x" }',
+      // A literal string has no escapes: a backslash before its closing quote is a character of it.
+      "pip = { cache-dir = 'C:\\Users\\', index-url = \"x\" }",
       "\r\nno-cache = true\r\nfind-links = []\r\n",
       // uv 0.13.7 asks download.pytorch.org for torch and its kin with it, as --torch-backend.
       'torch-backend = "cpu"',
