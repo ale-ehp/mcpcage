@@ -124,24 +124,39 @@ function cut(message: string, bytes: number, room: number): string {
  * The worker of streamSafely: it starts the program, and hands each piece it prints, then its exit, to
  * the thread that waits, adding one to the count it waits on. Node's own modules only, as a plain
  * script: it runs in a worker of its own, which loads no file of mcpcage.
+ *
+ * The waiting thread runs no event loop, so it learns of the worker's end only from the worker: one
+ * that ended without telling left it in Atomics.wait for ever, the program's output with it. So the
+ * worker tells from its own process 'exit' handler, which Node runs for an error thrown in it, a
+ * rejected promise and process.exit (seen on Node 22 and 26), and stops the program; and it raises a
+ * second count, its heartbeat, every BEAT ms, which stops when the worker is terminated without
+ * running a line more (Worker.terminate, a worker out of memory), where no handler runs.
  */
-const FORWARD = `
+const FORWARD_START = `
 const { workerData } = require("node:worker_threads");
 const { spawn } = require("node:child_process");
-const { file, args, env, port, count } = workerData;
+const { file, args, env, port, count, beat } = workerData;
+let told = false;
+let child;
 const tell = (message) => {
   port.postMessage(message);
   Atomics.add(count, 0, 1);
   Atomics.notify(count, 0);
 };
-let told = false;
 const end = (message) => {
   if (told) return;
   told = true;
   tell(message);
 };
+process.on("exit", () => {
+  if (child !== undefined && child.exitCode === null && child.signalCode === null) child.kill();
+  end({ stopped: true });
+});
+setInterval(() => Atomics.add(count, 1, 1), beat);
+`;
+const FORWARD_END = `
 try {
-  const child = spawn(file, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+  child = spawn(file, args, { env, stdio: ["ignore", "pipe", "pipe"] });
   for (const [stream, from] of [[1, child.stdout], [2, child.stderr]]) {
     from.setEncoding("utf8");
     from.on("data", (text) => tell({ stream, text }));
@@ -152,6 +167,9 @@ try {
   end({ error: String(error && error.message) });
 }
 `;
+
+/** How often the worker beats, and how long the waiting thread waits between two looks at the beat. */
+const BEAT = { every: 1000, look: 15_000 };
 
 /** The color codes of a line (SGR): the classic builder wraps what a step writes on stderr in red. */
 const COLORS = /\u001b\[[0-9;:]*m/g;
@@ -175,10 +193,23 @@ const MAX_LINE = 64 * 1024;
  * are shown while it runs, as with spawnSync and the terminal, and written by this thread, whose
  * mcpcage code spells them out.
  */
-export function streamSafely(file: string, args: string[], env: NodeJS.ProcessEnv, fd = 2): { status: number | null } {
-  const count = new Int32Array(new SharedArrayBuffer(4));
+export function streamSafely(
+  file: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  fd = 2,
+  testOnly?: { failure: string; beat?: { every: number; look: number } },
+): { status: number | null } {
+  // The count of messages, then the worker's heartbeat (see FORWARD_START).
+  const count = new Int32Array(new SharedArrayBuffer(8));
   const { port1, port2 } = new MessageChannel();
-  const worker = new Worker(FORWARD, { eval: true, workerData: { file, args, env, port: port2, count }, transferList: [port2] });
+  const beat = testOnly?.beat ?? BEAT;
+  // `testOnly`, for tests alone (mcpcage never passes it): a line the worker runs before it starts the
+  // program, which makes it fail before it can tell its end.
+  const source = `${FORWARD_START}${testOnly?.failure ?? ""}\n${FORWARD_END}`;
+  const worker = new Worker(source, { eval: true, workerData: { file, args, env, port: port2, count, beat: beat.every }, transferList: [port2] });
+  // Its error is told through its 'exit' handler; nobody would listen to this event.
+  worker.on("error", () => {});
   worker.unref();
   const pending = new Map<number, string>([[1, ""], [2, ""]]);
   const show = (line: string) => writeSync(fd, `${terminalSafe(line.replace(COLORS, ""))}\n`);
@@ -201,18 +232,31 @@ export function streamSafely(file: string, args: string[], env: NodeJS.ProcessEn
       for (const part of parts.length === 1 ? parts : parts.filter((piece) => piece !== "")) show(part);
     }
   };
+  const stopped = () => new Error(`the thread that ran ${file} stopped before ${file} ended`);
   let seen = 0;
+  let beats = 0;
+  let still = 0;
   try {
     for (;;) {
-      Atomics.wait(count, 0, seen);
+      // Two looks in a row without a beat: the worker is gone, terminated where no handler runs.
+      if (Atomics.wait(count, 0, seen, beat.look) === "timed-out") {
+        const now = Atomics.load(count, 1);
+        still = now === beats ? still + 1 : 0;
+        beats = now;
+        if (still >= 2) {
+          for (const stream of pending.keys()) take(stream, "", true);
+          throw stopped();
+        }
+      }
       seen = Atomics.load(count, 0);
       for (let received = receiveMessageOnPort(port1); received !== undefined; received = receiveMessageOnPort(port1)) {
-        const message = received.message as { stream: number; text: string } | { status: number | null } | { error: string };
+        const message = received.message as { stream: number; text: string } | { status: number | null } | { error: string } | { stopped: true };
         if ("text" in message) {
           take(message.stream, message.text, false);
           continue;
         }
         for (const stream of pending.keys()) take(stream, "", true);
+        if ("stopped" in message) throw stopped();
         if ("error" in message) throw new Error(message.error);
         return { status: message.status };
       }

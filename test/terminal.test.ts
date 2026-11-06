@@ -1,9 +1,12 @@
-import { closeSync, mkdtempSync, openSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { closeSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { boundedLog, MAX_LOG_BYTES, printable, streamSafely, terminalSafe } from "../src/terminal.js";
+import { root } from "./helpers.js";
 
 describe("terminal-safe text", () => {
   it("spells out every character a terminal would act on or hide, and leaves the rest alone", () => {
@@ -222,6 +225,36 @@ describe("a program's output streamed to the terminal", () => {
     // Nor between the halves of a character outside the BMP.
     const emoji = streamed("process.stdout.write('x'.repeat(65535) + '\\u{1F600}' + 'z');").written.split("\n");
     expect(emoji).toEqual(["x".repeat(65535), "\u{1F600}z", ""]);
+  });
+
+  it.each([
+    ["an error thrown in it", "throw new Error('the worker broke');", undefined],
+    // As Worker.terminate and a worker out of memory end it: no 'exit' handler runs. Its heartbeat stops.
+    ["an end where no handler runs", "process.removeAllListeners('exit'); process.exit(1);", { every: 20, look: 200 }],
+  ])("ends, with an error, when its worker stops before it tells the end: %s", (_how, failure, beat) => {
+    // In a process of its own, from the build, under a time limit: the thread that waits on the worker
+    // blocks, and one that waited for ever would hold vitest with it.
+    const dir = mkdtempSync(join(tmpdir(), "mcpcage-stream-stop-"));
+    const script = join(dir, "stop.mjs");
+    writeFileSync(
+      script,
+      [
+        `import { streamSafely } from ${JSON.stringify(pathToFileURL(join(root, "dist", "terminal.js")).href)};`,
+        "const started = Date.now();",
+        "try {",
+        "  streamSafely(process.execPath, ['-e', 'setTimeout(() => {}, 5000)'], {}, 2, JSON.parse(process.argv[2]));",
+        "  console.log('returned');",
+        "} catch (error) {",
+        "  console.log(`threw after ${Date.now() - started} ms: ${error.message}`);",
+        "}",
+      ].join("\n"),
+    );
+    const result = spawnSync(process.execPath, [script, JSON.stringify({ failure, beat })], { encoding: "utf8", timeout: 20_000 });
+    expect(result.signal, `waited for ever: ${result.stdout}${result.stderr}`).toBeNull();
+    const told = /^threw after (\d+) ms: (.*)$/m.exec(result.stdout);
+    expect(told?.[2], result.stdout + result.stderr).toBe(`the thread that ran ${process.execPath} stopped before ${process.execPath} ended`);
+    // Before the program would have ended by itself: the worker stops it, or is found gone.
+    expect(Number(told![1])).toBeLessThan(5000);
   });
 
   it.skipIf(process.platform === "win32")("returns no status for a program a signal ended, and throws when the program cannot start", () => {
