@@ -204,7 +204,7 @@ describe("on Windows, the places docker and npm are given", () => {
     };
     expect(windowsEnv({ ...sources, registry: () => undefined })).toEqual(defaults);
     const odd = (value: string) => (key: string) => registry[key]?.replace("D:\\Programs\r\n    CommonFilesDir", `${value}\r\n    CommonFilesDir`).replace("F:\\Local", value);
-    for (const value of ["%PUBLIC%\\Programs", "Programs", "D:\\Progr\uFFFDms", "D:\\Programs\\%x"]) {
+    for (const value of ["%PUBLIC%\\Programs", "Programs", "D:\\Progr\uFFFDms", "D:\\Programs\\%x", "\\\\?\\D:\\Programs", "x D:\\Programs"]) {
       expect(windowsEnv({ ...sources, registry: odd(value) })).toMatchObject({ ProgramFiles: "E:\\Program Files", LOCALAPPDATA: "E:\\Users\\me\\AppData\\Local" });
     }
   });
@@ -236,6 +236,9 @@ describe("on Windows, the places docker and npm are given", () => {
     });
     // A folder redirected to a share is where Windows puts it by default for docker and npm, which would
     // reach the server with the user's credentials (see networkPath); uv's settings there are read apart.
+    // Windows' own places are filled in, SystemDrive among them; USERNAME is not, here (see redirectedAppData).
+    const variables = (key: string) => own[key]?.replace("D:\\Programs", "%SystemDrive%\\Programs").replace("G:\\Roaming", "D:\\Profiles\\%USERNAME%\\Roaming");
+    expect(windowsEnv({ ...sources, user: "me", registry: variables })).toMatchObject({ ProgramFiles: "E:\\Programs", APPDATA: "E:\\Users\\me\\AppData\\Roaming" });
     const shared = (key: string) => own[key]?.replace("G:\\Roaming", "\\\\fs01\\profiles$\\me\\AppData\\Roaming").replace("G:\\Local", "//fs01/local");
     expect(windowsEnv({ ...sources, registry: shared })).toMatchObject({ APPDATA: "E:\\Users\\me\\AppData\\Roaming", LOCALAPPDATA: "E:\\Users\\me\\AppData\\Local" });
   });

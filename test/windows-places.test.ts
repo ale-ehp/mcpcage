@@ -48,7 +48,7 @@ describe("Windows' places, asked of Windows", () => {
     expect(sources.registry(FOLDERS)).toBeUndefined();
     expect(sources.registry(FOLDERS)).toBeUndefined();
     expect(spawned).toEqual([
-      { file: "D:\\Windows\\System32\\reg.exe", args: ["query", "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion", "/reg:64"], options: expect.objectContaining({ env: {}, cwd: "D:\\Windows", windowsHide: true }) },
+      { file: "D:\\Windows\\System32\\reg.exe", args: ["query", "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion", "/reg:64"], options: expect.objectContaining({ encoding: "utf8", env: {}, cwd: "D:\\Windows", windowsHide: true }) },
       { file: "D:\\Windows\\System32\\reg.exe", args: ["query", FOLDERS, "/reg:64"], options: expect.objectContaining({ env: {}, cwd: "D:\\Windows", windowsHide: true }) },
     ]);
   });
@@ -56,6 +56,8 @@ describe("Windows' places, asked of Windows", () => {
   it("takes Windows' own directory only as a path on a drive, else where Windows puts it", () => {
     answers.systemRoot = "\\\\?\\Volume{1b3a}\\Windows";
     try {
+      expect(windowsSources().windows).toBe("C:\\Windows");
+      answers.systemRoot = "\\\\?\\D:\\Windows";
       expect(windowsSources().windows).toBe("C:\\Windows");
     } finally {
       answers.systemRoot = "D:\\Windows";
