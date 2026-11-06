@@ -4431,6 +4431,7 @@ describe("uvx servers in protect", () => {
     const indexed = settingsIn(join(top, "indexed"));
     const clean = settingsIn(join(top, "clean"), "no-cache = true\n");
     const windows = process.platform === "win32";
+    const linux = process.platform === "linux";
     // Each entry, the variables it adds to what its client starts mcpcage with, and why it cannot be caged.
     type Case = { entry: ServerEntry; adds: Record<string, string>; why?: string; run?: string };
     const time = { command: "uvx", args: ["mcp-server-time"] };
@@ -4465,7 +4466,11 @@ describe("uvx servers in protect", () => {
             why: `its env sets HOME, so uvx reads the uv settings in ${join(settingsIn(join(top, "home2", ".config")), "uv", "uv.toml")}, which name a package index, and the cage builds from PyPI only`,
             run: "your uv settings (~/.config/uv/uv.toml) name a package index, and the cage builds from PyPI only",
           },
-          clean: { entry: { ...time, env: { XDG_CONFIG_HOME: clean } }, adds: { XDG_CONFIG_HOME: clean } },
+          // On Linux XDG_CONFIG_HOME also says where VS Code keeps its configuration, which run keeps out of
+          // mounts: --fix leaves an entry that moves it, whatever its uv settings say (moved). XDG_CONFIG_DIRS
+          // points uvx only.
+          clean: linux ? { entry: { ...time, env: { XDG_CONFIG_DIRS: clean } }, adds: { XDG_CONFIG_DIRS: clean } } : { entry: { ...time, env: { XDG_CONFIG_HOME: clean } }, adds: { XDG_CONFIG_HOME: clean } },
+          ...(linux ? { moved: { entry: { ...time, env: { XDG_CONFIG_HOME: clean } }, adds: { XDG_CONFIG_HOME: clean } } } : {}),
         };
     // VS Code adds the variables of an envFile, `${workspaceFolder}` its project's folder, as it adds those of env.
     const vscode: Record<string, Case> = {
@@ -4493,14 +4498,17 @@ describe("uvx servers in protect", () => {
 
     const report = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline");
     for (const [name, { why }] of refused) expect(detailsOf(report.stdout, name), name).toContain(`cannot be caged: ${why}`);
-    expect(detailsOf(report.stdout, "clean")).toEqual(["asks PyPI for: mcp-server-time"]);
+    const unrefused = ["clean", ...(linux ? ["moved"] : [])];
+    for (const name of unrefused) expect(detailsOf(report.stdout, name), name).toEqual(["asks PyPI for: mcp-server-time"]);
     const fix = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
     const where = (name: string) => (Object.hasOwn(vscode, name) ? vscodeFile : tilde(machine.cursor, machine.home));
     for (const [name, { why }] of refused) expect(fix.stdout, name).toContain(`  not changed: ${name} in ${where(name)}: ${why}\n`);
+    if (linux) expect(fix.stdout).toContain(`  not changed: moved in ${where("moved")}: its env sets XDG_CONFIG_HOME to another value than yours: check it, or remove it from its "env" by hand\n`);
     expect(JSON.parse(readFileSync(vscodeFile, "utf8")).servers).toEqual(entries(vscode));
     const caged = JSON.parse(readFileSync(machine.cursor, "utf8")).mcpServers;
     for (const [name] of refused) if (Object.hasOwn(cursor, name)) expect(caged[name], name).toEqual(cursor[name]!.entry);
-    expect(caged.clean.args).toEqual(["run", "--env", windows ? "APPDATA=" + clean : "XDG_CONFIG_HOME", "--", "uvx", "mcp-server-time"]);
+    if (linux) expect(caged.moved).toEqual(cursor.moved!.entry);
+    expect(caged.clean.args).toEqual(["run", "--env", windows ? "APPDATA=" + clean : linux ? "XDG_CONFIG_DIRS" : "XDG_CONFIG_HOME", "--", "uvx", "mcp-server-time"]);
     const wrap = mcpcageWithEnv(machine.env, "wrap", "--dry-run", vscodeFile);
     for (const name of Object.keys(vscode)) expect(wrap.stdout, name).toContain(`  skipped ${name}: ${all[name]!.why}\n`);
 
@@ -4511,7 +4519,7 @@ describe("uvx servers in protect", () => {
       expect(started.stderr, name).toBe(`mcpcage: ${run}\n`);
       expect(started.code, name).toBe(1);
     }
-    expect(mcpcageWithEnv(client(cursor.clean!.adds), "run", "--", "uvx", "mcp-server-time").stderr).toMatch(/^mcpcage: Docker is required to cage a server /);
+    for (const name of unrefused) expect(mcpcageWithEnv(client(cursor[name]!.adds), "run", "--", "uvx", "mcp-server-time").stderr, name).toMatch(/^mcpcage: Docker is required to cage a server /);
 
     // The same entries caged by hand: protect says they cannot start, with the same reasons, and does not count them as caged.
     const wrapped = (cases: Record<string, Case>) =>
@@ -4521,6 +4529,7 @@ describe("uvx servers in protect", () => {
     const stuck = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--command", installed.command);
     for (const [name, { why }] of refused) expect(lineOf(stuck.stdout, name), name).toMatch(new RegExp(` {2}cannot start: ${literal(why)}$`));
     expect(lineOf(stuck.stdout, "clean")).toMatch(windows ? / {2}caged, but its env runs on your machine$/ : / {2}caged$/);
+    if (linux) expect(lineOf(stuck.stdout, "moved")).toMatch(/ {2}caged, but its env moves what run refuses to mount$/);
 
     // An envFile that cannot be read leaves what uvx would read unknown: not counted as caged, and --fix leaves it, with the reason.
     writeJsonFile(vscodeFile, { servers: { unread: { type: "stdio", ...time, envFile: "${workspaceFolder}/missing.env" } } });
