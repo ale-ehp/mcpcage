@@ -129,6 +129,8 @@ describe("a network path, as mcpcage tells one", () => {
   it("on macOS, a path under /net/<host>, the automounter's -hosts map, written any way the system reads it", () => {
     for (const path of ["/net/host/x", "/NET/host", "//net/host", "/net/../net/host/x", "/./net/host"]) expect(networkPath(path, "darwin"), path).toBe(true);
     for (const path of ["/net", "/net/", "/network/host", "/Users/me/net/host", "host/net/x"]) expect(networkPath(path, "darwin"), path).toBe(false);
+    // A relative path as from /, where macOS starts the apps a client is: whatever mcpcage's own directory.
+    for (const path of ["net/host/x", "./net/host", "x/../net/host"]) expect(networkPath(path, "darwin"), path).toBe(true);
     // Linux has no such default, and on Windows //net/host is a share like any other.
     expect([networkPath("/net/host", "linux"), networkPath("//server/share", "linux"), networkPath("//net/host", "win32")]).toEqual([false, false, true]);
   });
