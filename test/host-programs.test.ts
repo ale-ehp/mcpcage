@@ -209,6 +209,37 @@ describe("on Windows, the places docker and npm are given", () => {
     }
   });
 
+  it("take each folder from its own registry value, wherever on a drive it is, and never from a share", () => {
+    // The values above are where Windows would put each folder anyway: here none is, so each one read shows.
+    const own: Record<string, string> = {
+      "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion": [
+        "    ProgramFilesDir    REG_SZ    D:\\Programs",
+        "    ProgramFilesDir (x86)    REG_SZ    D:\\Programs (x86)",
+        "    CommonFilesDir    REG_SZ    G:\\Common",
+        "    CommonFilesDir (x86)    REG_SZ    G:\\Common (x86)",
+        "    CommonW6432Dir    REG_SZ    G:\\Common 64",
+        "    ProgramW6432Dir    REG_SZ    G:\\Programs 64",
+      ].join("\r\n"),
+      "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders": "    AppData    REG_EXPAND_SZ    G:\\Roaming\r\n    Local AppData    REG_EXPAND_SZ    G:\\Local\r\n",
+    };
+    const sources = { windows: "E:\\Windows", home: "E:\\Users\\me", registry: (key: string) => own[key] };
+    expect(windowsEnv(sources)).toMatchObject({
+      ProgramFiles: "D:\\Programs",
+      "ProgramFiles(x86)": "D:\\Programs (x86)",
+      CommonProgramFiles: "G:\\Common",
+      "CommonProgramFiles(x86)": "G:\\Common (x86)",
+      CommonProgramW6432: "G:\\Common 64",
+      ProgramW6432: "G:\\Programs 64",
+      APPDATA: "G:\\Roaming",
+      LOCALAPPDATA: "G:\\Local",
+      TEMP: "G:\\Local\\Temp",
+    });
+    // A folder redirected to a share is where Windows puts it by default for docker and npm, which would
+    // reach the server with the user's credentials (see networkPath); uv's settings there are read apart.
+    const shared = (key: string) => own[key]?.replace("G:\\Roaming", "\\\\fs01\\profiles$\\me\\AppData\\Roaming").replace("G:\\Local", "//fs01/local");
+    expect(windowsEnv({ ...sources, registry: shared })).toMatchObject({ APPDATA: "E:\\Users\\me\\AppData\\Roaming", LOCALAPPDATA: "E:\\Users\\me\\AppData\\Local" });
+  });
+
   it("replace, each once whatever its case, those of mcpcage's environment for docker and npm", () => {
     const bin = mkdtempSync(join(tmpdir(), "mcpcage-docker-bin-"));
     writeFileSync(join(bin, "docker.exe"), "");
