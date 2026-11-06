@@ -9,7 +9,8 @@ import { onWindows } from "./fake-programs.js";
 // environment to what it starts: credential helpers (gcloud's is a shell script that runs
 // "$CLOUDSDK_PYTHON"), its plugins, ssh, podman behind a `docker` shim; npm to git and to node. An
 // entry's CLOUDSDK_PYTHON ran on the host at `docker build` while protect called the entry caged.
-// What mcpcage starts is looked at here, never run: spawnSync answers as Docker and npm would.
+// What mcpcage starts is looked at here, never run: spawnSync answers as Docker and npm would, and
+// so does streamSafely, which starts docker build from a worker thread, where no mock reaches.
 const spawned = vi.hoisted(() => [] as Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }>);
 vi.mock("node:child_process", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:child_process")>();
@@ -26,6 +27,14 @@ vi.mock("node:child_process", async (importOriginal) => {
     return { pid: 0, output: [], status: 0, signal: null, stdout, stderr: "" };
   }) as unknown as typeof original.spawnSync;
   return { ...original, spawnSync };
+});
+vi.mock("../src/terminal.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/terminal.js")>();
+  const streamSafely = (file: string, args: string[], env: NodeJS.ProcessEnv) => {
+    spawned.push({ file, args, env });
+    return { status: 0 };
+  };
+  return { ...original, streamSafely };
 });
 
 /** Variables that choose code for a program that docker or npm starts, as an entry's `env` can set them, unreported. */

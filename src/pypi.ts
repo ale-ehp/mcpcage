@@ -6,7 +6,7 @@ import { pypiRequirement, type PypiLaunch } from "./launch.js";
 import { cageHome, serverDir } from "./paths.js";
 import { readJson } from "./pinstore.js";
 import { dockerProgram, ensureDir, NONROOT, PYPI_INSTALL_BASE, PYPI_RESOLVE_BASE, PYPI_RUNTIME_BASE, UV_BASE, type SandboxOptions, type ServerRecord } from "./sandbox.js";
-import { terminalSafe } from "./terminal.js";
+import { streamSafely, terminalSafe } from "./terminal.js";
 
 /*
  * A PyPI server (uvx) is built in two steps, neither of which runs a line of the package's code:
@@ -24,8 +24,8 @@ export interface DockerResult {
 
 /**
  * Runs docker with `args`, `input` on its standard input, as mcpcage finds and starts it (see
- * dockerProgram). `stream` sends what it prints to mcpcage's stderr instead of returning it: stdout is
- * the MCP channel. Tests give their own.
+ * dockerProgram). `stream` sends what it prints to mcpcage's stderr instead of returning it, spelled
+ * out where a terminal would act on it (see streamSafely): stdout is the MCP channel. Tests give their own.
  */
 export type DockerRunner = (args: string[], options?: { input?: string; stream?: boolean }) => DockerResult;
 
@@ -37,11 +37,15 @@ export type DockerRunner = (args: string[], options?: { input?: string; stream?:
 export const realDocker: DockerRunner = (args, options = {}) => {
   const program = dockerProgram();
   if (program === undefined) throw new Error("docker.exe not found in the PATH");
+  if (options.stream) {
+    if (options.input !== undefined) throw new Error("realDocker streams the output of a command without input only");
+    return { ...streamSafely(program.file, [...program.args, ...args], program.env), stdout: "", stderr: "" };
+  }
   const result = spawnSync(program.file, [...program.args, ...args], {
     encoding: "utf8",
     env: program.env,
     input: options.input,
-    stdio: [options.input === undefined ? "ignore" : "pipe", options.stream ? 2 : "pipe", options.stream ? 2 : "pipe"],
+    stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     // A lock pins every file of every package: tens of thousands of lines for a server with numpy,
     // onnxruntime and friends, more than the 1 MiB spawnSync keeps by default.
     maxBuffer: 64 * 1024 * 1024,

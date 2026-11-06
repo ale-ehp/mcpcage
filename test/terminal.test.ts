@@ -1,6 +1,9 @@
+import { closeSync, mkdtempSync, openSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { boundedLog, MAX_LOG_BYTES, printable, terminalSafe } from "../src/terminal.js";
+import { boundedLog, MAX_LOG_BYTES, printable, streamSafely, terminalSafe } from "../src/terminal.js";
 
 describe("terminal-safe text", () => {
   it("spells out every character a terminal would act on or hide, and leaves the rest alone", () => {
@@ -151,5 +154,78 @@ describe("a message longer than what the log still holds", () => {
     const [, kept, at] = /^(東+)\.\.\. \(a message of 300 bytes, cut at (\d+)\)\n$/.exec(received())!;
     expect(Buffer.byteLength(kept!)).toBe(Number(at));
     expect(received()).not.toContain("�");
+  });
+});
+
+describe("a program's output streamed to the terminal", () => {
+  /** Runs `script` with this node through streamSafely, into a file, and returns its status and what was written. */
+  function streamed(script: string, extra: string[] = []): { status: number | null; written: string } {
+    const out = join(mkdtempSync(join(tmpdir(), "mcpcage-stream-")), "out.txt");
+    const fd = openSync(out, "w");
+    try {
+      const { status } = streamSafely(process.execPath, ["-e", script, out, ...extra], {}, fd);
+      return { status, written: readFileSync(out, "utf8") };
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  it.each([["stderr", "process.stderr"], ["stdout", "process.stdout"]])("takes the color codes out of what a program prints on %s, and spells out what else a terminal would act on", (_name, stream) => {
+    // What the classic builder prints for a step that writes on stderr, which it colors even into a
+    // file, with what a package could put in it: a screen clear, a window title, a one-byte CSI, a
+    // right-to-left override, concealed text; and docker's own carriage returns.
+    const lines = [
+      "Sending build context to Docker daemon  3.072kB\r\r\n",
+      " ---> Running in 48b5567208ec\n",
+      "\u001b[91mResolved \u001b[0m\u001b[91m31 packages\u001b[0m\n",
+      "\u001b[91mnpm warn deprecated x@1.0.0: \u001b[2J\u001b]0;owned\u0007\u009b2Kgone\u202eevil \u001b[8mhidden\n",
+      "\u001b[0m ---> Removed intermediate container 48b5567208ec\n",
+      "\n",
+      "tail without a line break",
+    ];
+    const { status, written } = streamed(`for (const line of ${JSON.stringify(lines)}) ${stream}.write(line); process.exitCode = 3;`);
+    expect(status).toBe(3);
+    expect(written).not.toMatch(/[\u001b\u009b\u0007\u202e\r]/);
+    expect(written.split("\n")).toEqual([
+      "Sending build context to Docker daemon  3.072kB",
+      " ---> Running in 48b5567208ec",
+      "Resolved 31 packages",
+      "npm warn deprecated x@1.0.0: [U+001B][2J[U+001B]]0;owned[U+0007][U+009B]2Kgone[U+202E]evil hidden",
+      " ---> Removed intermediate container 48b5567208ec",
+      "",
+      "tail without a line break",
+      "",
+    ]);
+  });
+
+  it("shows each line while the program still runs, not once it has ended", () => {
+    // The program waits until its first line is in the file the lines go to, as a long build would
+    // print its steps one by one.
+    const script = [
+      "const { readFileSync } = require('node:fs');",
+      "process.stdout.write('first\\n');",
+      "const until = Date.now() + 10000;",
+      "const look = () => {",
+      "  if (readFileSync(process.argv[1], 'utf8').includes('first')) return console.log('seen while running');",
+      "  if (Date.now() > until) return console.log('not seen');",
+      "  setTimeout(look, 20);",
+      "};",
+      "look();",
+    ].join("\n");
+    expect(streamed(script)).toEqual({ status: 0, written: "first\nseen while running\n" });
+  });
+
+  it("keeps a character whose bytes come in two pieces, and shows a line too long to wait for in pieces", () => {
+    const script = "process.stdout.write(Buffer.from([0x63, 0x61, 0x66, 0xc3])); setTimeout(() => process.stdout.write(Buffer.from([0xa9, 0x0a])), 50); setTimeout(() => process.stdout.write('x'.repeat(70000) + 'y'), 100);";
+    const { written } = streamed(script);
+    expect(written.split("\n")).toEqual(["café", "x".repeat(65536), `${"x".repeat(70000 - 65536)}y`, ""]);
+    // Nor between the halves of a character outside the BMP.
+    const emoji = streamed("process.stdout.write('x'.repeat(65535) + '\\u{1F600}' + 'z');").written.split("\n");
+    expect(emoji).toEqual(["x".repeat(65535), "\u{1F600}z", ""]);
+  });
+
+  it.skipIf(process.platform === "win32")("returns no status for a program a signal ended, and throws when the program cannot start", () => {
+    expect(streamed("process.kill(process.pid, 'SIGTERM'); setTimeout(() => {}, 5000);").status).toBeNull();
+    expect(() => streamSafely("/nonexistent/docker", [], {}, 2)).toThrow(/ENOENT/);
   });
 });

@@ -40,6 +40,9 @@ describe.skipIf(!docker.ok)("caged npm server (real Docker)", () => {
     const prepared = images.track(mcpcage(home, "prepare", "--id", "probe", "--", ...server), home);
     expect(prepared.code, prepared.stderr).toBe(0);
     expect(prepared.stdout).toContain("mcpcage-probe@1.0.0");
+    // What docker build printed, a line at a time with nothing a terminal would act on (see streamSafely).
+    expect(prepared.stderr).toMatch(/^Successfully built [0-9a-f]+$|^#\d+ (?:writing image|naming to) /m);
+    expect(prepared.stderr).not.toMatch(/[\u001b\u009b]/);
   }, 600_000);
 
   // The images built here are used by the tests below and removed once they are done, failed or not.

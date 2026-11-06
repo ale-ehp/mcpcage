@@ -1,4 +1,6 @@
+import { writeSync } from "node:fs";
 import type { Writable } from "node:stream";
+import { MessageChannel, receiveMessageOnPort, Worker } from "node:worker_threads";
 
 /*
  * What mcpcage prints for a person to read: text from a server with every character a terminal would
@@ -116,4 +118,107 @@ function cut(message: string, bytes: number, room: number): string {
   const space = Math.max(0, room - Buffer.byteLength(note(bytes)) - 1);
   const { read, written } = new TextEncoder().encodeInto(message, new Uint8Array(space));
   return `${message.slice(0, read)}${note(written)}`;
+}
+
+/*
+ * The worker of streamSafely: it starts the program, and hands each piece it prints, then its exit, to
+ * the thread that waits, adding one to the count it waits on. Node's own modules only, as a plain
+ * script: it runs in a worker of its own, which loads no file of mcpcage.
+ */
+const FORWARD = `
+const { workerData } = require("node:worker_threads");
+const { spawn } = require("node:child_process");
+const { file, args, env, port, count } = workerData;
+const tell = (message) => {
+  port.postMessage(message);
+  Atomics.add(count, 0, 1);
+  Atomics.notify(count, 0);
+};
+let told = false;
+const end = (message) => {
+  if (told) return;
+  told = true;
+  tell(message);
+};
+try {
+  const child = spawn(file, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+  for (const [stream, from] of [[1, child.stdout], [2, child.stderr]]) {
+    from.setEncoding("utf8");
+    from.on("data", (text) => tell({ stream, text }));
+  }
+  child.on("error", (error) => end({ error: String(error && error.message) }));
+  child.on("close", (status) => end({ status }));
+} catch (error) {
+  end({ error: String(error && error.message) });
+}
+`;
+
+/** The color codes of a line (SGR): the classic builder wraps what a step writes on stderr in red. */
+const COLORS = /\u001b\[[0-9;:]*m/g;
+
+/** The most of one line that waits for its end: a program that prints no line break is shown in pieces of this many characters. */
+const MAX_LINE = 64 * 1024;
+
+/**
+ * Runs `file` with `args` and `env`, nothing on its standard input, and writes what it prints on
+ * stdout and on stderr to the file descriptor `fd` as it comes, a line at a time, each as terminalSafe
+ * shows it, its color codes taken out. Waits for it, as spawnSync does, and returns its exit status
+ * (null when a signal ended it).
+ *
+ * docker build is run so: the steps of a build print what the packages make them print (npm's
+ * deprecation notes quote the package's author), and the classic builder wraps a step's stderr in
+ * color codes even when it writes to a file. Given the terminal, a package could move the cursor,
+ * clear the screen or retitle the window of the user who builds it. Color codes are taken out rather
+ * than spelled out, which would put [U+001B][91m around each line uv prints; a carriage return, which
+ * writes a line over the one before, ends a line, and the empty lines it leaves are not shown. The
+ * program runs in a worker thread while this one waits on a count the worker raises, so that its lines
+ * are shown while it runs, as with spawnSync and the terminal, and written by this thread, whose
+ * mcpcage code spells them out.
+ */
+export function streamSafely(file: string, args: string[], env: NodeJS.ProcessEnv, fd = 2): { status: number | null } {
+  const count = new Int32Array(new SharedArrayBuffer(4));
+  const { port1, port2 } = new MessageChannel();
+  const worker = new Worker(FORWARD, { eval: true, workerData: { file, args, env, port: port2, count }, transferList: [port2] });
+  worker.unref();
+  const pending = new Map<number, string>([[1, ""], [2, ""]]);
+  const show = (line: string) => writeSync(fd, `${terminalSafe(line.replace(COLORS, ""))}\n`);
+  const take = (stream: number, text: string, last: boolean) => {
+    const lines = `${pending.get(stream)}${text}`.split("\n");
+    let rest = lines.pop()!;
+    if (last && rest !== "") {
+      lines.push(rest);
+      rest = "";
+    }
+    while (rest.length > MAX_LINE) {
+      // Never between the two halves of a character outside the BMP.
+      const at = /[\ud800-\udbff]/.test(rest[MAX_LINE - 1]!) ? MAX_LINE - 1 : MAX_LINE;
+      lines.push(rest.slice(0, at));
+      rest = rest.slice(at);
+    }
+    pending.set(stream, rest);
+    for (const line of lines) {
+      const parts = line.split("\r");
+      for (const part of parts.length === 1 ? parts : parts.filter((piece) => piece !== "")) show(part);
+    }
+  };
+  let seen = 0;
+  try {
+    for (;;) {
+      Atomics.wait(count, 0, seen);
+      seen = Atomics.load(count, 0);
+      for (let received = receiveMessageOnPort(port1); received !== undefined; received = receiveMessageOnPort(port1)) {
+        const message = received.message as { stream: number; text: string } | { status: number | null } | { error: string };
+        if ("text" in message) {
+          take(message.stream, message.text, false);
+          continue;
+        }
+        for (const stream of pending.keys()) take(stream, "", true);
+        if ("error" in message) throw new Error(message.error);
+        return { status: message.status };
+      }
+    }
+  } finally {
+    port1.close();
+    void worker.terminate();
+  }
 }

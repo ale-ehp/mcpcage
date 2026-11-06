@@ -12,7 +12,7 @@ import { cageHome, serverDir } from "./paths.js";
 import { readJson, writeJson } from "./pinstore.js";
 import { preparePypiImage, type PypiLock } from "./pypi.js";
 import { sensitivePath, thisMachine } from "./sensitive.js";
-import { terminalSafe } from "./terminal.js";
+import { streamSafely, terminalSafe } from "./terminal.js";
 import { uvSettingsReason } from "./uv-settings.js";
 import { WINDOWS_ENV, windowsPlaces } from "./windows-places.js";
 
@@ -831,12 +831,20 @@ function imageId(reference: string): string | undefined {
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
-/** Runs docker; its output goes to stderr (stdout belongs to the MCP channel) when `stream` is set. */
+/**
+ * Runs docker; its output goes to stderr (stdout belongs to the MCP channel) when `stream` is set, a
+ * line at a time and spelled out where a terminal would act on it (see streamSafely).
+ */
 function docker(args: string[], stream = false): string {
   const program = foundDocker();
-  const result = spawnSync(program.file, args, { encoding: "utf8", env: program.env, stdio: stream ? ["ignore", 2, 2] : ["ignore", "pipe", "pipe"] });
+  if (stream) {
+    const { status } = streamSafely(program.file, args, program.env);
+    if (status !== 0) throw new Error(`docker ${args[0]} failed`);
+    return "";
+  }
+  const result = spawnSync(program.file, args, { encoding: "utf8", env: program.env, stdio: ["ignore", "pipe", "pipe"] });
   if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`docker ${args[0]} failed${stream ? "" : `: ${(result.stderr ?? "").trim()}`}`);
+  if (result.status !== 0) throw new Error(`docker ${args[0]} failed: ${(result.stderr ?? "").trim()}`);
   return result.stdout ?? "";
 }
 

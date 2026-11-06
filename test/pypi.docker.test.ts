@@ -211,6 +211,10 @@ describe.skipIf(!docker.ok)("building PyPI servers (real Docker, PyPI)", () => {
   it("starts mcp-server-time through `mcpcage run` after `mcpcage prepare`, and records its Python in the audit log", async () => {
     const prepared = images.track(mcpcage(home, "prepare", "--id", "time-cli", "--", "uvx", "mcp-server-time"), home);
     expect(prepared.code, prepared.stderr).toBe(0);
+    // The build's lines, without the color codes the classic builder puts around what uv writes on
+    // stderr (seen only when the steps are not taken from Docker's cache) or anything else a terminal acts on.
+    expect(prepared.stderr).toContain("mcpcage: building the sandbox image for time-cli");
+    expect(prepared.stderr).not.toMatch(/[\u001b\u009b]/);
     expect(prepared.stdout).toMatch(new RegExp(`^time-cli: mcp-server-time@[0-9.]+ -> mcpcage/time-cli:[0-9a-f]{12}\n  python 3\.13\.18, wheels for ${wheelPlatform()}\n$`));
     const session = await connect({ home, runArgs: ["--id", "time-cli"], server: ["uvx", "mcp-server-time"] });
     const { tools } = await session.client.listTools();
