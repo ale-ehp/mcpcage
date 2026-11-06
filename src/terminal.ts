@@ -177,6 +177,46 @@ const COLORS = /\u001b\[[0-9;:]*m/g;
 /** The most of one line that waits for its end: a program that prints no line break is shown in pieces of this many characters. */
 const MAX_LINE = 64 * 1024;
 
+/** The streams of a program streamSafely reads: stdout and stderr. */
+const STREAMS = [1, 2] as const;
+
+/**
+ * The lines of a program's two streams (see streamSafely), from the pieces each delivers: `take`
+ * adds a piece of `stream` (1 for stdout, 2 for stderr) to what that stream left without a line
+ * break, or with `last` ends it, and `show` gets each line found, in order, without its line break.
+ * A line break is \n; a carriage return ends a line too, and the empty lines it leaves are dropped;
+ * what waits for its line break is shown in pieces of `max` characters (MAX_LINE; tests give less,
+ * 2 at least, so that a cut before the second half of a character still moves on), never between
+ * the two halves of a character outside the BMP.
+ */
+export function streamLines(show: (line: string, stream: number) => void, max = MAX_LINE): (stream: number, text: string, last: boolean) => void {
+  const pending = new Map<number, string>(STREAMS.map((stream) => [stream, ""]));
+  return (stream, text, last) => {
+    const lines = `${pending.get(stream)}${text}`.split("\n");
+    let rest = lines.pop()!;
+    if (last && rest !== "") {
+      lines.push(rest);
+      rest = "";
+    }
+    while (rest.length > max) {
+      // Never between the two halves of a character outside the BMP.
+      const at = /[\ud800-\udbff]/.test(rest[max - 1]!) ? max - 1 : max;
+      lines.push(rest.slice(0, at));
+      rest = rest.slice(at);
+    }
+    pending.set(stream, rest);
+    for (const line of lines) {
+      const parts = line.split("\r");
+      for (const part of parts.length === 1 ? parts : parts.filter((piece) => piece !== "")) show(part, stream);
+    }
+  };
+}
+
+/** A line of streamLines as streamSafely writes it: its color codes taken out, the rest as terminalSafe shows it. */
+export function streamLine(line: string): string {
+  return terminalSafe(line.replace(COLORS, ""));
+}
+
 /**
  * Runs `file` with `args` and `env`, nothing on its standard input, and writes what it prints on
  * stdout and on stderr to the file descriptor `fd` as it comes, a line at a time, each as terminalSafe
@@ -211,27 +251,7 @@ export function streamSafely(
   // Its error is told through its 'exit' handler; nobody would listen to this event.
   worker.on("error", () => {});
   worker.unref();
-  const pending = new Map<number, string>([[1, ""], [2, ""]]);
-  const show = (line: string) => writeSync(fd, `${terminalSafe(line.replace(COLORS, ""))}\n`);
-  const take = (stream: number, text: string, last: boolean) => {
-    const lines = `${pending.get(stream)}${text}`.split("\n");
-    let rest = lines.pop()!;
-    if (last && rest !== "") {
-      lines.push(rest);
-      rest = "";
-    }
-    while (rest.length > MAX_LINE) {
-      // Never between the two halves of a character outside the BMP.
-      const at = /[\ud800-\udbff]/.test(rest[MAX_LINE - 1]!) ? MAX_LINE - 1 : MAX_LINE;
-      lines.push(rest.slice(0, at));
-      rest = rest.slice(at);
-    }
-    pending.set(stream, rest);
-    for (const line of lines) {
-      const parts = line.split("\r");
-      for (const part of parts.length === 1 ? parts : parts.filter((piece) => piece !== "")) show(part);
-    }
-  };
+  const take = streamLines((line) => writeSync(fd, `${streamLine(line)}\n`));
   const stopped = () => new Error(`the thread that ran ${file} stopped before ${file} ended`);
   let seen = 0;
   let beats = 0;
@@ -244,7 +264,7 @@ export function streamSafely(
         still = now === beats ? still + 1 : 0;
         beats = now;
         if (still >= 2) {
-          for (const stream of pending.keys()) take(stream, "", true);
+          for (const stream of STREAMS) take(stream, "", true);
           throw stopped();
         }
       }
@@ -255,7 +275,7 @@ export function streamSafely(
           take(message.stream, message.text, false);
           continue;
         }
-        for (const stream of pending.keys()) take(stream, "", true);
+        for (const stream of STREAMS) take(stream, "", true);
         if ("stopped" in message) throw stopped();
         if ("error" in message) throw new Error(message.error);
         return { status: message.status };
