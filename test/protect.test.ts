@@ -4344,8 +4344,10 @@ describe("uvx servers in protect", () => {
     const installed = fakeMcpcage();
     const machine = uvxHome({ time: servers.time });
     const caged = uvxHome({ time: { command: installed.command, args: ["run", "--", "uvx", "mcp-server-time"] } });
+    // The user's uv.toml where uv reads it: under APPDATA on Windows (etcetera's Windows strategy, which
+    // never reads ~/.config), under ~/.config elsewhere.
     const settings = (home: string, text: string | undefined) => {
-      const file = join(home, ".config", "uv", "uv.toml");
+      const file = process.platform === "win32" ? join(home, "AppData", "Roaming", "uv", "uv.toml") : join(home, ".config", "uv", "uv.toml");
       if (text === undefined) rmSync(file, { force: true });
       else writeText(file, text);
     };
