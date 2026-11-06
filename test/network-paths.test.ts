@@ -1,4 +1,5 @@
 import type * as Fs from "node:fs";
+import type * as Path from "node:path";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -38,6 +39,23 @@ vi.mock("node:fs", async (importOriginal) => {
   return { ...spied, default: spied };
 });
 
+/** Whether node:path reads paths by posix's rules, whatever the host's are (see onMacOS). */
+const pathRules = vi.hoisted(() => ({ posix: false }));
+
+vi.mock("node:path", async (importOriginal) => {
+  const path = await importOriginal<typeof Path>();
+  const rules = (): typeof Path => (pathRules.posix ? path.posix : path);
+  const following: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(path)) {
+    if (name === "default") continue;
+    if (name === "posix" || name === "win32") following[name] = value;
+    else if (typeof value === "function") following[name] = (...args: unknown[]) => (rules()[name as keyof typeof Path] as (...given: unknown[]) => unknown)(...args);
+    else Object.defineProperty(following, name, { enumerable: true, get: () => rules()[name as keyof typeof Path] });
+  }
+  Object.defineProperty(following, "default", { enumerable: true, value: following });
+  return following;
+});
+
 const { networkPath, NETWORK_PATH } = await import("../src/network-path.js");
 const { envFileOf, mcpcageAt, foreignPath } = await import("../src/installed.js");
 const { hostPath, wrapEntry } = await import("../src/config.js");
@@ -60,6 +78,21 @@ function onPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
     return run();
   } finally {
     Object.defineProperty(process, "platform", descriptor);
+  }
+}
+
+/**
+ * Runs `run` as mcpcage would on macOS, given paths of macOS: node:path reads them by posix's rules
+ * too. On Windows node:path keeps Windows' rules whatever process.platform says: run as macOS there,
+ * parseMount resolved /net/host/notes to D:\net\host\notes, a path of the current drive, and looked
+ * for it on disk instead of refusing it. On macOS and Linux node:path is posix's already.
+ */
+function onMacOS<T>(run: () => T): T {
+  pathRules.posix = true;
+  try {
+    return onPlatform("darwin", run);
+  } finally {
+    pathRules.posix = false;
   }
 }
 
@@ -141,7 +174,7 @@ describe("what an entry names on a network path, never looked at", () => {
       }
     });
     // macOS: /net/<host> is refused by run as it is written.
-    onPlatform("darwin", () => {
+    onMacOS(() => {
       expect(hostPath("/net/host/notes")).toBe("/net/host/notes");
       expect(() => parseMount("/net/host/notes")).toThrow(new Error(`--mount: ${NETWORK_PATH}`));
       expect(sensitiveMount("/net/host/notes")).toBeUndefined();
