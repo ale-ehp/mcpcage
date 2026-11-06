@@ -127,9 +127,11 @@ const SETTINGS_VARIABLES = {
  * sets to a share or to a folder named after the user, else under the folder Windows gives, else
  * under USERPROFILE's AppData\Roaming (etcetera's Windows strategy); the system's under
  * %SYSTEMDRIVE%\ProgramData (uv-dirs, locate_system_config_windows). PROGRAMDATA is where Windows
- * says that folder is: looked at too, which can only leave a server uncaged.
+ * says that folder is: looked at too, which can only leave a server uncaged. UV_CONFIG_FILE names the
+ * file itself, from the current directory when relative, as uv takes it.
  */
 function settingsFiles(name: string, value: string, platform: NodeJS.Platform): string[] {
+  if (name === "UV_CONFIG_FILE") return [(platform === "win32" ? win32 : posix).resolve(value)];
   if (platform === "win32") {
     if (name === "APPDATA" || name === "PROGRAMDATA") return [win32.resolve(value, "uv", "uv.toml")];
     if (name === "USERPROFILE") return [win32.resolve(value, "AppData", "Roaming", "uv", "uv.toml")];
@@ -276,14 +278,15 @@ export function uvSettingsReason(places: UvPlaces = uvPlacesHere()): string | un
  * user's own settings are not, and wrap and --fix drop or move the variable as they cage the entry: an
  * env HOME whose .config/uv/uv.toml named an index was dropped, protect then called the entry caged,
  * and the cage built the same names from PyPI. The reason names the variable and the file. The user's
- * own environment (`own`) is left out: uvSettingsReason looks at the places it gives. Every variable
- * of every layer is looked at, one a later layer sets again too, which can only leave a server
- * uncaged. Undefined when none stops it.
+ * own environment (`own`) is left out: uvSettingsReason looks at the places it gives. A caged
+ * entry's UV_CONFIG_FILE is looked at too, as `run` looks at it (see UvEnvironment); an entry's not
+ * caged yet is refused before (see parseLaunch). Every variable of every layer is looked at, one a
+ * later layer sets again too, which can only leave a server uncaged. Undefined when none stops it.
  */
 export function entryUvSettingsReason(environment: UvEnvironment, platform: NodeJS.Platform = process.platform, home: string = homedir()): string | undefined {
   for (const layer of environment) {
     if (layer.own === true || !isJsonObject(layer.variables)) continue;
-    for (const name of platform === "win32" ? SETTINGS_VARIABLES.win32 : SETTINGS_VARIABLES.other) {
+    for (const name of [...(layer.caged === true ? ["UV_CONFIG_FILE"] : []), ...(platform === "win32" ? SETTINGS_VARIABLES.win32 : SETTINGS_VARIABLES.other)]) {
       const variable = variableIn(layer.variables, name, platform);
       if (variable === undefined) continue;
       for (const file of settingsFiles(name, variable.value, platform)) {

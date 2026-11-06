@@ -175,9 +175,12 @@ const PYTHON_VERSION = /^3\.1[0-5](?:\.(?:0|[1-9][0-9]{0,2}))?$/;
  * which can hold a credential (an index URL with a password). `own` marks the user's own
  * environment, where UV_CONFIG_FILE names the user's settings file, which uvx reads in place of their
  * uv.toml: that file is looked at for an index as the uv.toml is (see uv-settings.ts), where the same
- * variable in an entry's env, a file the entry chose, is refused.
+ * variable in an entry's env, a file the entry chose, is refused. `caged` marks the variables of an
+ * entry that starts `mcpcage run` already: run gets them in its own environment, which it reads as
+ * the user's (it cannot tell them apart), so their UV_CONFIG_FILE is a file it looks at, as the
+ * user's, and protect reads it so too (see runRefusal in protect.ts).
  */
-export type UvEnvironment = ReadonlyArray<{ where: string; variables: unknown; own?: boolean }>;
+export type UvEnvironment = ReadonlyArray<{ where: string; variables: unknown; own?: boolean; caged?: boolean }>;
 
 /**
  * The variables of uv's environment that make uvx take its packages from somewhere else than PyPI's
@@ -206,14 +209,15 @@ const UV_REFUSED: ReadonlyMap<string, string> = new Map([
  * The value `environment` gives uv's variable `name`, and the layer that sets it: the last one that
  * does. Windows compares names without case, as uv's reads of them there do. An empty value is no
  * value: uv 0.13.7 ignored UV_INDEX_URL= and UV_PYTHON= alike, and so one set empty by a later layer
- * unsets what an earlier one gave.
+ * unsets what an earlier one gave. `settings` says whether the layer's UV_CONFIG_FILE is a settings
+ * file to look at rather than refuse: the user's own, or a caged entry's (see UvEnvironment).
  */
-function uvVariable(environment: UvEnvironment, name: string, platform: NodeJS.Platform): { where: string; name: string; value: unknown; own: boolean } | undefined {
+function uvVariable(environment: UvEnvironment, name: string, platform: NodeJS.Platform): { where: string; name: string; value: unknown; settings: boolean } | undefined {
   for (const layer of [...environment].reverse()) {
     if (!isJsonObject(layer.variables)) continue;
     const written = Object.keys(layer.variables).find((key) => (platform === "win32" ? key.toUpperCase() === name : key === name));
     if (written === undefined) continue;
-    return layer.variables[written] === "" ? undefined : { where: layer.where, name: written, value: layer.variables[written], own: layer.own === true };
+    return layer.variables[written] === "" ? undefined : { where: layer.where, name: written, value: layer.variables[written], settings: layer.own === true || layer.caged === true };
   }
   return undefined;
 }
@@ -230,7 +234,7 @@ function uvVariable(environment: UvEnvironment, name: string, platform: NodeJS.P
 function fromUvEnvironment(environment: UvEnvironment, platform: NodeJS.Platform, given: ReadonlyMap<string, string>): { python?: string; prerelease?: string; excludeNewer?: string } {
   for (const name of UV_REFUSED.keys()) {
     const set = uvVariable(environment, name, platform);
-    if (set !== undefined && !(set.own && name === "UV_CONFIG_FILE")) throw new Error(`${set.where} sets ${set.name}: ${UV_REFUSED.get(name)}`);
+    if (set !== undefined && !(set.settings && name === "UV_CONFIG_FILE")) throw new Error(`${set.where} sets ${set.name}: ${UV_REFUSED.get(name)}`);
   }
   const resolution = uvVariable(environment, "UV_RESOLUTION", platform);
   if (resolution !== undefined && resolution.value !== "highest") {

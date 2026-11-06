@@ -72,8 +72,8 @@ export interface ServerReport {
    * Windows one that is not on a drive (see offDrive), on macOS one under /net (see networkPath).
    */
   offDrive?: string;
-  /** For a caged uvx entry: why `run` refuses its uvx line at every start, so it cannot start (see uvxRefusal). */
-  uvxRefused?: string;
+  /** For a caged entry: why `run` refuses its command line at every start, so it cannot start (see runRefusal). */
+  runRefuses?: string;
   /** Names of the env variables, headers and arguments whose value looks like a secret. */
   secrets: string[];
   /** Arguments and --mount paths, as written, that open the whole disk, the whole home directory or a directory with credentials. */
@@ -239,8 +239,8 @@ async function describeServer(
       server.opened = openedBy(entry);
       const unmountable = offDriveMount(entry);
       if (unmountable !== undefined) server.offDrive = unmountable;
-      const refused = uvxRefusal(entry, userUv, file.file);
-      if (refused !== undefined) server.uvxRefused = refused;
+      const refused = runRefusal(entry, userUv, file.file);
+      if (refused !== undefined) server.runRefuses = refused;
     }
     server.secrets = [...new Set([...secretNames(entry), ...shown.secrets])];
     // The script node.exe is given is mcpcage's own, in the PATH's npm directory: not a path the server is given.
@@ -261,7 +261,7 @@ async function describeServer(
     if (odd > 0) server.problems.push(`args: ${odd === 1 ? "an argument that is not a string" : `${odd} arguments that are not strings`}`);
     // A uvx server that cannot be caged is not inspected: the cage would build another package than
     // uvx runs. Nor is a caged one that `run` refuses: the inspection would stop where `run` does.
-    const launch = server.cannotCage === undefined && server.uvxRefused === undefined ? launchCommand(entry, type) : undefined;
+    const launch = server.cannotCage === undefined && server.runRefuses === undefined ? launchCommand(entry, type) : undefined;
     const npm = launch ? npmPackage(launch) : undefined;
     if (npm) server.packageSpec = npm.local ? `local package ${npm.spec}` : npm.spec;
     // Install scripts matter where they would run: an npx server outside the cage. A caged one whose
@@ -415,11 +415,12 @@ function cageableLaunch(argv: string[], env: Record<string, string>, envFile: Re
  * the entry's envFile and env, see uvxEnvironment; `configFile` holds the entry), or why it cannot be
  * caged: the line's own reason first, then the user's uv settings, then those the entry's variables
  * point uvx to (see entryUvSettingsReason). The reasons are wrap's, which names flags and variables,
- * never their values.
+ * never their values. `caged`: the entry starts `mcpcage run` already, which reads its variables as
+ * the user's own (see UvEnvironment): its UV_CONFIG_FILE is a settings file to look at, not refused.
  */
-function pypiOf(entry: ServerEntry, uv: UserUv, configFile: string): { pypiPackage: string } | { cannotCage: string } | Record<string, never> {
+function pypiOf(entry: ServerEntry, uv: UserUv, configFile: string, caged = false): { pypiPackage: string } | { cannotCage: string } | Record<string, never> {
   let spec: LaunchSpec;
-  const environment = uvxEnvironment(entry, uv.environment, configFile);
+  const environment = uvxEnvironment(entry, uv.environment, configFile).map((layer) => (caged && layer.own !== true ? { ...layer, caged: true } : layer));
   try {
     spec = parseLaunch([entry.command as string, ...stringArgs(entry)], undefined, process.platform, environment);
   } catch (error) {
@@ -499,27 +500,41 @@ function offDriveMount(entry: ServerEntry): string | undefined {
 }
 
 /**
- * Why `run` refuses the uvx line a caged entry starts, read as pypiOf reads an entry not caged yet:
- * the line's own reason, or the user's environment or uv settings when they name a package index.
- * `run` looks at those again at every start (see prepareSandbox), so an entry caged before they
- * named one starts nothing, where the report called it caged. Undefined for a line that is not
- * uvx's, one started from --image, and when `run` would refuse its options anyway.
+ * Why `run` refuses the command line a caged entry starts, at every start, read with run's own parser
+ * (see parseLaunch): its reason for an npx or uvx line it refuses, and for any other line, which it
+ * starts only with --no-sandbox, on the host. A uvx line is read as pypiOf reads an entry not caged yet,
+ * with the user's environment and uv settings, which `run` looks at again at every start (see
+ * prepareSandbox), and the entry's variables, which it reads as the user's: its UV_CONFIG_FILE is a
+ * settings file to look at, as run looks at it. protect said "caged" for `run -- UVX ...` on macOS,
+ * `run -- uv --directory x tool run ...` and `run -- node server.js`, which run refuses, and "cannot
+ * start" for an entry whose UV_CONFIG_FILE named a file without an index, which run started.
+ * Undefined for a line `run` starts, one started from --image, and when `run` would refuse its
+ * options anyway.
  */
-function uvxRefusal(entry: ServerEntry, userUv: () => UserUv, configFile: string): string | undefined {
+function runRefusal(entry: ServerEntry, userUv: () => UserUv, configFile: string): string | undefined {
   const args = fromRun(entry);
   const separator = args.indexOf("--");
-  if (separator === -1) return undefined;
   let image: string | undefined;
   try {
-    image = runValues(args.slice(1, separator)).image;
+    image = runValues(args.slice(1, separator === -1 ? args.length : separator)).image;
   } catch {
     return undefined;
   }
-  const server = args.slice(separator + 1);
+  if (image !== undefined) return undefined;
+  const server = separator === -1 ? [] : args.slice(separator + 1);
   // The user's uv setup is looked up for a uvx line only (on Windows through the registry).
-  if (image !== undefined || toolRunArgs(server) === undefined) return undefined;
-  const read = pypiOf({ ...entry, command: server[0], args: server.slice(1) }, userUv(), configFile);
-  return "cannotCage" in read ? read.cannotCage : undefined;
+  if (toolRunArgs(server) !== undefined) {
+    const read = pypiOf({ ...entry, command: server[0], args: server.slice(1) }, userUv(), configFile, true);
+    return "cannotCage" in read ? read.cannotCage : undefined;
+  }
+  let spec: LaunchSpec;
+  try {
+    spec = parseLaunch(server);
+  } catch (error) {
+    return messageOf(error);
+  }
+  if (spec.kind !== "host") return undefined;
+  return `${spec.command.split(/[/\\]/).pop() || spec.command}, not npx or uvx: mcpcage run cages only npx and uvx command lines, and images given with --image`;
 }
 
 /** Why `run` refuses a mount offDriveMount found, by how it is written: not on a drive (Windows), or a network path (macOS). */
@@ -699,7 +714,7 @@ function status(server: ServerReport): string {
       if (server.mcpcage === "not found") return `starts ${command}, which ${/[/\\]/.test(command) ? "was not found" : "is not on your PATH"}`;
       if (!server.protectedByMcpcage) return "mcpcage --no-sandbox: pinning and audit only, no isolation";
       if (server.offDrive !== undefined) return `cannot start: --mount ${terminalSafe(server.offDrive)} ${unmountable(server.offDrive)}`;
-      if (server.uvxRefused !== undefined) return `cannot start: ${terminalSafe(server.uvxRefused)}`;
+      if (server.runRefuses !== undefined) return `cannot start: ${terminalSafe(server.runRefuses)}`;
       // The env acts first, on the host, before any cage exists.
       const fromFile = server.envFile?.effects;
       if (server.hostEnv.length > 0 || (fromFile?.hostEnv.length ?? 0) > 0) return "caged, but its env runs on your machine";
@@ -781,14 +796,14 @@ function summary(report: ProtectReport): string[] {
   const unchecked = uncheckedFiles(report);
   const uncaged = count(isUncaged);
   const elsewhere = count((server) => server.type !== "npx" && server.type !== "uvx" && server.type !== "mcpcage");
-  const inCage = (server: ServerReport) => server.type === "mcpcage" && server.mcpcage === "installed" && server.offDrive === undefined && server.uvxRefused === undefined && !isUncaged(server);
+  const inCage = (server: ServerReport) => server.type === "mcpcage" && server.mcpcage === "installed" && server.offDrive === undefined && server.runRefuses === undefined && !isUncaged(server);
   const caged = count((server) => inCage(server) && server.batch === undefined && server.opened.length === 0);
   const opened = count((server) => inCage(server) && server.batch === undefined && server.opened.length > 0);
   // Caged where they start, and not started at all by a client that cannot start a batch file.
   const batch = count((server) => inCage(server) && server.batch !== undefined);
   const missing = count((server) => server.type === "mcpcage" && server.error === undefined && server.mcpcage === "not found");
   const stuck = count((server) => server.offDrive !== undefined);
-  const refused = count((server) => server.uvxRefused !== undefined);
+  const refused = count((server) => server.runRefuses !== undefined);
   const scripts = count((server) => server.installScripts?.status === "found");
   const run = `  ${many(uncaged, "runs", "run")} on your machine with your permissions and no cage.`;
   const lines = [
@@ -823,7 +838,7 @@ function summary(report: ProtectReport): string[] {
     lines.push(`  ${stuck} cannot start: ${stuck === 1 ? "it mounts a network path" : "they mount network paths"}.`);
   }
   if (refused > 0) {
-    lines.push(`  ${refused} cannot start: mcpcage run refuses ${refused === 1 ? "its uvx command line, for the reason" : "their uvx command lines, for the reasons"} shown above.`);
+    lines.push(`  ${refused} cannot start: mcpcage run refuses ${refused === 1 ? "its command line, for the reason" : "their command lines, for the reasons"} shown above.`);
   }
   return lines;
 }
@@ -895,14 +910,14 @@ export function fixConfigs(options: FixOptions): FixOutcome {
           (server.mcpcage === "other program" ||
             (server.protectedByMcpcage &&
               server.offDrive === undefined &&
-              server.uvxRefused === undefined &&
+              server.runRefuses === undefined &&
               server.error === undefined &&
               (actsOnHost(server) || envFileActs(server) || server.batch !== undefined)))),
     );
     // Already wrapped, so there is nothing to rewrite: only the person who chose --no-sandbox can drop it.
     // Caged entries that only the user can change: one that runs with --no-sandbox, and one that cannot start.
     const onHost = servers.filter(
-      (server) => server.type === "mcpcage" && server.mcpcage === "installed" && server.error === undefined && (!server.protectedByMcpcage || server.offDrive !== undefined || server.uvxRefused !== undefined),
+      (server) => server.type === "mcpcage" && server.mcpcage === "installed" && server.error === undefined && (!server.protectedByMcpcage || server.offDrive !== undefined || server.runRefuses !== undefined),
     );
     if (targets.length === 0 && onHost.length === 0) continue;
     try {
@@ -955,8 +970,8 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
     const reason =
       server.offDrive !== undefined
         ? `it cannot start: --mount ${server.offDrive} ${unmountable(server.offDrive)}; remove that --mount by hand`
-        : server.uvxRefused !== undefined
-          ? `it cannot start: ${server.uvxRefused}`
+        : server.runRefuses !== undefined
+          ? `it cannot start: ${server.runRefuses}`
           : "it runs with --no-sandbox, without isolation; remove --no-sandbox from its arguments by hand";
     fixed.skipped.push({ name: server.name, label: server.label, reason });
   }

@@ -4224,7 +4224,7 @@ describe("uvx servers in protect", () => {
     writeText(join(caged.home, ".config", "uv", "uv.toml"), '[[index]]\nname = "corp"\nurl = "https://user:s3cret@pypi.corp.example/simple"\n');
     const stuck = mcpcageWithEnv(caged.env, "protect", "--project", caged.project, "--offline", "--command", installed.command);
     expect(lineOf(stuck.stdout, "time")).toMatch(new RegExp(` {2}cannot start: ${literal(why)}$`));
-    expect(stuck.stdout).toContain("  0 already run through mcpcage.\n  1 cannot start: mcpcage run refuses its uvx command line, for the reason shown above.");
+    expect(stuck.stdout).toContain("  0 already run through mcpcage.\n  1 cannot start: mcpcage run refuses its command line, for the reason shown above.");
     expect(mcpcageWithEnv(caged.env, "run", "--", "uvx", "mcp-server-time").stderr).toBe(`mcpcage: ${why}\n`);
   });
 
@@ -4263,7 +4263,7 @@ describe("uvx servers in protect", () => {
     // An npx server is not read with uv's settings, and one with --no-sandbox runs uvx itself, on the host.
     expect(lineOf(text, "notes")).toMatch(/ {2}caged$/);
     expect(lineOf(text, "host")).toMatch(/ {2}mcpcage --no-sandbox: pinning and audit only, no isolation$/);
-    expect(text).toMatch(/\n {2}1 already runs through mcpcage\.\n {2}2 cannot start: mcpcage run refuses their uvx command lines, for the reasons shown above\.$/);
+    expect(text).toMatch(/\n {2}1 already runs through mcpcage\.\n {2}2 cannot start: mcpcage run refuses their command lines, for the reasons shown above\.$/);
     expect(text).not.toContain("s3cret");
     // --fix leaves them to the user, with the same words, and changes nothing else in them.
     const plan: string[] = [];
@@ -4335,6 +4335,55 @@ describe("uvx servers in protect", () => {
       expect(lineOf(stuck.stdout, "time"), why).toMatch(new RegExp(` {2}cannot start: ${literal(why)}$`));
       expect(`${report.stdout}${started.stderr}${stuck.stdout}`).not.toContain("s3cret");
     }
+  });
+
+  it("says a caged entry cannot start exactly when run refuses its command line, read with run's own parser, its UV_CONFIG_FILE read as run reads it", () => {
+    const installed = fakeMcpcage();
+    const top = mkdtempSync(join(tmpdir(), "mcpcage-run-refuses-"));
+    const clean = join(top, "clean.toml");
+    writeText(clean, "no-cache = true\n");
+    const indexed = join(top, "indexed.toml");
+    writeText(indexed, 'index-url = "http://127.0.0.1:9/simple"\n');
+    const caged = (line: string[], options: string[] = [], env?: Record<string, string>): ServerEntry => ({ command: installed.command, args: ["run", ...options, "--", ...line], ...(env === undefined ? {} : { env }) });
+    const host = (program: string) => `${program}, not npx or uvx: mcpcage run cages only npx and uvx command lines, and images given with --image`;
+    const directory = "uv --directory before tool run: flags there are uv's own (--directory changes its working directory), and only `uv tool run [flags] <package>` is read as uvx";
+    const interpreter = "uvx <package>: uvx reads it as a Python interpreter to start (python, python3.13, python@3.12, cpython, pypy, graalpy, pyodide), not as a PyPI package, and the cage starts PyPI packages only";
+    // Each entry, and what protect says of it: caged, or the reason it cannot start.
+    const cases: Record<string, { entry: ServerEntry; says: string }> = {
+      // Windows compares file names without case: UVX is uvx there.
+      upper: { entry: caged(["UVX", "mcp-server-time"]), says: process.platform === "win32" ? "caged" : `cannot start: ${host("UVX")}` },
+      directory: { entry: caged(["uv", "--directory", top, "tool", "run", "mcp-server-time"]), says: `cannot start: ${directory}` },
+      node: { entry: caged(["node", "server.js"]), says: `cannot start: ${host("node")}` },
+      interpreter: { entry: caged(["uvx", "python3.13", "-c", "print(1)"]), says: `cannot start: ${interpreter}` },
+      flag: { entry: caged(["npx", "-p", "x", "y"]), says: "cannot start: npx -p is not supported yet; use `npx <package> [args]`" },
+      alias: { entry: caged(["uv", "tool", "uvx", "mcp-server-time"]), says: `cannot start: ${host("uv")}` },
+      empty: { entry: { command: installed.command, args: ["run"] }, says: "cannot start: missing the server command after `--`" },
+      // run reads the entry's UV_CONFIG_FILE as the user's: it looks at that file, and starts the server when it names no index.
+      config: { entry: caged(["uvx", "mcp-server-time"], ["--env", "UV_CONFIG_FILE"], { UV_CONFIG_FILE: clean }), says: "caged" },
+      index: {
+        entry: caged(["uvx", "mcp-server-time"], ["--env", "UV_CONFIG_FILE"], { UV_CONFIG_FILE: indexed }),
+        says: `cannot start: its env sets UV_CONFIG_FILE, so uvx reads the uv settings in ${indexed}, which name a package index, and the cage builds from PyPI only`,
+      },
+      time: { entry: caged(["uvx", "mcp-server-time"]), says: "caged" },
+      notes: { entry: caged(["npx", "-y", "@acme/notes-mcp"]), says: "caged" },
+      image: { entry: caged(["anything"], ["--image", "mcp/time"]), says: "caged" },
+    };
+    const machine = uvxHome(Object.fromEntries(Object.entries(cases).map(([name, { entry }]) => [name, entry])));
+    const report = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--command", installed.command);
+    const refused = Object.values(cases).filter((one) => one.says !== "caged").length;
+    for (const [name, { entry, says }] of Object.entries(cases)) {
+      expect(lineOf(report.stdout, name), name).toMatch(new RegExp(` {2}${literal(says)}$`));
+      // run, started as the client starts the entry, with its env, without Docker: it goes on to Docker exactly for those protect calls caged.
+      const started = mcpcageWithEnv({ ...machine.env, ...noDocker(top), ...(entry.env ?? {}) }, ...(entry.args as string[]));
+      expect(/^mcpcage: Docker is required to cage a server /.test(started.stderr), `${name}: ${started.stderr}`).toBe(says === "caged");
+      // A line run's parser refuses is refused in the same words.
+      if (["directory", "interpreter", "flag", "empty"].includes(name)) expect(started.stderr, name).toBe(`mcpcage: ${says.slice("cannot start: ".length)}\n`);
+    }
+    expect(report.stdout).toContain(`  ${refused} cannot start: mcpcage run refuses their command lines, for the reasons shown above.`);
+    // --fix leaves each to the user, with the same reason.
+    const fix = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", installed.command);
+    expect(fix.stdout).toContain(`  not changed: node in ${tilde(machine.cursor, machine.home)}: it cannot start: ${host("node")}\n`);
+    expect(fix.stdout).not.toMatch(/not changed: config in/);
   });
 
   it("reads a uvx entry with its envFile and looks at the uv settings its variables point to: protect, --fix, wrap and run agree on each", () => {
