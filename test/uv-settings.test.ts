@@ -52,19 +52,31 @@ describe("the scan of a uv.toml for a package index", () => {
 });
 
 describe("where uv's settings are looked for", () => {
-  it("on macOS and Linux: UV_CONFIG_FILE, the user's uv.toml under XDG_CONFIG_HOME and ~/.config, the system's under XDG_CONFIG_DIRS and /etc", () => {
-    expect(uvConfigFiles({ platform: "linux", env: {}, home: "/home/me" })).toEqual(["/home/me/.config/uv/uv.toml", "/etc/uv/uv.toml"]);
-    expect(uvConfigFiles({ platform: "darwin", env: { UV_CONFIG_FILE: "/x/uv.toml", XDG_CONFIG_HOME: "/xdg", XDG_CONFIG_DIRS: "/etc/xdg::relative:/opt/conf" }, home: "/Users/me" })).toEqual([
+  it("on macOS and Linux: UV_CONFIG_FILE, the user's uv.toml under XDG_CONFIG_HOME and ~/.config, the system's under XDG_CONFIG_DIRS, /etc/xdg and /etc", () => {
+    // /etc/xdg is uv's own default for XDG_CONFIG_DIRS, unset or empty: most machines have no such variable.
+    const plain = ["/home/me/.config/uv/uv.toml", "/etc/xdg/uv/uv.toml", "/etc/uv/uv.toml"];
+    expect(uvConfigFiles({ platform: "linux", env: {}, home: "/home/me" })).toEqual(plain);
+    expect(uvConfigFiles({ platform: "linux", env: { XDG_CONFIG_DIRS: "" }, home: "/home/me" })).toEqual(plain);
+    // Looked at with XDG_CONFIG_DIRS set too: a client started without it reads /etc/xdg.
+    expect(uvConfigFiles({ platform: "darwin", env: { UV_CONFIG_FILE: "/x/uv.toml", XDG_CONFIG_HOME: "/xdg", XDG_CONFIG_DIRS: "/opt/conf::/etc/xdg" }, home: "/Users/me" })).toEqual([
       "/x/uv.toml",
       "/xdg/uv/uv.toml",
       "/Users/me/.config/uv/uv.toml",
-      "/etc/xdg/uv/uv.toml",
       "/opt/conf/uv/uv.toml",
+      "/etc/xdg/uv/uv.toml",
       "/etc/uv/uv.toml",
     ]);
     // A relative XDG_CONFIG_HOME is ignored, as the XDG specification says.
-    expect(uvConfigFiles({ platform: "linux", env: { XDG_CONFIG_HOME: "xdg" }, home: "/home/me" })).toEqual(["/home/me/.config/uv/uv.toml", "/etc/uv/uv.toml"]);
-    expect(uvConfigFiles({ platform: "linux", env: { UV_CONFIG_FILE: "" }, home: "/home/me" })).toEqual(["/home/me/.config/uv/uv.toml", "/etc/uv/uv.toml"]);
+    expect(uvConfigFiles({ platform: "linux", env: { XDG_CONFIG_HOME: "xdg" }, home: "/home/me" })).toEqual(plain);
+    expect(uvConfigFiles({ platform: "linux", env: { UV_CONFIG_FILE: "" }, home: "/home/me" })).toEqual(plain);
+  });
+
+  it.skipIf(process.platform === "win32")("takes a relative directory of XDG_CONFIG_DIRS from the current directory, as uv 0.13.7 does", () => {
+    // uv joins each directory with uv/uv.toml as it is: XDG_CONFIG_DIRS=conf made it read conf/uv/uv.toml
+    // of its current directory ("Found system configuration in: conf/uv/uv.toml").
+    const files = uvConfigFiles({ platform: process.platform, env: { XDG_CONFIG_DIRS: `conf:${join("..", "other")}` }, home: "/home/me" });
+    expect(files).toContain(resolve("conf", "uv", "uv.toml"));
+    expect(files).toContain(resolve("..", "other", "uv", "uv.toml"));
   });
 
   it("takes a relative UV_CONFIG_FILE from the current directory, as uv takes it on the machine it runs on", () => {
@@ -74,10 +86,19 @@ describe("where uv's settings are looked for", () => {
     expect(uvConfigFiles(here)[0]).toBe(resolve("settings", "uv.toml"));
   });
 
-  it("on Windows: %APPDATA% and %PROGRAMDATA% as Windows has them, never an environment's APPDATA", () => {
+  it("on Windows: %APPDATA% as the environment has it and as Windows has it, and %PROGRAMDATA% as Windows has it", () => {
     const windows = { appData: "C:\\Users\\me\\AppData\\Roaming", programData: "C:\\ProgramData" };
-    const env = { APPDATA: "C:\\evil", PROGRAMDATA: "C:\\evil", XDG_CONFIG_HOME: "C:\\evil" };
-    expect(uvConfigFiles({ platform: "win32", env, home: "C:\\Users\\me", windows })).toEqual(["C:\\Users\\me\\AppData\\Roaming\\uv\\uv.toml", "C:\\ProgramData\\uv\\uv.toml"]);
+    // uv reads the APPDATA variable first (etcetera's Windows strategy), which folder redirection sets
+    // to a share, or to a folder named after the user, which the registry gives with %USERNAME% in it.
+    const env = { APPDATA: "\\\\fs01\\profiles$\\me\\AppData\\Roaming", XDG_CONFIG_HOME: "C:\\elsewhere" };
+    expect(uvConfigFiles({ platform: "win32", env, home: "C:\\Users\\me", windows })).toEqual([
+      "\\\\fs01\\profiles$\\me\\AppData\\Roaming\\uv\\uv.toml",
+      "C:\\Users\\me\\AppData\\Roaming\\uv\\uv.toml",
+      "C:\\ProgramData\\uv\\uv.toml",
+    ]);
+    // Windows compares the names of variables without case, and so does uv there.
+    expect(uvConfigFiles({ platform: "win32", env: { AppData: "H:\\me\\AppData\\Roaming" }, home: "C:\\Users\\me", windows })[0]).toBe("H:\\me\\AppData\\Roaming\\uv\\uv.toml");
+    expect(uvConfigFiles({ platform: "win32", env: { APPDATA: "C:\\Users\\me\\AppData\\Roaming" }, home: "C:\\Users\\me", windows })).toEqual(["C:\\Users\\me\\AppData\\Roaming\\uv\\uv.toml", "C:\\ProgramData\\uv\\uv.toml"]);
     expect(uvConfigFiles({ platform: "win32", env: {}, home: "C:\\Users\\me" })).toEqual([]);
     // UV_CONFIG_FILE by Windows' rules, on any machine: macOS and Linux took it for a name relative to their current directory.
     expect(uvConfigFiles({ platform: "win32", env: { UV_CONFIG_FILE: "D:/conf/../uv.toml" }, home: "C:\\Users\\me" })).toEqual(["D:\\uv.toml"]);
@@ -109,12 +130,13 @@ describe("where uv's settings are looked for", () => {
     const appData = join(home, "AppData", "Roaming");
     const programData = join(top, "programdata");
     mkdirSync(join(appData, "uv"), { recursive: true });
-    // The environment's APPDATA and XDG_CONFIG_HOME are not where uv looks on Windows.
+    // XDG_CONFIG_HOME is not where uv looks on Windows; the environment's APPDATA is, before Windows' own.
     const elsewhere = join(top, "elsewhere");
     mkdirSync(join(elsewhere, "uv"), { recursive: true });
     writeFileSync(join(elsewhere, "uv", "uv.toml"), "index-url = 'https://pypi.corp.example/simple'\n");
-    const places = { platform: "win32" as const, env: { APPDATA: elsewhere, XDG_CONFIG_HOME: elsewhere }, home, windows: { appData, programData } };
+    const places = { platform: "win32" as const, env: { XDG_CONFIG_HOME: elsewhere }, home, windows: { appData, programData } };
     expect(uvSettingsReason(places)).toBeUndefined();
+    expect(uvSettingsReason({ ...places, env: { APPDATA: elsewhere } })).toBe(`your uv settings (${join(elsewhere, "uv", "uv.toml")}) name a package index, and the cage builds from PyPI only`);
     writeFileSync(join(appData, "uv", "uv.toml"), "no-cache = true\n");
     expect(uvSettingsReason(places)).toBeUndefined();
     mkdirSync(join(programData, "uv"), { recursive: true });

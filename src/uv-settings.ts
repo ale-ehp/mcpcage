@@ -23,7 +23,7 @@ export interface UvPlaces {
   /** The user's own environment: protect's and wrap's, run in the user's terminal, or what `run` was started with. */
   env: Readonly<Record<string, string | undefined>>;
   home: string;
-  /** On Windows, APPDATA and ProgramData as Windows has them (see windowsPlaces), never as an environment says. */
+  /** On Windows, APPDATA and ProgramData as Windows has them (see windowsPlaces): looked at whatever the environment says, the environment's APPDATA too. */
   windows?: { appData?: string; programData?: string };
 }
 
@@ -41,10 +41,10 @@ export function uvPlacesHere(): UvPlaces {
  * The files uv may read its settings from for a tool command (https://docs.astral.sh/uv/reference/storage/):
  * the one UV_CONFIG_FILE names (relative to the current directory, as uv takes it); on macOS and
  * Linux the user's uv.toml under XDG_CONFIG_HOME, when that is an absolute path, and under
- * ~/.config, then the system's under each absolute directory of XDG_CONFIG_DIRS and /etc; on Windows
- * the user's under %APPDATA% and the system's under %PROGRAMDATA%. uv takes the first of the user's
- * that exists, and of the system's; all are looked at, so that a client started without XDG_CONFIG_HOME
- * and a terminal with it are both covered.
+ * ~/.config, then the system's under each directory of XDG_CONFIG_DIRS, under /etc/xdg and under
+ * /etc; on Windows the user's under %APPDATA% and the system's under %PROGRAMDATA%. uv takes the
+ * first of the user's that exists, and of the system's; all are looked at, so that a client started
+ * without XDG_CONFIG_HOME or XDG_CONFIG_DIRS and a terminal with them are both covered.
  */
 export function uvConfigFiles(places: UvPlaces): string[] {
   // Every path is read by the rules of the system asked about. On that system's own machine, the
@@ -54,18 +54,34 @@ export function uvConfigFiles(places: UvPlaces): string[] {
   // name relative to the current directory when Windows was.
   const syntax = places.platform === "win32" ? win32 : posix;
   const files: string[] = [];
-  const given = places.env.UV_CONFIG_FILE;
-  if (given !== undefined && given !== "") files.push(syntax.resolve(given));
+  const variable = (name: string) => valueIn(places.env, name, places.platform);
+  const given = variable("UV_CONFIG_FILE");
+  if (given !== undefined) files.push(syntax.resolve(given));
   if (places.platform === "win32") {
+    // uv 0.13.7 takes the user's directory from the APPDATA variable, and asks Windows only when it is
+    // not set (etcetera 0.11's Windows strategy): folder redirection sets it to a share, or to a folder
+    // named after the user, which the registry gives with %USERNAME% in it and windowsPlaces leaves.
+    const appData = variable("APPDATA");
+    if (appData !== undefined) files.push(win32.resolve(appData, "uv", "uv.toml"));
     for (const dir of [places.windows?.appData, places.windows?.programData]) if (dir !== undefined && win32.isAbsolute(dir)) files.push(win32.join(dir, "uv", "uv.toml"));
-    return files;
+    return [...new Set(files)];
   }
-  const xdg = places.env.XDG_CONFIG_HOME;
+  const xdg = variable("XDG_CONFIG_HOME");
   if (xdg !== undefined && posix.isAbsolute(xdg)) files.push(posix.join(xdg, "uv", "uv.toml"));
   files.push(posix.join(places.home, ".config", "uv", "uv.toml"));
-  for (const dir of (places.env.XDG_CONFIG_DIRS ?? "").split(":")) if (posix.isAbsolute(dir)) files.push(posix.join(dir, "uv", "uv.toml"));
-  files.push("/etc/uv/uv.toml");
+  // uv 0.13.7 (uv-dirs, locate_system_config_xdg) joins each directory as it is, a relative one from
+  // its current directory (XDG_CONFIG_DIRS=conf made it read conf/uv/uv.toml), and reads /etc/xdg
+  // when the variable is unset or empty, as it is on most machines.
+  for (const dir of (variable("XDG_CONFIG_DIRS") ?? "").split(":")) if (dir !== "") files.push(posix.resolve(dir, "uv", "uv.toml"));
+  files.push("/etc/xdg/uv/uv.toml", "/etc/uv/uv.toml");
   return [...new Set(files)];
+}
+
+/** The value of a variable of `env`, compared without case on Windows, as uv's reads of them are there; undefined when it is not set, empty, or not a string. */
+function valueIn(env: Readonly<Record<string, unknown>>, name: string, platform: NodeJS.Platform): string | undefined {
+  const written = platform === "win32" ? Object.keys(env).find((key) => key.toUpperCase() === name) : name;
+  const value = written === undefined ? undefined : env[written];
+  return typeof value === "string" && value !== "" ? value : undefined;
 }
 
 /** The settings of uv.toml that choose where packages come from (an [[index]] table, or one of these keys). */

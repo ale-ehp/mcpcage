@@ -172,7 +172,7 @@ let asked: Record<string, string | undefined> | undefined;
 /**
  * Windows' places on this machine (see windowsEnv), asked once: the registry takes a program for each
  * key. docker's environment takes them (see trustedEnv in sandbox.ts), and so does the look for uv's
- * own settings (see uv-settings.ts), which an entry's APPDATA must not move either.
+ * own settings (see uv-settings.ts), which an environment's APPDATA adds a place to, but never moves.
  */
 export function windowsPlaces(): Record<string, string | undefined> {
   asked ??= windowsEnv(windowsSources());
