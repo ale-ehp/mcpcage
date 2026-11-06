@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { posix, resolve, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 import { readConfigFile } from "./clients.js";
 import { terminalSafe } from "./terminal.js";
 import { windowsPlaces } from "./windows-places.js";
@@ -47,9 +47,15 @@ export function uvPlacesHere(): UvPlaces {
  * and a terminal with it are both covered.
  */
 export function uvConfigFiles(places: UvPlaces): string[] {
+  // Every path is read by the rules of the system asked about. On that system's own machine, the
+  // only one uv reads these files on, they are the host's rules, with its current directory for a
+  // relative UV_CONFIG_FILE, as uv takes it. Read by the host's rules whatever the system, /x/uv.toml
+  // became C:\x\uv.toml on Windows when Linux was asked about, and on macOS D:\uv.toml became a
+  // name relative to the current directory when Windows was.
+  const syntax = places.platform === "win32" ? win32 : posix;
   const files: string[] = [];
   const given = places.env.UV_CONFIG_FILE;
-  if (given !== undefined && given !== "") files.push(resolve(given));
+  if (given !== undefined && given !== "") files.push(syntax.resolve(given));
   if (places.platform === "win32") {
     for (const dir of [places.windows?.appData, places.windows?.programData]) if (dir !== undefined && win32.isAbsolute(dir)) files.push(win32.join(dir, "uv", "uv.toml"));
     return files;
