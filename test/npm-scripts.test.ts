@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { installScripts } from "../src/npm-scripts.js";
+import { sha256 } from "../src/canonical.js";
+import { installScripts, type NpmRunner } from "../src/npm-scripts.js";
 import { npmProgram, prepareSandbox } from "../src/sandbox.js";
 import { onWindows } from "./fake-programs.js";
 
@@ -101,5 +102,100 @@ describe("the npm that packs a local package", () => {
     expect(() => onWindows(() => prepareSandbox(options), node)).toThrow(`npm pack ${pkg} failed: npm not found next to ${node}`);
     // Started by name, npm would be looked for in the current directory first, where a project can keep an npm.exe.
     expect(started().map((call) => [call.file, call.args[0]])).toEqual([[join(bin, "docker.exe"), "version"]]);
+  });
+});
+
+describe("the answer npm view gives, read through the runner option", () => {
+  /** installScripts with npm replaced by `runner`, on a fresh cache directory. */
+  const ask = (runner: NpmRunner, spec = "pkg@1", offline = false) =>
+    installScripts(spec, { offline, cacheDir: mkdtempSync(join(tmpdir(), "mcpcage-npm-")), runner });
+  const answer = (stdout: string, status = 0, stderr = "") => () => ({ status, stdout, stderr });
+
+  it("says unknown when npm prints something that is not JSON", () => {
+    expect(ask(answer("not json {"))).toEqual({ status: "unknown", scripts: [], detail: "npm view printed something that is not JSON" });
+  });
+
+  it("says unknown with the first line of stderr when npm exits non-zero", () => {
+    expect(ask(answer("", 1, "boom\nsecond line"))).toEqual({ status: "unknown", scripts: [], detail: "boom" });
+    expect(ask(answer("", 2))).toEqual({ status: "unknown", scripts: [], detail: "npm view failed (exit code 2)" });
+    expect(ask(answer("", null, "npm is not installed"))).toEqual({ status: "unknown", scripts: [], detail: "npm is not installed" });
+  });
+
+  it("says none when npm prints nothing: the package declares no scripts", () => {
+    expect(ask(answer(""))).toEqual({ status: "none", scripts: [], detail: "" });
+    expect(ask(answer("  \n "))).toEqual({ status: "none", scripts: [], detail: "" });
+  });
+
+  it("names the install-time scripts of every version a range matches", () => {
+    const range = JSON.stringify([{ preinstall: "a" }, { postinstall: "b", prepare: "c" }]);
+    expect(ask(answer(range))).toEqual({ status: "found", scripts: ["preinstall", "postinstall"], detail: "prepare runs only for git installs" });
+    expect(ask(answer(JSON.stringify({ install: "x" })))).toEqual({ status: "found", scripts: ["install"], detail: "" });
+    expect(ask(answer(JSON.stringify({ dev: "x" })))).toEqual({ status: "none", scripts: [], detail: "" });
+  });
+
+  it("says unknown when the answer is not an object: a string, a number, null", () => {
+    for (const stdout of ['"a string"', "42", "null"]) {
+      expect(ask(answer(stdout))).toEqual({ status: "unknown", scripts: [], detail: "npm view gave an answer of an unexpected shape" });
+    }
+    expect(ask(answer(JSON.stringify([{ postinstall: "x" }, "not an object"])))).toEqual({
+      status: "unknown", scripts: [], detail: "npm view gave an answer of an unexpected shape",
+    });
+  });
+
+  it("turns npm's error object into a few words, whatever its code", () => {
+    const error = (body: unknown, status = 1) => ask(answer(JSON.stringify({ error: body }), status));
+    expect(error({ code: "E404" })).toEqual({ status: "unknown", scripts: [], detail: "not found on the npm registry" });
+    expect(error({ code: "ENOTCACHED" })).toEqual({ status: "unknown", scripts: [], detail: "not in the npm cache" });
+    expect(error({ code: "EACCES", summary: "denied\nmore" })).toEqual({ status: "unknown", scripts: [], detail: "npm view failed: EACCES denied" });
+    // A code or summary that is not a string is left out, never converted.
+    expect(error({ code: 42, summary: "sum" })).toEqual({ status: "unknown", scripts: [], detail: "npm view failed: sum" });
+    expect(error({ code: "E500", summary: 7 })).toEqual({ status: "unknown", scripts: [], detail: "npm view failed: E500" });
+    expect(error({})).toEqual({ status: "unknown", scripts: [], detail: "npm view failed with an error of an unexpected shape" });
+  });
+
+  it("offline without a cached answer says so, whatever npm answered", () => {
+    expect(ask(answer("", 1, "offline boom"), "pkg@1", true)).toEqual({ status: "unknown", scripts: [], detail: "offline, not in cache" });
+  });
+});
+
+describe("the cache of npm's answers", () => {
+  const spec = "cached-pkg@2";
+  const cacheFile = (cacheDir: string) => join(cacheDir, "npm-view", `${sha256(spec)}.json`);
+  const ask = (cacheDir: string, runner: NpmRunner, offline = false) => installScripts(spec, { offline, cacheDir, runner });
+
+  it("answers from a valid cache without asking npm", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "mcpcage-npm-"));
+    mkdirSync(dirname(cacheFile(cacheDir)), { recursive: true });
+    writeFileSync(cacheFile(cacheDir), JSON.stringify({ spec, fetchedAt: new Date().toISOString(), scripts: { postinstall: "x" } }));
+    const runner = () => { throw new Error("npm must not be asked"); };
+    expect(ask(cacheDir, runner)).toEqual({ status: "found", scripts: ["postinstall"], detail: "" });
+    // Offline too, and even when the answer is a week old.
+    expect(ask(cacheDir, runner, true)).toEqual({ status: "found", scripts: ["postinstall"], detail: "" });
+    const old = mkdtempSync(join(tmpdir(), "mcpcage-npm-"));
+    mkdirSync(dirname(cacheFile(old)), { recursive: true });
+    writeFileSync(cacheFile(old), JSON.stringify({ spec, fetchedAt: new Date(0).toISOString(), scripts: null }));
+    expect(ask(old, runner, true)).toEqual({ status: "none", scripts: [], detail: "" });
+  });
+
+  it("asks npm again when the cache file is damaged or malformed", () => {
+    for (const content of ["not json {", JSON.stringify({ spec, fetchedAt: 42, scripts: null }), JSON.stringify({ spec, fetchedAt: "now", scripts: "not an object" }), JSON.stringify([1, 2])]) {
+      const cacheDir = mkdtempSync(join(tmpdir(), "mcpcage-npm-"));
+      mkdirSync(dirname(cacheFile(cacheDir)), { recursive: true });
+      writeFileSync(cacheFile(cacheDir), content);
+      let asked = 0;
+      const result = ask(cacheDir, () => { asked++; return { status: 0, stdout: JSON.stringify({ install: "x" }), stderr: "" }; });
+      expect(asked).toBe(1);
+      expect(result).toEqual({ status: "found", scripts: ["install"], detail: "" });
+    }
+  });
+
+  it("asks npm again when a fresh cache entry is too old and not offline", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "mcpcage-npm-"));
+    mkdirSync(dirname(cacheFile(cacheDir)), { recursive: true });
+    writeFileSync(cacheFile(cacheDir), JSON.stringify({ spec, fetchedAt: new Date(0).toISOString(), scripts: null }));
+    let asked = 0;
+    const result = ask(cacheDir, () => { asked++; return { status: 0, stdout: "", stderr: "" }; });
+    expect(asked).toBe(1);
+    expect(result).toEqual({ status: "none", scripts: [], detail: "" });
   });
 });
