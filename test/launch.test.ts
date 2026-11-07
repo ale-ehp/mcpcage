@@ -326,6 +326,8 @@ describe("uvx command lines", () => {
       "python", "PYTHON", "Python3", "python3", "python3.13", "python313", "python3.13t", "python3.13+debug", "python3.13gil", "python3.13rc1", "python3.13a",
       "python3.13.0", "python3.255", "python255", "pythonv3.13", "python@3.13", "python@latest", "python@foo", "python>=3.12", "python>=3.12,<3.14", "python ==3.13",
       "python==3.13.*", "cpython", "CPython3.13", "pypy", "pypy3.10", "pypy310", "graalpy", "GraalPy", "pyodide", "Pyodide", "pyodide3.12",
+      // Separators around a pre-release and an epoch, each an interpreter for uv 0.13.7 too ("No interpreter found for Python 3.13rc1").
+      "python3.13-rc1", "python3.13_rc1", "python3.13.rc1", "python3.13rc-1", "python3.13rc_1", "python10!3.13", "python1!3.13",
     ];
     for (const word of interpreters) {
       expect(() => uvx(word, "server.py"), word).toThrow(new Error(`uvx <package>: ${INTERPRETER}`));
