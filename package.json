@@ -26,6 +26,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "biome lint --error-on-warnings",
     "test": "npm run build && vitest run --exclude 'test/**/*.docker.test.ts'",
     "test:docker": "npm run build && vitest run test/*.docker.test.ts",
     "compat": "npm run build && node test/compat/run.mjs",
@@ -41,6 +42,7 @@
     "supply-chain"
   ],
   "devDependencies": {
+    "@biomejs/biome": "2.6.6",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@stryker-mutator/core": "10.1.1",
     "@stryker-mutator/vitest-runner": "10.1.1",

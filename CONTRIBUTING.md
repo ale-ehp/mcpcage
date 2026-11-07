@@ -19,6 +19,7 @@ git clone https://github.com/ale-ehp/mcpcage && cd mcpcage
 npm ci                 # the development dependencies exactly as package-lock.json pins them
 npm run build && npm link   # `mcpcage` on your PATH is now this clone's
 npm run typecheck
+npm run lint           # Biome's bug-finding rules, configured in biome.jsonc
 npm test               # unit and integration tests, no Docker needed
 npm run test:docker    # the cage and `protect --inspect` against a real Docker daemon
 ```
@@ -30,8 +31,8 @@ property-based tests with more cases, and mutation testing.
 
 Send a pull request against `main`. For a large change, open an issue first, so that the approach is
 agreed before the code is written. The [ci workflow](.github/workflows/ci.yml) runs the typecheck and
-the tests on Linux and Windows, and the Docker tests on Linux, and CodeQL analyses the code; all of
-them must pass. The maintainer reviews every pull request before it is merged.
+the tests on Linux and Windows, and the lint and the Docker tests on Linux, and CodeQL analyses the
+code; all of them must pass. The maintainer reviews every pull request before it is merged.
 
 ## What a change needs
 
@@ -41,6 +42,8 @@ them must pass. The maintainer reviews every pull request before it is merged.
   `test/*.fuzz.test.ts`.
 - `npm run typecheck` and `npm test` passing on Linux and on Windows, as CI runs them, and
   `npm run test:docker` when the change touches the cage.
+- `npm run lint` passing: CI runs Biome on Linux, and a warning fails it as an error does. A rule
+  that is wrong for one line is silenced on that line with a `biome-ignore` comment that says why.
 - No runtime dependencies. mcpcage stands between a client and code it does not trust, and whatever
   it loads at run time is code its users must trust too: package.json has no `dependencies`, and
   keeps none.
