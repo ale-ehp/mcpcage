@@ -509,7 +509,10 @@ Not fixed, for later:
   or Python and the server's virtual environment, and nothing in mcpcage removes them, after a
   `--rebuild` either. With BuildKit (Docker Desktop, Docker on Linux with buildx) a build leaves
   only its final image, and a cache that `docker builder prune` empties.
-- **With Docker's classic builder, a failed build leaves its container behind.** mcpcage's
-  `docker build` does not pass `--force-rm`, so when a step fails, the classic builder keeps that
+
+Fixed in 0.7.0:
+
+- **With Docker's classic builder, a failed build left its container behind.** mcpcage's
+  `docker build` did not pass `--force-rm`, so when a step failed, the classic builder kept that
   step's stopped container and the images it holds, for npm and PyPI builds alike. The five builds
-  that ran out of disk on the Mac left theirs.
+  that ran out of disk on the Mac left theirs. Both builds now pass `--force-rm`.
