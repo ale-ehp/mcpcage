@@ -719,6 +719,9 @@ In short:
 
 ## Roadmap
 
+What is planned for the next twelve months, from November 2026 to November 2027. Plans can change;
+[CHANGELOG.md](CHANGELOG.md) records what each release delivered.
+
 - Servers started with `uv run` or `pipx run`, which `protect` reports but cannot cage yet.
 - Per-server egress allowlists through a proxy container, generating minimal profiles that can be
   contributed to [docker/mcp-registry](https://github.com/docker/mcp-registry).
@@ -728,6 +731,18 @@ In short:
 - Pinning for prompts and resources; credentials injected by a proxy instead of being written in
   configuration files.
 - Optional gVisor or microVM runtimes.
+
+Not planned:
+
+- Caging remote MCP servers: nothing of theirs runs on your machine to put in a cage
+  ([THREAT-MODEL.md](THREAT-MODEL.md#out-of-scope-and-residual-risks)). `protect` keeps listing them.
+- Running a server on the host when Docker is missing: mcpcage refuses to start it, and
+  `--no-sandbox` stays an explicit choice.
+- A model or an outside service to judge tool definitions: the rules stay fixed and local, so the
+  same text always gets the same answer and nothing is sent anywhere.
+- Blocking or editing tool results: they reach the client as the server sent them, since changing
+  data would break legitimate content.
+- Runtime dependencies: package.json has none, and keeps none ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Development
 
