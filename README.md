@@ -1,28 +1,128 @@
-# mcpcage
+<h1 align="center">mcpcage</h1>
 
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ale-ehp/mcpcage/badge)](https://scorecard.dev/viewer/?uri=github.com/ale-ehp/mcpcage)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16366/badge)](https://www.bestpractices.dev/projects/16366)
+<p align="center">
+  <strong>Your AI assistant's plugins, in a locked box.</strong><br>
+  They do their job. They can't read your keys, reach the internet or change behind your back.
+</p>
 
-**A cage for your AI assistant's plugins.**
+<p align="center">
+  <a href="https://www.npmjs.com/package/mcpcage"><img src="https://img.shields.io/npm/v/mcpcage?style=flat&color=blue" alt="npm"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/ale-ehp/mcpcage"><img src="https://api.scorecard.dev/projects/github.com/ale-ehp/mcpcage/badge" alt="OpenSSF Scorecard"></a>
+  <a href="https://www.bestpractices.dev/projects/16366"><img src="https://www.bestpractices.dev/projects/16366/badge" alt="OpenSSF Best Practices"></a>
+  <a href="package.json"><img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen?style=flat" alt="Zero runtime dependencies"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/ale-ehp/mcpcage?style=flat" alt="License"></a>
+</p>
 
-mcpcage puts your AI assistant's plugins in a locked box. Each plugin does its job and nothing else, and if it
-changes behind your back, it is blocked. It works with Claude, Cursor, VS Code and Copilot. Without mcpcage,
-their plugins can read your files and passwords and send them anywhere. With mcpcage they can do that only if
-you allow it. Both protections start together, with one command, on the assistants you already use. These
-plugins are called MCP servers.
+<p align="center">
+  <a href="#before--after">Before / After</a> •
+  <a href="#quick-start">Install</a> •
+  <a href="#python-servers">Python servers</a> •
+  <a href="#how-it-works">How it works</a> •
+  <a href="#limitations">Limitations</a>
+</p>
 
-![mcpcage demo: a stolen key stopped, a rug pull blocked and explained, exposed servers found](docs/demo.webp)
+---
+
+The plugins of Claude, Cursor, VS Code and Copilot are called MCP servers. Most of them start with
+`npx` or `uvx` and run as you: they can read `~/.ssh`, your cloud credentials and your code, and
+send them anywhere. mcpcage starts each one in a container with no network and no access to your
+home, and blocks it if its tools change after you approved them. One command sets it up on the
+assistants you already use.
+
+## Before / After
+
+<table>
+<tr>
+<th width="50%">Without mcpcage</th>
+<th width="50%">With mcpcage</th>
+</tr>
+<tr>
+<td valign="top">
+
+**A plugin reads your SSH key and sends it out.**
+
+```text
+read key    -> read 73 bytes
+exfiltrate  -> sent (HTTP 200)
+collector:  RECEIVED "-----BEGIN ...
+```
+
+</td>
+<td valign="top">
+
+**Same plugin, same call.**
+
+```text
+read key    -> failed (ENOENT)
+exfiltrate  -> failed (ECONNREFUSED)
+collector:  nothing received
+```
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**An update hides an instruction in a tool's description.**
+
+The new description reaches the model with the next tool list. Nothing tells you it changed.
+
+</td>
+<td valign="top">
+
+**The update is blocked, and you see why.**
+
+```text
+mcpcage blocked tools/list: tool definitions
+of "demo-notes" changed since they were
+approved. 3 high-severity signs of hidden
+instructions. Run `mcpcage diff demo-notes`.
+```
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Which plugins can read your whole home?**
+
+You find out by opening every configuration file of every assistant.
+
+</td>
+<td valign="top">
+
+**One list, every assistant.**
+
+```text
+filesystem  npx -y @modelcontextprotocol/...  NOT CAGED
+            access: your whole home directory
+github      npx -y @modelcontextprotocol/...  NOT CAGED
+            secret in clear text: GITHUB_PERSONAL_ACCESS_TOKEN
+```
+
+</td>
+</tr>
+</table>
+
+<p align="center"><strong>Same plugins. Same assistant. Nothing they don't need.</strong></p>
+
+<table>
+<tr>
+<td align="center" valign="top" width="33%"><h3>1 command</h3>to cage every <code>npx</code> and <code>uvx</code> server you have</td>
+<td align="center" valign="top" width="33%"><h3>7 assistants</h3>Claude Desktop, Claude Code, Cursor, VS Code, Copilot CLI, Windsurf, Devin</td>
+<td align="center" valign="top" width="33%"><h3>0</h3>runtime dependencies</td>
+</tr>
+</table>
 
 ```bash
-mcpcage protect          # every MCP server configured on this machine, and what each one can reach
+npm install -g mcpcage
+mcpcage protect          # every MCP server on this machine, and what each one can reach
 mcpcage protect --fix    # route the npx and uvx ones through the cage, after showing the plan (backups kept)
 ```
 
-Every `npx` and `uvx` MCP server in Claude Desktop, Claude Code, Cursor, VS Code, GitHub Copilot
-CLI, Windsurf and Devin then starts through mcpcage: inside a container with no network, a read-only
-filesystem and no access to your home directory, behind a proxy that blocks it if its tool
-definitions change after you approved them, and tells you why the change looks dangerous. Nothing
-else about your setup changes.
+Needs Node.js 22 or later and Docker. Nothing else about your setup changes.
+
+![mcpcage demo: a stolen key stopped, a rug pull blocked and explained, exposed servers found](docs/demo.webp)
 
 ## Why
 
