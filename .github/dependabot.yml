@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # CodeQL's init, analyze and upload-sarif must run the same release: a workflow whose init is
+    # newer than its analyze fails. Apart, each update would leave CodeQL red until the others land.
+    groups:
+      codeql-action:
+        patterns: ["github/codeql-action*"]
   - package-ecosystem: npm
     directory: /
     schedule:
