@@ -766,7 +766,7 @@ Bugs and feature requests: [GitHub issues](https://github.com/ale-ehp/mcpcage/is
 Vulnerabilities: privately, as [SECURITY.md](SECURITY.md) says. Changes: pull requests against
 `main`, each with a test that fails without it; [CONTRIBUTING.md](CONTRIBUTING.md) says how to build
 and test, and what else a change needs. [GOVERNANCE.md](GOVERNANCE.md) says how decisions are made
-and who does what.
+and who does what. Everyone who takes part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Security
 
