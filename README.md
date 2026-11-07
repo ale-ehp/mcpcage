@@ -1,4 +1,4 @@
-<h1 align="center">mcpcage</h1>
+<h1 align="center"><img src="docs/logo.png" alt="mcpcage" width="600"></h1>
 
 <p align="center">
   <strong>Your AI assistant's plugins, in a locked box.</strong><br>
