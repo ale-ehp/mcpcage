@@ -14,8 +14,8 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 
 | Adversary | Example | What mcpcage does |
 |---|---|---|
-| A malicious package from the start | a lookalike of a popular server | It runs in a container with no network, no home directory, a read-only filesystem, no capabilities and a nonroot user. Install scripts never run. |
-| A trusted package that turns malicious in an update (rug pull) | postmark-mcp after fifteen clean releases | The lockfile keeps the approved version until `--rebuild`, or until the package or its version range in the configuration changes. When the update arrives, changed tool definitions block the session until a human approves them. |
+| A malicious package from the start | a lookalike of a popular server | It runs in a container with no network, no home directory, a read-only filesystem, no capabilities and a nonroot user. Install scripts never run. A PyPI server is installed from wheels only, each checked against its hash, and nothing is built from source, so no code of the package runs while its image is built either. |
+| A trusted package that turns malicious in an update (rug pull) | postmark-mcp after fifteen clean releases | The lockfile (for a PyPI server, the requirements locked with their hashes) keeps the approved version until `--rebuild`, or until the package or its version range in the configuration changes; a PyPI server's `@latest` stays at the release of its first build. When the update arrives, changed tool definitions block the session until a human approves them. |
 | Tool poisoning through descriptions | hidden instructions in a tool description | Every description and schema is fingerprinted; a change is shown by `mcpcage diff` and blocked until approved. A listing with an entry that is not a tool definition is refused whole, since it cannot be compared. Fixed rules point at the signs of hidden instructions (privileged tags, "ignore previous instructions", "do not tell the user", secret files, invisible characters, orders about other tools) so the reviewer does not have to find them alone. The first listing is trusted unless `--strict` is used: its first page and the pages the client asks for with the cursor each page returned. Every later page is compared with the pin, and no page, of the first listing or after it, can replace a definition approved before it. |
 | Instructions hidden in invisible characters | zero-width text, Unicode Tags, bidi controls, variation selectors in a description | The same rules report them as high-severity signs, decode Unicode Tags to the text they spell, and show every invisible character as `[U+XXXX]`, so what the reviewer reads is what the model reads. |
 | Instructions hidden in a tool result | a note, a web page or an issue comment returned by a tool that tells the model to read `~/.ssh/id_rsa` and pass it to the next call | The rules that make sense on free text read every result: the signs are recorded in the audit log and the high-severity ones printed on stderr, so the user can see them in the client's log. The result passes unchanged, because blocking or editing data would break legitimate content: the model may still follow the instructions, and the cage limits what it can reach through that server. |
@@ -25,9 +25,11 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 | A server that answers what nobody asked | a forged response to a request the client never sent, or a second response to one already answered | A response whose id the client is not waiting for is dropped and recorded. |
 | A server that makes the client act for it | `sampling/createMessage` to run the model on the server's prompt, `elicitation/create` to put the server's question to the user | Both are a way in for a prompt injection and a way out for data, so they are refused by default with an error to the server, like any request mcpcage does not know, and recorded. `ping` and `roots/list` pass, and so do notifications. `--allow-server-requests` lets every request through, with a warning on stderr. |
 | A server that asks to call tools outside its manifest | a call routed to a tool the user never saw | Calls to tools that are not approved never reach the server, a call sent as a notification (without an id) included. A call whose arguments are nested more than 256 levels deep is refused before anything serializes them. |
-| A server written into a client configuration without the user's knowledge | SANDWORM_MODE adding entries to Claude Code, Cursor and Windsurf configs | `mcpcage protect` reads every configuration file the clients document and lists each server with how it starts, what it can reach and whether it is caged; `--fix` cages the npx ones. |
+| A server written into a client configuration without the user's knowledge | SANDWORM_MODE adding entries to Claude Code, Cursor and Windsurf configs | `mcpcage protect` reads every configuration file the clients document and lists each server with how it starts, what it can reach and whether it is caged; `--fix` cages the npx and uvx ones. |
 | A server entry whose `env` configures mcpcage instead of the server | `NODE_OPTIONS=--import ./x.mjs`, `LD_PRELOAD`, `OPENSSL_CONF`, `SHELLOPTS=xtrace` with a `PS4` of `$(...)` for the pnpm shim that starts mcpcage, a `DOCKER_HOST` on another machine, `HOME` pointed at an empty directory, `MCPCAGE_HOME` pointed at an empty store | A client starts the entry's command with its `env`, and after `wrap` that command is mcpcage, on the host, often through a shell script (pnpm's shim, the asdf and nodenv shims). `wrap` and `protect --fix` move `NODE_*`, `LD_*`, `DYLD_*`, `DOCKER_*` (except a `unix://` or `npipe://` `DOCKER_HOST`), `OPENSSL_*`, `GCONV_PATH`, the shell's `BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `ZDOTDIR` and `BASH_FUNC_*`, `npm_config_*`, and on Windows Windows' own places (`SystemRoot`, `windir`, `SystemDrive`, `ComSpec`, `PATHEXT`, `ProgramData`, `ALLUSERSPROFILE`, `ProgramFiles` and the other program folders, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `HOMEDRIVE`, `HOMEPATH`: docker loads its plugins from `%ProgramData%` and `%ProgramFiles%`, node Windows' own code from `%SystemRoot%`) and `GODEBUG` (whose `execerrdot=0` makes docker start a credential helper from the current directory) into the cage as `--env NAME=value`, and drop `HOME`, `USERPROFILE` and `MCPCAGE_HOME`. `protect` names each such variable and counts a caged entry that still has one as running on the host. An entry's `PATH` stays, and must stay within the user's own `PATH`: `protect` names each other directory, and each relative or empty one, and does not count the entry as caged; so too for a `COPILOT_HOME` or `XDG_CONFIG_HOME` set to another place than the user's, with which `run` would look elsewhere for the client configurations it refuses to mount. VS Code adds the variables of an entry's `envFile` to that environment: `protect` reads that file as it reads `env`, and does not count as caged an entry whose `envFile` sets such a variable or cannot be read; `wrap` and `--fix` keep the `envFile` and say that its variables reach mcpcage. `wrap` and `--fix` check each entry they are about to write as `protect` will, and leave one that would still not count as caged as it is, with the reason, instead of writing it and calling it caged. The home directory whose places are never mounted is the account's own, from the system's user database, as well as the one `HOME` names, and a relative `MCPCAGE_HOME` is made absolute, so it is never mounted either. |
 | A server entry whose `env` chooses code for a program that docker or npm starts | `CLOUDSDK_PYTHON` naming a script, with the user's docker configured for gcr.io through gcloud's credential helper (as `gcloud auth configure-docker` leaves it); `PYTHONPATH` and `PYTHONWARNINGS`, an `AWS_CONFIG_FILE` with a `credential_process`, `SSH_ASKPASS` for an `ssh://` `DOCKER_HOST`, `BUILDX_CONFIG`, `CONTAINERS_CONF` behind podman's `docker` shim, `GIT_SSH_COMMAND` | docker passes its environment to the programs it starts: its credential helpers (any program, often a script; the classic builder asks every one at every build, BuildKit the one of each registry it pulls from), its plugins, ssh, podman; npm passes its own to git and node. No list of such variables is complete, so mcpcage gives docker and npm an environment made of names instead of a copy of its own: the `PATH` of their install places (on Windows also Windows' places, from Windows), the variables `wrap` moves out of an entry's `env`, which are the user's own since an entry that still sets one is not counted as caged (`DOCKER_HOST`, `DOCKER_CONFIG`, `HOME`, `npm_config_*`, `NODE_EXTRA_CA_CERTS`...), and `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, `TMPDIR`, `SSH_AUTH_SOCK` and the proxy variables, whose values name no program; names are compared without case on Windows. Every other docker command (`version`, `build`, `pull`, `image inspect`...) and npm get nothing else. `docker run` also gets the variables named with `--env NAME`, because docker reads their values from its environment; it starts the local image by its ID with `--pull never`, so no credential helper runs. |
+| A uvx entry, or uv settings, that choose where uvx takes its packages from | `UV_INDEX_URL` or `--index-url` naming a private index, a `uv.toml` with an `[[index]]` table, a git source, `--with-editable`, an `env` `HOME` or `APPDATA` pointing uvx at a `uv.toml` the entry's author wrote | The cage builds from PyPI's wheels only, and would build packages of the same names from PyPI: a dependency confusion the user did not ask for, or another server than the one uvx runs. So an entry whose flags, variables or source take uvx elsewhere than PyPI, read a file on the host or build from source, and an entry the user's or the system's `uv.toml` (or one an entry's `HOME`, `XDG_CONFIG_HOME`, `XDG_CONFIG_DIRS`, `APPDATA`, `USERPROFILE`, `SYSTEMDRIVE` or `PROGRAMDATA` points to) names an index for, or changes what uvx installs in (`resolution`, `prerelease`, `exclude-newer`, `dependency-metadata`, `no-binary`, `allow-insecure-host`...), is not caged: `protect` says why, `wrap` and `--fix` leave it, and `run` refuses it at every start, so a caged entry whose settings change later stops, and is reported as "cannot start". A settings file that is there and cannot be read counts as one that names an index. Refusals name the flag or variable, never its value. The `.vscode/mcp.json` of a cloned repository may hold an `envFile`: its variables count as the entry's `env`. |
+| A configuration entry that names a path on another machine | in a cloned repository's `.vscode/mcp.json`, an `envFile`, a `command`, a `PATH` directory, an argument or an `APPDATA` written as `\\attacker\share\...` | On Windows looking at such a path connects to that host over SMB and authenticates with the user's session (NTLM), which hands the host the user's NTLM response; on macOS a path under `/net/<host>` mounts that host over NFS where the automounter's `-hosts` map is on. mcpcage tells such a path by its text alone, after the variables it fills in (on Windows any path that starts with two slashes or backslashes, in any mix; on macOS one under `/net/<host>`), and never looks at it: in `protect`, `--fix`, `wrap`, `--inspect` and `run`, for the `envFile`, the `command` and a caged entry's node and `cli.js`, the directories of its `PATH`, its mount and argument paths, the `.git` file in a mounted folder, and the uv settings an entry's variables point to, a variable whose value names a host without a share (`\\host`) included. Such an entry is not counted as caged, `wrap` and `--fix` leave it, and `run` refuses such a mount or settings path. Only the user's own AppData folder, where Windows' folder redirection puts it on a share, is read, as every program of the session reads it, and only from the user's own environment and registry, never from an entry's. |
 | Someone editing the audit trail after the fact | removing the record of a call | The hash chain makes edits, reordering and deletions inside a file detectable, except deletions at its end. |
 
 ## Trust boundaries
@@ -42,9 +44,27 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
    written and the sensitive ones left out, only to read its tool list. It reads that list with the
    same limits as the proxy: a line over 16 MiB is dropped, and more than 10,000 tools, or a
    definition nested more than 256 levels deep, is reported as refused, not read.
-3. **Build time and run time.** Building the image needs the npm registry; running it does not.
-   Packages are fetched once, recorded by integrity hash and reused from the lockfile.
-4. **The report and the secrets it finds.** `protect` names the environment variables, headers
+3. **Build time and run time.** Building the image needs the npm registry, or PyPI for a server
+   started with `uvx`; running it does not. Packages are fetched once, recorded by integrity hash
+   and reused from the lockfile.
+4. **What a Python server's build trusts.** PyPI's index, for what it serves at the first resolve
+   (as the first install of an npm package trusts npm's registry): every later build installs the
+   same files, checked against the hashes of the lock. uv's image
+   `ghcr.io/astral-sh/uv:0.13.7-python3.13-trixie-slim`, uv's own binary
+   (`ghcr.io/astral-sh/uv:0.13.7`) and the distroless `cc-debian13` bases, pinned by digest in
+   `runtime/bases.Dockerfile`; and the CPython builds uv installs, which uv checks against the
+   sha256 it ships with. The resolve (`uv pip compile --no-build`, metadata only) runs in a
+   `docker run` hardened as the cage is (read-only root with a 256 MB `noexec` `/tmp`, user 65532,
+   no capabilities, no new privileges, 128 processes, 1 GB of memory) but with the network on for
+   PyPI, no host file mounted, none of the entry's variables and no uv settings read. mcpcage checks
+   uv's answer before it keeps it: only pins, each with its sha256 hashes, the server at the release
+   chosen, no index, URL, path or editable line; a lock kept in the store is checked again the same
+   way before each build. The install runs one `uv pip sync --require-hashes --no-build` into an
+   empty virtual environment, after which Python runs in the build only as `python -I -S`, so no
+   `.pth` file of a package runs there. The runtime image has the Python and the environment only,
+   no shell, no uv and no pip, runs as 65532, and starts with the same `docker run` as an npx
+   server: no network, a read-only root.
+5. **The report and the secrets it finds.** `protect` names the environment variables, headers
    and arguments whose values look like credentials and never prints the values, so the report
    can be shared. The values stay where they were: mcpcage does not move secrets out of
    configuration files.
@@ -62,9 +82,9 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   nor a place the machine runs commands from: other clients' MCP and agent configurations
   (`~/.cursor`, `~/.claude`...), shell and login startup files, git's configuration and any
   repository's `.git`, a project's editor and agent settings (`.vscode`, `.mcp.json`...), and the
-  programs on the PATH and where they are installed (`~/.local/bin`, `~/.npm`, `/usr/local`...): a
-  server that needs one is left uncaged, with the reason, and the report names the path. `mcpcage
-  run` refuses such a `--mount` unless `--allow-sensitive-mount` is given; with it, the server can
+  programs on the PATH and where they are installed (`~/.local/bin`, `~/.npm`, uv's and pipx's
+  directories, `/usr/local`...): a server that needs one is left uncaged, with the reason, and the
+  report names the path. `mcpcage run` refuses such a `--mount` unless `--allow-sensitive-mount` is given; with it, the server can
   use that path like any other.
 - **Writable mounts.** A server with a writable mount (`:rw`, or `--writable` in `wrap` and
   `protect --fix`) can change what the host later runs from it: the code you run and build, and the
@@ -159,9 +179,13 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
 - **Prompts and resources.** Their descriptions are not pinned yet.
 - **Remote MCP servers.** Nothing runs locally to cage; they are out of scope. `protect` lists
   them and reports credentials written in clear text in their headers.
-- **Servers not started with `npx`.** `uvx`, `node`, `bun` or a binary run on the host as before;
-  `protect` reports them as not caged and cannot fix them yet.
-- **The Docker daemon itself.** Whoever controls it controls the containers.
+- **Servers not started with `npx` or `uvx`.** `uv run`, `pipx run`, `node`, `bun` or a binary run
+  on the host as before; `protect` reports them as not caged and cannot fix them yet.
+- **The Docker daemon itself.** Whoever controls it controls the containers. It can also put an
+  image of its choosing under a tag mcpcage uses: a PyPI server's image is tagged
+  `mcpcage/<id>:<hash>`, the hash being that of its lock and Dockerfile, and a local image already
+  under that tag is reused, whatever produced it. (An npm server's image is reused only when its
+  ID is the one mcpcage recorded when it built it.)
 - **What stays in a server entry's `env`.** `PATH` stays, because it is often what lets the client
   find `node`. mcpcage runs `docker` from its usual install places (the `PATH` is searched only when
   none has it) and `npm` from next to the `node` that runs mcpcage, each with a `PATH` of those
@@ -202,6 +226,30 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   needs a variable mcpcage leaves out does not get it: the secretservice helper of Linux desktops finds the session bus through
   `DBUS_SESSION_BUS_ADDRESS` (whose `unixexec:` addresses start a program) or `XDG_RUNTIME_DIR`,
   and `docker pull` or a BuildKit build that asks it may then fail.
+- **What a Python server's settings checks leave out.** mcpcage reads uv's settings as uv 0.13.7
+  does, with a line scan rather than a TOML parser, and errs toward leaving a server uncaged. Known
+  gaps and differences:
+  - On Linux an uncaged uvx entry whose `env` sets `XDG_CONFIG_HOME` to another value than the
+    user's is reported with what it asks PyPI for and counted on the summary line that points to
+    `protect --fix`; `--fix` then leaves it, because the variable also moves where VS Code keeps its
+    configuration, which `run` refuses to mount.
+  - On Windows, when the user's own AppData folder is redirected to a share that cannot be reached,
+    every uvx entry is reported as one whose uv settings "could not be read" and is not caged,
+    while uv would likely read no settings there. This fails closed.
+  - A symlink or a junction on a local disk that points at a share is not seen by the network path
+    test, which reads the path's text only, and is looked at.
+  - On a case-sensitive APFS volume, a separate program named `UVX` (or `NPX`) would be read as uvx
+    (or npx), since mcpcage compares those names without case on macOS.
+  - `https-proxy` in a `uv.toml` is not refused: a proxy only tunnels TLS, and the packages are
+    checked by their hashes. `--exclude-newer` years 0000 to 0099 are refused although uv takes
+    them, which is stricter, and fails closed.
+  - uv's global Python pin (`uv python pin --global`) is not read: the cage uses its own default,
+    3.13 raised when the server needs it, or the version `--python` or `UV_PYTHON` names, so uvx on
+    the host may run the server on another Python.
+- **A killed build output thread.** mcpcage shows what `docker build` and `docker pull` print
+  through a worker thread. If that thread is killed where no handler runs (terminated, out of
+  memory), docker keeps running until it ends on its own; mcpcage notices within 30 to 45 seconds
+  and stops with an error.
 - **`--no-sandbox`.** It keeps pinning and audit but provides no isolation at all. `protect` counts
   such entries as exposed.
 - **A `.cmd`/`.bat` mcpcage entry whose arguments cmd re-reads.** On Windows an entry that starts
