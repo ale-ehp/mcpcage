@@ -598,7 +598,7 @@ In short:
   `--image`.
 - Packages that need install scripts (native addons) will not build with scripts disabled, and
   Python packages that ship no wheel for the machine's architecture will not build at all.
-- A Python server's `/tmp`, which is also its `HOME`, holds 64 MB: one that downloads a model needs
+- A server's `/tmp`, which is also its `HOME`, holds 64 MB: one that downloads a model needs
   a writable mount for it (see [Python servers](#python-servers)).
 - Trust on first use trusts the first manifest. Use `--strict` where that matters, and
   `protect --inspect` to see the signs before approving.
