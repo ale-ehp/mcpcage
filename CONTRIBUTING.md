@@ -58,6 +58,12 @@ code; all of them must pass. The maintainer reviews every pull request before it
 
 Contributions are licensed under the [Apache License 2.0](LICENSE), like the rest of mcpcage.
 
+## Code of conduct
+
+Everyone who takes part in mcpcage's issues, pull requests and other spaces follows the
+[Code of Conduct](CODE_OF_CONDUCT.md), the Contributor Covenant 2.1. Report a breach privately, as
+it says.
+
 ## Releasing
 
 For the maintainer. The [release workflow](.github/workflows/release.yml) runs on a `v*` tag: it
