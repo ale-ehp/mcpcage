@@ -3956,6 +3956,7 @@ describe("characters the report spells out", () => {
     };
     const report = await scanConfigs({ locations: [location], home: dir, offline: true, cacheDir: join(dir, "cache"), npmRunner: noNpm, inspect });
     const text = renderReport(report, { home: dir });
+    // biome-ignore lint/suspicious/noMisleadingCharacterClass: the variation selectors are matched on their own, as code points (u flag)
     expect(text).not.toMatch(/[\p{Cs}\p{Cn}\p{Zl}\p{Zp}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]/u);
     const spelled = "[U+FE0F][U+E0100][U+D800][U+10FFFF][U+E01F0][U+2028]";
     expect(text).toContain(`  notes${spelled}  npx -y notes-mcp "--label=${spelled}"  NOT CAGED\n`);

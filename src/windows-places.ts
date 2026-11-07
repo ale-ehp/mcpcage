@@ -221,12 +221,14 @@ let redirected: { appData: string | undefined } | undefined;
  * own settings (see uv-settings.ts), which an environment's APPDATA adds a place to, but never moves.
  */
 export function windowsPlaces(): Record<string, string | undefined> {
+  // biome-ignore lint/suspicious/noAssignInExpressions: asked once, then remembered
   asked ??= windowsEnv((sources ??= windowsSources()));
   return asked;
 }
 
 /** The user's AppData\Roaming on a share on this machine (see redirectedAppData), asked once. */
 export function windowsRedirectedAppData(): string | undefined {
+  // biome-ignore lint/suspicious/noAssignInExpressions: asked once, then remembered
   redirected ??= { appData: redirectedAppData((sources ??= windowsSources())) };
   return redirected.appData;
 }

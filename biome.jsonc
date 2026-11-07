@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": { "includes": ["src/**", "test/**", "runtime/**/*.mjs", "*.ts", "*.mjs"] },
+  // Lint only: no formatter and no import sorting, so that adopting Biome rewrote no code.
+  "formatter": { "enabled": false },
+  "assist": { "enabled": false },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      // The groups that find bugs, at Biome's recommended level; no style or complexity rules.
+      "preset": "none",
+      "correctness": { "preset": "recommended" },
+      "security": { "preset": "recommended" },
+      "suspicious": {
+        "preset": "recommended",
+        // Matching control characters (ESC, C0 and C1, NUL) is what the terminal and argument checks are for.
+        "noControlCharactersInRegex": "off",
+        // "${workspaceFolder}" and "${env:HOME}" are clients' own placeholders, read and written as text.
+        "noTemplateCurlyInString": "off",
+        // A JSON-RPC message from the server is untrusted and checked field by field at run time.
+        "noExplicitAny": "off",
+        // `let x;` assigned in a try is typed by tsc's control flow analysis, which strict mode checks.
+        "noImplicitAnyLet": "off"
+      }
+    }
+  }
+}

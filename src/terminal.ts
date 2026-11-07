@@ -11,6 +11,7 @@ import { MessageChannel, receiveMessageOnPort, Worker } from "node:worker_thread
 // line separators and variation selectors. Controls include ESC and the C1 range (U+009B is a
 // one-byte CSI in many terminals), with which a server's text could clear or overwrite the screen
 // the user reads before approving; format characters include the bidi controls, which reorder it.
+// biome-ignore lint/suspicious/noMisleadingCharacterClass: the variation selectors are matched on their own, as code points (u flag)
 export const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Cn}\p{Zl}\p{Zp}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]/u;
 const EVERY_UNPRINTABLE = new RegExp(UNPRINTABLE.source, "gu");
 
