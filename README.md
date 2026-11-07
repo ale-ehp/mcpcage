@@ -15,11 +15,11 @@ plugins are called MCP servers.
 
 ```bash
 mcpcage protect          # every MCP server configured on this machine, and what each one can reach
-mcpcage protect --fix    # route the npx ones through the cage, after showing the plan (backups kept)
+mcpcage protect --fix    # route the npx and uvx ones through the cage, after showing the plan (backups kept)
 ```
 
-Every `npx` MCP server in Claude Desktop, Claude Code, Cursor, VS Code, GitHub Copilot CLI,
-Windsurf and Devin then starts through mcpcage: inside a container with no network, a read-only
+Every `npx` and `uvx` MCP server in Claude Desktop, Claude Code, Cursor, VS Code, GitHub Copilot
+CLI, Windsurf and Devin then starts through mcpcage: inside a container with no network, a read-only
 filesystem and no access to your home directory, behind a proxy that blocks it if its tool
 definitions change after you approved them, and tells you why the change looks dangerous. Nothing
 else about your setup changes.
@@ -104,7 +104,7 @@ Then look at what is configured on your machine, and cage it:
 
 ```bash
 mcpcage protect              # read-only: every client, every server, what it can reach
-mcpcage protect --inspect    # also start each npx server in the cage and check its tools for hidden instructions
+mcpcage protect --inspect    # also start each npx and uvx server in the cage and check its tools for hidden instructions
 mcpcage protect --fix        # shows the plan, asks, writes a backup next to each file, builds the images
 ```
 
@@ -128,7 +128,8 @@ mcpcage wrap ~/.cursor/mcp.json                      # Cursor
 mcpcage wrap --command "$(which mcpcage)" ~/Library/Application\ Support/Claude/claude_desktop_config.json
 ```
 
-or put `mcpcage run` in front of a server command yourself:
+or put `mcpcage run` in front of a server command yourself, an `npx` one or a `uvx` one (a Python
+server, built from PyPI wheels only: see [Python servers](#python-servers)):
 
 ```json
 {
@@ -136,6 +137,10 @@ or put `mcpcage run` in front of a server command yourself:
     "filesystem": {
       "command": "mcpcage",
       "args": ["run", "--mount", "/Users/me/notes", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/Users/me/notes"]
+    },
+    "time": {
+      "command": "mcpcage",
+      "args": ["run", "--", "uvx", "mcp-server-time"]
     }
   }
 }
@@ -153,7 +158,8 @@ disk, your home directory, a directory with credentials or system files (`~/.ssh
 runs commands from: other clients' MCP and agent configurations (`~/.cursor`, `~/.claude`, Claude
 Desktop's), shell and login startup files (`~/.zshrc`, `~/Library/LaunchAgents`), git's
 configuration and any repository's `.git`, a project's `.vscode` or `.mcp.json`, and the programs
-you run (`~/.local/bin`, `~/.npm`, `/usr/local`, every directory on your PATH). A server given one
+you run (`~/.local/bin`, `~/.npm`, uv's and pipx's directories, `/usr/local`, every directory on
+your PATH). A server given one
 is left as it is, uncaged, and the reason is printed; `mcpcage run` refuses such a `--mount` unless
 you add `--allow-sensitive-mount`. Your home directory there is the one your account has on the
 system, and the one `HOME` names when it is another. Images are built right away, so the client's
@@ -239,6 +245,119 @@ submodule, `.mcp.json`): mount it read-only, or a narrower directory. On Windows
 a directory (see [Windows](#windows)), so there a writable mount that holds any of these settings is
 refused.
 
+## Python servers
+
+A server started with `uvx` from PyPI is caged as an `npx` one is: `run`, `prepare`, `wrap`,
+`protect --fix` and `protect --inspect` take it, and it runs in the same cage. What changes is how
+its image is made: from wheels only, every package pinned by its hash, so no code of the package or
+of its dependencies runs while the image is built, on your machine or in Docker. A plain `uvx`
+installs a dependency that ships no wheel by building it from source on your machine, which runs
+its build code with your permissions (`uvx dbt-mcp` builds `uuid` 1.30, a 2008 source
+distribution, and runs its `setup.py`).
+
+**The command lines it takes**, read as uv 0.13.7 reads them:
+
+- `uvx [flags] <package> [args...]` and `uvx [flags] --from <package> <command> [args...]`, the same
+  after `uv tool run` or `uv tool uvx`, uvx by its full path, and on Windows `uvx.exe` and a plain
+  `cmd /c uvx ...` (see [Windows](#windows)). uv's own flags before `tool run`
+  (`uv --directory /x tool run ...`) are refused: they change where uv runs.
+- The package is a name, optional `[extras]` and versions (`==`, `!=`, `<=`, `>=`, `<`, `>`, `~=`,
+  `===`). `pkg@1.2` is `pkg==1.2` and `pkg@latest` is the newest release; anything else after `@`
+  is refused, as uv reads it as a path or a URL (for a range, write `pkg>=1.2`). The command after
+  `--from` is a plain file name; on Windows a final `.exe` is dropped, and a `.cmd`, `.bat` or
+  `.ps1` is refused.
+- Read into the build: `--with` (`-w`, split at commas as uv splits it), `--python` (`-p`, 3.10 to
+  3.15, or an exact release such as 3.12.4), `--prerelease` (`disallow`, `allow`, `if-necessary`,
+  `explicit`, `if-necessary-or-explicit`), and `--exclude-newer`: a date, a time with its zone, or a
+  duration (`30 days`, `P30D`). A plain date is the next midnight in your time zone, as uv reads it
+  on the host, and the cage's resolve gets that instant. `UV_PYTHON`, `UV_PRERELEASE` and
+  `UV_EXCLUDE_NEWER` stand for their flag when the line does not give it.
+- Ignored, since they only tune uv's cache, output or interpreter lookup on the host:
+  `--cache-dir`, `--refresh`, `--refresh-package`, `--no-cache`, `--offline`, `--isolated`,
+  `--no-config`, `--no-build`, `--managed-python`, `--no-managed-python`, `--no-python-downloads`,
+  `--system-certs`, `--quiet`, `--verbose`, `--no-progress`, `--color`, `--no-env-file`,
+  `--compile-bytecode`, `--reinstall`, `--reinstall-package` and `--link-mode`.
+- Every other flag is refused, with the reason, naming the flag and never its value, which can
+  hold an index password or a token.
+
+**How it is resolved and pinned.** mcpcage never runs uv or Python on your machine. The resolve
+runs `uv pip compile --no-build` in a container of uv's image
+(`ghcr.io/astral-sh/uv:0.13.7-python3.13-trixie-slim`, pinned by digest in
+[runtime/bases.Dockerfile](runtime/bases.Dockerfile)), hardened as the cage is (read-only root,
+user 65532, no capabilities) but with the network on, for PyPI, with no file of yours mounted, none
+of the entry's variables, and no uv settings read. With `--no-build` uv reads the packages'
+metadata only: nothing of them runs. It first pins the server's own release, because uv would
+otherwise go back to older releases until every dependency has a wheel (`dbt-mcp` 2.10.1 became
+0.2.1 so, silently), then locks the server at that release with its extras and the `--with`
+requirements, every package pinned with its sha256 hashes, for the Docker engine's architecture
+(amd64 or arm64). mcpcage checks the lock before it uses it (only pins with hashes, the server at
+its release, no index or URL line), and keeps it as `~/.mcpcage/servers/<id>/requirements.lock`.
+The Python is the one `--python` names, else 3.13, raised to 3.14 or 3.15 when the newest release
+of the server needs it, with a line saying so: `mcpcage: Python 3.14 for windows-mcp 0.8.8, which
+needs it (on Python 3.13 it would be 0.8.5)`.
+
+**How it is built.** uv installs its own build of CPython (3.13.18 for 3.13), which it checks
+against the sha256 it ships with, makes an empty virtual environment, and installs the lock into it
+with one command, `uv pip sync --require-hashes --no-build`. After that, Python runs in the build
+only as `python -I -S`, which runs no `.pth` file of the packages: it removes pip and compiles the
+bytecode. The image keeps the Python and the environment only, on
+a distroless base with no shell, no uv and no pip, as user 65532, and its entry point is the
+server's own command. It starts with the same `docker run` as an npx server.
+
+The lock is reused, and nothing resolved again, until `--rebuild`, or until what decides the
+install changes (the package and its versions, `--with`, `--python`, `--prerelease`,
+`--exclude-newer`; the server's own arguments do not count), or Docker runs on another
+architecture. So `@latest` and a package without a version mean the newest release at the first
+build, kept until `--rebuild`, as uvx keeps the tool it cached. The server's id leaves out its
+version, extras, `--with` and `--python`, so an upgrade is compared with the tools you approved.
+`wrap` and `protect --fix` resolve each uvx server before they write its entry: one that cannot be
+installed from wheels is left as it is with uv's reason, one whose resolve fails for another reason
+(Docker stopped, no network) is written, with a note, and resolved at its first start; nothing is
+kept in `~/.mcpcage` before you answer yes. `prepare` prints the Python and the wheels' platform,
+and `run` writes the package, its version, the Python and the uv release into the audit log.
+
+**What is refused, and why.** Each of these leaves the entry uncaged in `protect`, `wrap` and
+`--fix`, with the reason, and makes `run` refuse to start it:
+
+- A package or a dependency that PyPI has no wheel for, on this machine's architecture: "dbt-mcp
+  cannot be installed from PyPI wheels on Python 3.13 for Linux on ARM (linux/arm64), and the cage
+  never builds a package from source:" and uv's reason. A wheel can exist for x86_64 and not for
+  ARM, which is what Docker runs on Apple silicon ([wheels only](docs/compatibility.md#wheels-only)).
+  `protect --inspect` names such a package: "builds from source: uuid 1.30 ships no wheel (uvx runs
+  its build code with your permissions when it installs it); mcpcage installs wheels only".
+- Code from outside PyPI: a git, URL or path source, `--with-editable`, `--with-requirements`.
+- Another index (`--index`, `--index-url`, `--extra-index-url`, `--find-links`, `--torch-backend`...,
+  and their variables, such as `UV_INDEX_URL`): the cage would install packages of the same names
+  from PyPI, a dependency confusion you did not ask for.
+- A file on your machine (`--constraints`, `--overrides`, `--env-file`, `--directory`,
+  `--project`, and `UV_CONFIG_FILE` in an entry's `env`), a build from source or for another
+  platform (`--no-binary`, `--config-setting`, `--python-platform`...), and `--allow-insecure-host`.
+- A package that uvx reads as a Python interpreter to start, not a PyPI package: `python`,
+  `python3.13`, `python@3.12`, `cpython`, `pypy`, `graalpy`, `pyodide`.
+- uv settings that name an index or change what uvx installs: the `uv.toml` uv reads for a tool
+  command (under `~/.config/uv`, `$XDG_CONFIG_HOME/uv`, each directory of `$XDG_CONFIG_DIRS`,
+  `/etc/xdg/uv`, `/etc/uv`, `%APPDATA%\uv`, `%PROGRAMDATA%\uv`, or the file your `UV_CONFIG_FILE`
+  names), and the one an entry's `HOME`,
+  `XDG_CONFIG_HOME`, `XDG_CONFIG_DIRS`, `APPDATA`, `USERPROFILE`, `SYSTEMDRIVE` or `PROGRAMDATA`
+  points uvx to. An `[[index]]` table, `index-url`, `find-links` and the other index keys,
+  `resolution`, `prerelease`, `exclude-newer`, `dependency-metadata`, `no-binary` or
+  `allow-insecure-host` stop the cage: "your uv settings (~/.config/uv/uv.toml) name a package
+  index, and the cage builds from PyPI only". So does `UV_RESOLUTION` set to anything but
+  `highest`. A file that is there and cannot be read stops it too, since what it says is unknown.
+  An entry caged before the settings changed is reported as "cannot start" with the same reason.
+
+`protect` names what an uncaged uvx entry asks PyPI for (`asks PyPI for: mcp-server-time`), or why
+it cannot be caged (`cannot be caged: ...`); it resolves nothing without `--inspect`, so the name is
+what the line asks for, not a package known to exist.
+
+**Limits.** The cage's `/tmp`, which is also its `HOME`, is a 64 MB tmpfs: a server that downloads
+a model or fills a cache there runs out of room, even with `--allow-net`; give it a writable
+`--mount` and point the server's cache there. uv's global Python pin (`.python-version` in uv's
+settings directory) is not read: the cage uses its own default or `--python`. `uv run`, `pipx run`
+and other runners are reported as not caged ("pipx, not npx or uvx: cannot be caged yet"). The 39
+Python servers PyPI counts the most downloads for, and how each runs in the cage, are in
+[docs/compatibility.md](docs/compatibility.md#python-servers).
+
 ## Windows
 
 mcpcage needs Docker Desktop with Linux containers (its default): the cage is a Linux container.
@@ -269,11 +388,12 @@ registry, `APPDATA` and `LOCALAPPDATA` from your shell folders; and with
 `NoDefaultCurrentDirectoryInExePath` set, so that what they start by name never comes from the
 current directory.
 
-**`cmd /c npx`.** An entry that starts `cmd /c npx ...`, as many Windows setups do, counts as npx
-and is caged. `cmd /c` is kept after `--`, so `unwrap` gives the entry back as it was, but mcpcage
-never starts `cmd` for it: `run` reads the npx command line out of it. A `cmd /c` line that holds
-more than npx and its arguments (`&`, `|`, `%`, quotes, another switch...) is reported as not a
-plain npx command line and left as it is.
+**`cmd /c npx` and `cmd /c uvx`.** An entry that starts `cmd /c npx ...`, as many Windows setups
+do, counts as npx and is caged, and one that starts `cmd /c uvx ...` (as `mcp-for-blender`'s README
+writes it) counts as uvx. `cmd /c` is kept after `--`, so `unwrap` gives the entry back as it was,
+but mcpcage never starts `cmd` for it: `run` reads the npx or uvx command line out of it. A
+`cmd /c` line that holds more than npx or uvx and its arguments (`&`, `|`, `%`, quotes, another
+switch...) is reported as not a plain npx (or uvx) command line and left as it is.
 
 **Folders in the cage.** A folder has another path in a Linux container: the drive letter in
 lowercase, then the names with `/`. `C:\Users\me\notes` is mounted at `/c/Users/me/notes`, spelled
@@ -313,7 +433,9 @@ npm lifecycle scripts disabled (`--ignore-scripts`, the hook worms like Shai-Hul
 the resulting `package-lock.json`. Every later build runs `npm ci` from that lockfile, so the same
 dependency tree with the same integrity hashes runs every time, until you pass `--rebuild`. The
 image copies only the installed files into a distroless, nonroot Node runtime: no shell, no npm.
-Base images are pinned by digest in [runtime/bases.Dockerfile](runtime/bases.Dockerfile).
+Base images are pinned by digest in [runtime/bases.Dockerfile](runtime/bases.Dockerfile). For
+`uvx <package>`, the package and everything it needs are locked with their hashes and installed from
+wheels only (see [Python servers](#python-servers)).
 
 **Pinning the tools.** The first listing a server returns becomes its approved manifest: the first
 page of `tools/list` and the pages the client asks for with the cursor each page returned (trust on
@@ -390,8 +512,8 @@ caged server with one counts as running on your machine), whether its package
 declares install scripts (`npm view`, cached for a week; `--offline` uses the cache only), whether
 the configuration holds a secret in clear text (named, never shown, masked in command lines too)
 and whether an argument opens the whole disk, the whole home directory or a directory with
-credentials. `--inspect` starts each npx server inside the cage, with its path arguments mounted
-read-only and no network, lists its tools and runs the rules above on them. It reads the server
+credentials. `--inspect` starts each npx and uvx server inside the cage, with its path arguments
+mounted read-only and no network, lists its tools and runs the rules above on them. It reads the server
 with the proxy's limits: a line over 16 MiB is dropped, and a server that lists more than 10,000
 tools, or a definition nested more than 256 levels deep, is reported as refused rather than read.
 It never mounts a sensitive path: the server is inspected without it, and the report says so
@@ -436,9 +558,11 @@ $ mcpcage audit show modelcontextprotocol-server-filesystem-b6f05dc8
 ```text
 mcpcage protect [--inspect] [--fix] [options]          find every MCP configuration and show what is exposed
 mcpcage run [options] -- npx -y <package> [args...]   start a stdio server through the cage
+mcpcage run [options] -- uvx <package> [args...]       start a PyPI server through the cage, from its wheels
 mcpcage run --image <image> [options] -- [args...]     cage an already containerized server
 mcpcage prepare [options] -- npx -y <package> [args]   build and pin the image without starting it
-mcpcage wrap <config.json> [--dry-run] [--no-build]    route a client's npx servers through mcpcage
+mcpcage prepare [options] -- uvx <package> [args]      the same for a PyPI server
+mcpcage wrap <config.json> [--dry-run] [--no-build]    route a client's npx and uvx servers through mcpcage
 mcpcage unwrap <config.json> [--dry-run]               restore the original commands
 mcpcage diff <server-id>                               show tool changes waiting for approval, with the signs found
 mcpcage approve <server-id> [--yes]                    trust the reviewed tool definitions
@@ -455,21 +579,27 @@ question you are refused), `--strict`, `--id`, `--memory`, `--cpus`, `--keep-ima
 `--image`), `--rebuild`, `--no-sandbox`.
 
 Protect options: `--project <dir>` (default: the current directory), `--inspect`, `--offline`,
-`--fix`, `--yes`, `--no-build`, `--command <path>`, `--writable` (with `--fix`, and with `wrap`:
-mount the paths servers are given writable instead of read-only). Without `--fix` the exit code is
-1 when at least one server runs uncaged, or when a configuration file could not be checked (too
-large, not a regular file, not valid JSON, or unreadable), since what it starts is not known; with
-`--fix`, when fewer servers were caged than ran uncaged, or when such a file is there. So it can
-gate a script.
+`--fix`, `--yes`, `--no-build` (with `--fix`: do not resolve the uvx servers or build the images
+now), `--command <path>`, `--writable` (with `--fix`, and with `wrap`: mount the paths servers are
+given writable instead of read-only). Without `--fix` the exit code is 1 when at least one server
+runs uncaged, or when a configuration file could not be checked (too large, not a regular file, not
+valid JSON, or unreadable), since what it starts is not known; with `--fix`, when fewer servers were
+caged than ran uncaged, or when such a file is there. So it can gate a script. Since 0.7.0 an
+uncaged uvx entry counts as a server running uncaged, as an npx one does: where 0.6 exited 0 on a
+machine whose uncaged servers were all uvx ones, `protect` exits 1.
 
 ## Limitations
 
 Read [THREAT-MODEL.md](THREAT-MODEL.md) for what mcpcage defends against and what it does not.
 In short:
 
-- Only `npx` servers are built into a cage today; `uvx` and pip servers are next. `protect` lists
-  the others but cannot fix them. Already containerized servers work with `--image`.
-- Packages that need install scripts (native addons) will not build with scripts disabled.
+- Only `npx` and `uvx` servers are built into a cage today. `protect` lists the others (`uv run`,
+  `pipx run`, `node`, a binary...) but cannot fix them. Already containerized servers work with
+  `--image`.
+- Packages that need install scripts (native addons) will not build with scripts disabled, and
+  Python packages that ship no wheel for the machine's architecture will not build at all.
+- A Python server's `/tmp`, which is also its `HOME`, holds 64 MB: one that downloads a model needs
+  a writable mount for it (see [Python servers](#python-servers)).
 - Trust on first use trusts the first manifest. Use `--strict` where that matters, and
   `protect --inspect` to see the signs before approving.
 - The rules recognize the signs they know. A rewritten instruction can avoid them; in a tool
@@ -484,11 +614,12 @@ In short:
   home directory is shared by default).
 - Tested on macOS with Colima and Docker 29, and on Windows 10 with Docker Desktop 4.49 (Linux
   containers), where server-filesystem ran in the cage with read-only and writable folders.
-- The 24 most downloaded npx servers, and how each runs in the cage: [docs/compatibility.md](docs/compatibility.md).
+- The 24 most downloaded npx servers and the 39 most downloaded Python servers, and how each runs
+  in the cage: [docs/compatibility.md](docs/compatibility.md).
 
 ## Roadmap
 
-- `uvx` and pip servers, installed from wheels only, so no package code runs at install time.
+- Servers started with `uv run` or `pipx run`, which `protect` reports but cannot cage yet.
 - Per-server egress allowlists through a proxy container, generating minimal profiles that can be
   contributed to [docker/mcp-registry](https://github.com/docker/mcp-registry).
 - `mcpcage pack`: an OCI image on a Docker Hardened Image base with SBOM, provenance, a cosign
@@ -518,6 +649,10 @@ Linux and Windows, from a new seed each time.
 Mutation testing changes the code one small change at a time and checks that a test fails: the tests
 notice 88% of the changes to the code that decides what is safe, and 73% in all of `src/`, whose CLI
 is tested only as a process, out of Stryker's reach ([weekly run](.github/workflows/mutation.yml)).
+Of the files 0.7 added or changed the most for Python servers, `network-path.ts` (100%),
+`uv-settings.ts` (92.6%) and `pypi.ts` (92.5%) are above that 88%, `windows-places.ts` (87.0%) and
+`terminal.ts` (85.9%) below it, and so are the uvx parts of `protect.ts` (71%), mostly report
+wording that the CLI tests check from a process.
 
 mcpcage has no runtime dependencies. Releases are published to npm with provenance by trusted
 publishing, from GitHub Actions with no npm token, with a CycloneDX SBOM and a GitHub build
