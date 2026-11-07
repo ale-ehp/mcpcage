@@ -1,6 +1,6 @@
 {
   "name": "mcpcage",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "description": "Puts your AI assistant's plugins (MCP servers) in a locked box. They can't read your files or passwords or reach the internet unless you allow it, and a plugin that changes behind your back is blocked. One command, for Claude, Cursor, VS Code and Copilot.",
   "license": "Apache-2.0",
   "author": "Alessandro Veneziano",
