@@ -22,7 +22,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
-      - run: npm test
+      # npm test with the coverage report, which fails under the thresholds in vitest.config.ts.
+      - run: npm run test:coverage
       - name: Sandbox tests against a real Docker daemon
         run: npm run test:docker
 
