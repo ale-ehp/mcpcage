@@ -269,6 +269,10 @@ function fromUvEnvironment(environment: UvEnvironment, platform: NodeJS.Platform
   const python = read("UV_PYTHON", (value) => PYTHON_VERSION.test(value), "a CPython version from 3.10 to 3.15 (such as 3.12 or 3.12.4), the only ones the cage runs");
   const prerelease = read("UV_PRERELEASE", (value) => PRERELEASE_MODES.includes(value), `one of ${PRERELEASE_MODES.join(", ")}`);
   const excludeNewer = read("UV_EXCLUDE_NEWER", isExcludeNewer, "a date (2026-01-31), a time with its zone (2026-01-31T12:00:00Z) or a duration (30 days, P30D)");
+  if (excludeNewer !== undefined && !given.has("--exclude-newer") && afterLastInstant(excludeNewer)) {
+    const set = uvVariable(environment, "UV_EXCLUDE_NEWER", platform)!;
+    throw new Error(`${set.where} sets ${set.name} to an instant after ${LAST_INSTANT}, the last one uv can write, and a date stands for the next midnight in this time zone`);
+  }
   return { ...(python === undefined ? {} : { python }), ...(prerelease === undefined ? {} : { prerelease }), ...(excludeNewer === undefined ? {} : { excludeNewer }) };
 }
 
@@ -365,6 +369,9 @@ function parseUvx(words: string[], platform: NodeJS.Platform, environment: UvEnv
   const flagExcludeNewer = once.get("--exclude-newer");
   if (flagExcludeNewer !== undefined && !isExcludeNewer(flagExcludeNewer)) {
     throw new Error("uvx --exclude-newer: give a date (2026-01-31), a time with its zone (2026-01-31T12:00:00Z) or a duration (30 days, P30D)");
+  }
+  if (flagExcludeNewer !== undefined && afterLastInstant(flagExcludeNewer)) {
+    throw new Error(`uvx --exclude-newer: uv takes no instant after ${LAST_INSTANT}, the last one it can write, and a date stands for the next midnight in this time zone`);
   }
   const { python, prerelease, excludeNewer } = fromUvEnvironment(environment, platform, once);
   return {
@@ -635,6 +642,31 @@ function isExcludeNewer(value: string): boolean {
   }
   if (/^[0-9]{1,5} ?(?:s|secs?|seconds?|min|mins|minutes?|h|hrs?|hours?|d|days?|w|wk|weeks?)(?: ago)?$/.test(value)) return true;
   return /^P(?=[0-9]|T[0-9])(?:[0-9]{1,5}W)?(?:[0-9]{1,5}D)?(?:T(?=[0-9])(?:[0-9]{1,5}H)?(?:[0-9]{1,5}M)?(?:[0-9]{1,5}S)?)?$/i.test(value);
+}
+
+/** The last instant uv 0.13.7 can write (jiff's Timestamp::MAX, to the second): 9999-12-30T22:00:00.999999999Z. */
+const LAST_INSTANT = "9999-12-30T22:00:00Z";
+
+/**
+ * Whether a value of isExcludeNewer stands for an instant after LAST_INSTANT, which uv 0.13.7 refuses
+ * ("could not be converted to a timestamp"): the run of a server so configured failed at its resolve,
+ * every start, after protect had said it would start. A date is the instant excludeNewerInstant gives
+ * it in this time zone, as uv reads it: 9999-12-30 was refused with TZ=UTC and taken as
+ * 9999-12-30T10:00:00Z with TZ=Pacific/Kiritimati; 9999-12-31 was refused in every zone; a time with
+ * its zone counts to the second, 9999-12-30T22:00:00.999999999Z taken and 9999-12-30T22:00:01Z refused.
+ * A duration counts from the time of the resolve, and the earliest dates are refused as they are.
+ */
+function afterLastInstant(value: string): boolean {
+  const date = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.test(value) ? excludeNewerInstant(value) : value;
+  // toISOString writes a year past 9999 with six digits and a sign: +010000-01-01T00:00:00Z.
+  const moment = /^([+-]?[0-9]{4,6})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2})(?::([0-9]{2}))?(?:\.[0-9]+)?(?:[Zz]|([+-])([0-9]{2}):([0-9]{2}))$/.exec(date);
+  if (moment === null) return false;
+  const [, year, month, day, hour, minute, second = "0", sign, zoneHour = "0", zoneMinute = "0"] = moment;
+  const at = new Date(0);
+  at.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+  at.setUTCHours(Number(hour), Number(minute), Number(second), 0);
+  const offset = (Number(zoneHour) * 60 + Number(zoneMinute)) * 60_000 * (sign === "-" ? -1 : 1);
+  return at.getTime() - offset > Date.UTC(9999, 11, 30, 22, 0, 0);
 }
 
 /**

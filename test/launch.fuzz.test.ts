@@ -346,8 +346,14 @@ function nextMidnight(date: string, zone: string): string {
   return new Date(instant).toISOString().replace(/\.000Z$/, "Z");
 }
 
-/** A date uv 0.13.7 and mcpcage both take: years 100 to 9998 (mcpcage refuses 0000 to 0099, which uv takes; uv refuses 9999-12-30 and after). */
-const date = fc.date({ min: new Date(Date.UTC(100, 0, 1)), max: new Date(Date.UTC(9998, 11, 31)), noInvalidDate: true }).map((day) => day.toISOString().slice(0, 10));
+/**
+ * A date from 0100-01-01 to 9999-12-31 (mcpcage refuses 0000 to 0099, which uv takes). Near the end,
+ * the next midnight in the zone can be after the last instant uv 0.13.7 writes, which both refuse.
+ */
+const date = fc.date({ min: new Date(Date.UTC(100, 0, 1)), max: new Date(Date.UTC(9999, 11, 31)), noInvalidDate: true }).map((day) => day.toISOString().slice(0, 10));
+
+/** The last instant uv 0.13.7 can write, to the second (jiff's Timestamp::MAX). */
+const LAST_INSTANT = Date.UTC(9999, 11, 30, 22, 0, 0);
 
 describe("--exclude-newer, fuzzed", () => {
   it(
@@ -360,13 +366,16 @@ describe("--exclude-newer, fuzzed", () => {
           process.env.TZ = zone;
           check(
             fc.property(
-              fc.array(fc.oneof({ weight: 3, arbitrary: date }, { weight: 1, arbitrary: fc.constantFrom("2026-03-07", "2025-11-01", "2011-12-29", "2011-12-30", "2026-09-05", "2026-04-04", "1900-12-31", "1847-11-30") }), { minLength: 1, maxLength: 4 }),
+              fc.array(fc.oneof({ weight: 3, arbitrary: date }, { weight: 1, arbitrary: fc.constantFrom("2026-03-07", "2025-11-01", "2011-12-29", "2011-12-30", "2026-09-05", "2026-04-04", "1900-12-31", "1847-11-30", "9999-12-29", "9999-12-30", "9999-12-31") }), { minLength: 1, maxLength: 4 }),
               fc.constantFrom("flag", "variable"),
               (days, how) => {
                 for (const day of days) {
                   const environment = how === "variable" ? [{ where: "its env", variables: { UV_EXCLUDE_NEWER: day } }] : [];
-                  const spec = parseLaunch(["uvx", ...(how === "flag" ? ["--exclude-newer", day] : []), "mcp-server-time"], undefined, "linux", environment) as PypiLaunch;
-                  expect(spec.resolution.excludeNewer, `${day} in ${zone}`).toBe(nextMidnight(day, zone));
+                  const read = () => parseLaunch(["uvx", ...(how === "flag" ? ["--exclude-newer", day] : []), "mcp-server-time"], undefined, "linux", environment) as PypiLaunch;
+                  const instant = nextMidnight(day, zone);
+                  // Past the last instant uv writes: refused at the start, as uv would refuse it at the resolve.
+                  if (Date.parse(instant) > LAST_INSTANT) expect(read, `${day} in ${zone}`).toThrow(/instant after 9999-12-30T22:00:00Z, the last one/);
+                  else expect(read().resolution.excludeNewer, `${day} in ${zone}`).toBe(instant);
                 }
               },
             ),

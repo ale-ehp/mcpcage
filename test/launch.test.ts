@@ -408,6 +408,32 @@ describe("uvx command lines", () => {
     for (const value of refused) expect(() => uvx("--exclude-newer", value, "mcp-server-time"), value).toThrow(/^uvx --exclude-newer: give a date/);
   });
 
+  it("refuses an instant of --exclude-newer after the last one uv 0.13.7 can write, 9999-12-30T22:00:00Z, at the start and not at the resolve", () => {
+    const LATE = "uvx --exclude-newer: uv takes no instant after 9999-12-30T22:00:00Z, the last one it can write, and a date stands for the next midnight in this time zone";
+    const late = (value: string) => () => uvx("--exclude-newer", value, "mcp-server-time");
+    // Each as uv 0.13.7 answered in its pinned image with that TZ: refused, or the instant it gave.
+    inZone("UTC", () => {
+      expect(late("9999-12-30")).toThrow(new Error(LATE));
+      expect(late("9999-12-31")).toThrow(new Error(LATE));
+      expect(late("9999-12-30T22:00:01Z")).toThrow(new Error(LATE));
+      expect(late("9999-12-31T08:00:01+10:00")).toThrow(new Error(LATE));
+      expect((uvx("--exclude-newer", "9999-12-29", "mcp-server-time") as PypiLaunch).resolution.excludeNewer).toBe("9999-12-30T00:00:00Z");
+      for (const value of ["9999-12-30T22:00:00Z", "9999-12-30T22:00:00.999999999Z", "9999-12-31T08:00:00+10:00"]) expect(late(value), value).not.toThrow();
+      expect(() => parseLaunch(["uvx", "mcp-server-time"], undefined, "linux", [{ where: "its env", variables: { UV_EXCLUDE_NEWER: "9999-12-31" } }])).toThrow(
+        new Error("its env sets UV_EXCLUDE_NEWER to an instant after 9999-12-30T22:00:00Z, the last one uv can write, and a date stands for the next midnight in this time zone"),
+      );
+    });
+    // East of UTC the next midnight comes earlier: 9999-12-30 is 9999-12-30T10:00:00Z at UTC+14.
+    inZone("Pacific/Kiritimati", () => {
+      expect((uvx("--exclude-newer", "9999-12-30", "mcp-server-time") as PypiLaunch).resolution.excludeNewer).toBe("9999-12-30T10:00:00Z");
+      expect(late("9999-12-31")).toThrow(new Error(LATE));
+    });
+    inZone("Etc/GMT+12", () => {
+      expect((uvx("--exclude-newer", "9999-12-29", "mcp-server-time") as PypiLaunch).resolution.excludeNewer).toBe("9999-12-30T12:00:00Z");
+      expect(late("9999-12-30")).toThrow(new Error(LATE));
+    });
+  });
+
   it("splits a --with value at its commas as uv does: not inside brackets, nor before a version operator", () => {
     const withs = (value: string) => (uvx("--with", value, "mcp-server-time") as { with: string[] }).with;
     expect(withs("a[x,y],b")).toEqual(["a[x,y]", "b"]);
