@@ -168,7 +168,9 @@ const validLock = fc
     const pins: Array<[string, string, string[]]> = [...others];
     pins.splice(at % (pins.length + 1), 0, [rootName, ROOT.version, rootHashes]);
     const blocks = pins.map(([name, pinned, hashes]) => [`${name}==${pinned} \\`, ...hashes.map((hex, index) => `    --hash=sha256:${hex}${index < hashes.length - 1 ? " \\" : ""}`)]);
-    loose.forEach((line, index) => blocks.splice((index * 7) % (blocks.length + 1), 0, [line]));
+    loose.forEach((line, index) => {
+      blocks.splice((index * 7) % (blocks.length + 1), 0, [line]);
+    });
     return { lock: `${blocks.flat().join("\n")}\n`, pins: new Map(pins.map(([name, pinned, hashes]) => [normal(name), { version: pinned, hashes }])) };
   });
 
