@@ -58,13 +58,18 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
       # GitHub keeps the provenance among the repository's attestations. Attached to the release as
       # <package>.sigstore.json it also travels with the package for `gh attestation verify --bundle`,
-      # and it is where Scorecard's Signed-Releases check looks for a signature. The release stays a
+      # and it is where Scorecard's Signed-Releases check looks for a signature. That check counts a
+      # release as carrying provenance only for a file named *.intoto.jsonl: the same signed SLSA
+      # statement, as the bundle's DSSE envelope on one line, goes there too. The release stays a
       # draft until the maintainer has approved the version on npm: published, it would announce a
       # version npm does not serve yet, or never will if it is rejected.
       - name: Draft GitHub release with the package, its SBOM and its signed provenance
         run: |
-          for package in mcpcage-*.tgz; do cp "$PROVENANCE" "$package.sigstore.json"; done
-          gh release create "$GITHUB_REF_NAME" mcpcage-*.tgz mcpcage-*.tgz.sigstore.json mcpcage.cdx.json --generate-notes --draft
+          for package in mcpcage-*.tgz; do
+            cp "$PROVENANCE" "$package.sigstore.json"
+            jq -c .dsseEnvelope "$PROVENANCE" > "${package%.tgz}.intoto.jsonl"
+          done
+          gh release create "$GITHUB_REF_NAME" mcpcage-*.tgz mcpcage-*.tgz.sigstore.json mcpcage-*.intoto.jsonl mcpcage.cdx.json --generate-notes --draft
         env:
           GH_TOKEN: ${{ github.token }}
           PROVENANCE: ${{ steps.provenance.outputs.bundle-path }}
