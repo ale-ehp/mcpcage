@@ -214,6 +214,22 @@ describe("what an entry names on a network path, never looked at", () => {
     expect(reached("win32")).toEqual([`${share}\\uv\\uv.toml`]);
   });
 
+  it("refuses a variable of the uv settings lookup that names a host without a share, which path.resolve would make a local path", () => {
+    // win32.resolve("\\\\host", "uv", "uv.toml") is \\host\\uv\\uv.toml on the current drive, a local file mcpcage read,
+    // where uv joins the value as it is and reads \\\\host\\uv\\uv.toml, the share uv of that host.
+    const windows = { appData: "C:\\Users\\me\\AppData\\Roaming", programData: "C:\\ProgramData" };
+    for (const path of ["\\\\host", "//host", "\\\\host\\", "/\\host", "\\\\", "//"]) {
+      for (const name of ["APPDATA", "USERPROFILE", "PROGRAMDATA", "SYSTEMDRIVE"]) {
+        expect(entryUvSettingsReason([{ where: "its env", variables: { [name]: path } }], "win32", "C:\\Users\\me"), `${name} ${path}`).toBe(`its env sets ${name} to ${NETWORK_PATH}, and the cage builds from PyPI only`);
+        expect(uvSettingsReason({ platform: "win32", env: { [name]: path }, home: "C:\\Users\\me", windows }), `${name} ${path}`).toBe(`your environment sets ${name} to ${NETWORK_PATH}, and the cage builds from PyPI only`);
+      }
+      expect(uvSettingsReason({ platform: "win32", env: { UV_CONFIG_FILE: path }, home: "C:\\Users\\me", windows }), path).toBe(`your environment sets UV_CONFIG_FILE to ${NETWORK_PATH}, and the cage builds from PyPI only`);
+    }
+    // No look at any form of it, collapsed or not.
+    expect(touched.filter((path) => /^[\\/]host|^[\\/][\\/]?uv/i.test(path))).toEqual([]);
+    expect(reached("win32")).toEqual([]);
+  });
+
   it("reads the user's own AppData on a share where the registry puts it, with %USERNAME% from the account", () => {
     const folders = (value: string) => ({
       windows: "C:\\Windows",

@@ -80,18 +80,22 @@ function settingsPlaces(places: UvPlaces): { files: string[]; network?: string }
   const own = redirected === undefined ? undefined : win32.join(redirected, "uv", "uv.toml").toLowerCase();
   const files: string[] = [];
   let network: string | undefined;
-  const add = (name: string, found: string[]) => {
+  // The value is tested as well as the files made from it: path.resolve takes \\host, a host without
+  // a share, for the root of the current drive, and \\host\uv\uv.toml became C:\host\uv\uv.toml, a
+  // local file mcpcage read where uv joins the value as it is and reads the share uv of that host.
+  const add = (name: string, value: string, found: string[]) => {
+    const fromNetwork = networkPath(value, places.platform);
     for (const file of found) {
-      if (!networkPath(file, places.platform) || (name === "APPDATA" && file.toLowerCase() === own)) files.push(file);
+      if ((!fromNetwork && !networkPath(file, places.platform)) || (name === "APPDATA" && file.toLowerCase() === own)) files.push(file);
       else network ??= name;
     }
   };
   const pointed = (name: string) => {
     const variable = variableIn(places.env, name, places.platform);
-    if (variable !== undefined) add(variable.name, settingsFiles(name, variable.value, places.platform));
+    if (variable !== undefined) add(variable.name, variable.value, settingsFiles(name, variable.value, places.platform));
   };
   const given = variableIn(places.env, "UV_CONFIG_FILE", places.platform);
-  if (given !== undefined) add(given.name, [syntax.resolve(given.value)]);
+  if (given !== undefined) add(given.name, given.value, [syntax.resolve(given.value)]);
   if (places.platform === "win32") {
     for (const name of SETTINGS_VARIABLES.win32) pointed(name);
     for (const dir of [places.windows?.appData, places.windows?.programData]) if (dir !== undefined && win32.isAbsolute(dir)) files.push(win32.join(dir, "uv", "uv.toml"));
@@ -99,7 +103,7 @@ function settingsPlaces(places: UvPlaces): { files: string[]; network?: string }
   } else {
     pointed("XDG_CONFIG_HOME");
     pointed("HOME");
-    add("HOME", [posix.join(places.home, ".config", "uv", "uv.toml")]);
+    add("HOME", places.home, [posix.join(places.home, ".config", "uv", "uv.toml")]);
     pointed("XDG_CONFIG_DIRS");
     files.push("/etc/xdg/uv/uv.toml", "/etc/uv/uv.toml");
   }
@@ -298,8 +302,9 @@ export function entryUvSettingsReason(environment: UvEnvironment, platform: Node
       const variable = variableIn(layer.variables, name, platform);
       if (variable === undefined) continue;
       for (const file of settingsFiles(name, variable.value, platform)) {
-        // Never from an entry: its author's share would get the user's credentials (see networkPath, and settingsPlaces).
-        if (networkPath(file, platform)) return `${layer.where} sets ${variable.name} to ${NETWORK_PATH}, and the cage builds from PyPI only`;
+        // Never from an entry: its author's share would get the user's credentials (see networkPath, and
+        // settingsPlaces), a host without a share (\\host) included, which path.resolve makes a local path.
+        if (networkPath(variable.value, platform) || networkPath(file, platform)) return `${layer.where} sets ${variable.name} to ${NETWORK_PATH}, and the cage builds from PyPI only`;
         const found = readSettings(file);
         const what = `${layer.where} sets ${variable.name}, so uvx reads the uv settings in ${shown(file, home, platform)}`;
         if (found === "unreadable") return `${what}, which could not be read: whether they name a package index is unknown, and the cage builds from PyPI only`;

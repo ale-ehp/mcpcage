@@ -149,9 +149,10 @@ describe("network paths on Windows, fuzzed", () => {
             expect(() => parseMount(`${path}:rw`), path).toThrow(/^--mount: /);
             expect(() => parseLaunch(["npx", "-y", path], undefined, "win32"), path).toThrow(new Error(`the package after npx is ${NETWORK_PATH}`));
             // The uv settings its variables, or the user's, point uvx to.
-            entryUvSettingsReason([{ where: "its env", variables: { [variable]: path } }], "win32", home);
-            uvSettingsReason({ platform: "win32", env: { [variable]: path }, home, windows });
-            uvSettingsReason({ platform: "win32", env: { UV_CONFIG_FILE: path }, home, windows });
+            // Each stops the cage, named, whatever the path holds: a host without a share too.
+            expect(entryUvSettingsReason([{ where: "its env", variables: { [variable]: path } }], "win32", home), path).toBe(`its env sets ${variable} to ${NETWORK_PATH}, and the cage builds from PyPI only`);
+            expect(uvSettingsReason({ platform: "win32", env: { [variable]: path }, home, windows }), path).toBe(`your environment sets ${variable} to ${NETWORK_PATH}, and the cage builds from PyPI only`);
+            expect(uvSettingsReason({ platform: "win32", env: { UV_CONFIG_FILE: path }, home, windows }), path).toBe(`your environment sets UV_CONFIG_FILE to ${NETWORK_PATH}, and the cage builds from PyPI only`);
             // The PATH `run` looks for docker in, which holds the entry's. Only for this call: mcpcage
             // looks in the user's own PATH for itself (see onPath in installed.ts), whatever it holds.
             vi.stubEnv("PATH", path);
