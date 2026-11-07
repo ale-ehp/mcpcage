@@ -1016,10 +1016,7 @@ function fixFile(file: ScannedFile, targets: ServerReport[], onHost: ServerRepor
   if (file.client === "claude-code" && file.scope === "user" && options.claudeCodeRunning) {
     fixed.refused = "Claude Code is running";
     // Lines the user pastes into a shell: an argument the shell would read stays an argument.
-    const pasted = commands((entry) => {
-      const line = pasteable(shownWords(entry));
-      return line === undefined ? UNPASTEABLE : terminalSafe(line);
-    });
+    const pasted = commands((entry) => pastedLine(shownWords(entry)));
     fixed.changed = [];
     for (const line of pasted) options.log(line);
     options.log(
@@ -1182,8 +1179,10 @@ function shownWords(entry: ServerEntry): string[] {
 
 /**
  * A command line as words to paste into a shell after `claude mcp add <name> --`, so that the shell
- * runs nothing an argument holds and gives each word as it is; undefined on Windows for one that
- * cannot be pasted so. On macOS and Linux a word of plain characters stays as it is, and any other
+ * runs nothing an argument holds and gives each word as it is; undefined for one that cannot be
+ * pasted so. On every system a word that terminalSafe would change cannot: the line is printed
+ * through it, and a line break, U+200B or a C1 control in a word was printed spelled out ('a\nb',
+ * "a[U+009B]b"), so the pasted line gave the server other words than its entry has. On macOS and Linux a word of plain characters stays as it is, and any other
  * goes in single quotes, inside which a POSIX shell (sh, bash, zsh) reads only the quote itself,
  * written '\''. On Windows the line may be pasted into PowerShell or into cmd: a plain word stays as
  * it is, and any other goes in double quotes, inside which PowerShell reads only $, `, " and its
@@ -1196,6 +1195,7 @@ function shownWords(entry: ServerEntry): string[] {
  * in it, for a POSIX shell to run.
  */
 export function pasteable(words: readonly string[], platform: NodeJS.Platform = process.platform): string | undefined {
+  if (words.some((word) => terminalSafe(word) !== word)) return undefined;
   if (platform !== "win32") return words.map((word) => (/^[A-Za-z0-9_@%+,.:/-]+$/.test(word) ? word : `'${word.replace(/'/g, "'\\''")}'`)).join(" ");
   const shown: string[] = [];
   for (const word of words) {
@@ -1206,9 +1206,18 @@ export function pasteable(words: readonly string[], platform: NodeJS.Platform = 
   return shown.join(" ");
 }
 
-/** For a server whose command line pasteable cannot give a shell as it is. */
-const UNPASTEABLE =
-  "one of its arguments is empty, ends with \\, or holds $, `, \", %, ! or a control character, which PowerShell or cmd would read: close Claude Code and run mcpcage protect --fix again";
+/** For a server whose command line pasteable cannot give a shell as it is, by system. */
+const UNPASTEABLE = {
+  posix: "one of its arguments holds a line break or a character the terminal shows differently: close Claude Code and run mcpcage protect --fix again",
+  win32:
+    "one of its arguments is empty, ends with \\, or holds $, `, \", %, !, a line break or a character the terminal shows differently, which PowerShell, cmd or the terminal would change: close Claude Code and run mcpcage protect --fix again",
+} as const;
+
+/** What protect prints for a command line to paste: the line pasteable gives, as terminalSafe shows it, or why there is none. */
+export function pastedLine(words: readonly string[], platform: NodeJS.Platform = process.platform): string {
+  const line = pasteable(words, platform);
+  return line === undefined ? UNPASTEABLE[platform === "win32" ? "win32" : "posix"] : terminalSafe(line);
+}
 
 /**
  * `--api-key sk-...`, `--token=...`, `API_KEY=...`, `Authorization: Bearer ...` and credentials in

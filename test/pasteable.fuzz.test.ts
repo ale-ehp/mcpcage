@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { pasteable } from "../src/protect.js";
-import { terminalSafe, UNPRINTABLE } from "../src/terminal.js";
+import { pastedLine } from "../src/protect.js";
+import { terminalSafe } from "../src/terminal.js";
 import { check, TIMEOUT } from "./fuzz.js";
 
 /*
@@ -47,20 +47,31 @@ const READ_IN_QUOTES = /[$`"“”„%!\u0000-\u001F\u007F]/;
 /** A word neither reads outside quotes: a letter or a digit, then those and _ . : \ / - (PowerShell reads a word that starts with - as a parameter). */
 const PLAIN = /^[A-Za-z0-9][A-Za-z0-9_.:\\/-]*$/;
 
+/** What protect prints instead of a line, by system (see pastedLine). */
+const FALLBACK = {
+  posix: /^one of its arguments holds a line break or a character the terminal shows differently: close Claude Code/,
+  win32: /^one of its arguments is empty, ends with \\, or holds .*: close Claude Code/,
+};
+
+/** Whether the terminal would show a word otherwise than it is: printed so, a pasted line gives the server other words. */
+const shownOtherwise = (word: string) => terminalSafe(word) !== word;
+
 describe("the lines to paste into claude mcp add, fuzzed", () => {
   it.skipIf(process.platform === "win32")(
-    "give /bin/sh back exactly the words, whatever they hold, and print as they are when no word holds what a terminal would act on",
+    "give /bin/sh back exactly the words as printed, or print why not when a word needed it",
     () => {
       check(
         fc.property(words, fc.constantFrom<NodeJS.Platform>("darwin", "linux"), (given, platform) => {
-          const line = pasteable(given, platform);
-          expect(line).toBeDefined();
-          const result = spawnSync("/bin/sh", ["-c", `printf '%s\\0' ${line}`], { encoding: "utf8" });
+          const printed = pastedLine(given, platform);
+          if (FALLBACK.posix.test(printed)) {
+            expect(given.some(shownOtherwise), JSON.stringify(given)).toBe(true);
+            return;
+          }
+          expect(given.some(shownOtherwise), JSON.stringify(given)).toBe(false);
+          // The printed line itself, pasted: the shell gives the program exactly the words.
+          const result = spawnSync("/bin/sh", ["-c", `printf '%s\\0' ${printed}`], { encoding: "utf8" });
           expect(result.status, result.stderr).toBe(0);
-          expect(result.stdout.split("\0").slice(0, -1), JSON.stringify(line)).toEqual(given);
-          // What protect prints is the line through terminalSafe: the same line when no word holds a
-          // character it spells out.
-          if (!given.some((one) => UNPRINTABLE.test(one) || /[\n\r\t]/.test(one))) expect(terminalSafe(line!)).toBe(line);
+          expect(result.stdout.split("\0").slice(0, -1), JSON.stringify(printed)).toEqual(given);
         }),
         100,
         20,
@@ -70,22 +81,23 @@ describe("the lines to paste into claude mcp add, fuzzed", () => {
   );
 
   it(
-    "on Windows give each word as it is to PowerShell and cmd, by the rule pasteable documents, or none when one cannot be",
+    "on Windows give each word as it is to PowerShell and cmd as printed, by the rule pasteable documents, or print why not when a word needed it",
     () => {
       check(
         fc.property(words, (given) => {
-          const line = pasteable(given, "win32");
-          // A word that cannot be pasted so: empty, holding what PowerShell or cmd reads even in double
-          // quotes, or one that needs them and ends with \, which the program reads with the closing quote.
-          const unpasteable = given.some((one) => one === "" || (!PLAIN.test(one) && (READ_IN_QUOTES.test(one) || one.endsWith("\\"))));
-          if (line === undefined) {
+          const printed = pastedLine(given, "win32");
+          // A word that cannot be pasted so: one the terminal would show otherwise, an empty one, one
+          // holding what PowerShell or cmd reads even in double quotes, or one that needs them and ends
+          // with \, which the program reads with the closing quote.
+          const unpasteable = given.some((one) => shownOtherwise(one) || one === "" || (!PLAIN.test(one) && (READ_IN_QUOTES.test(one) || one.endsWith("\\"))));
+          if (FALLBACK.win32.test(printed)) {
             expect(unpasteable, JSON.stringify(given)).toBe(true);
             return;
           }
           expect(unpasteable, JSON.stringify(given)).toBe(false);
-          // Read back by the rule: the same words, each plain, or in quotes with nothing either shell reads there.
-          expect(windowsWords(line), line).toEqual(given);
-          for (const token of line.match(/"[^"]*"|[^ "]+/g)!) {
+          // The printed line read back by the rule: the same words, each plain, or in quotes with nothing either shell reads there.
+          expect(windowsWords(printed), printed).toEqual(given);
+          for (const token of printed.match(/"[^"]*"|[^ "]+/g)!) {
             if (token.startsWith('"')) {
               expect(token.slice(1, -1)).not.toMatch(READ_IN_QUOTES);
               expect(token.endsWith('\\"')).toBe(false);

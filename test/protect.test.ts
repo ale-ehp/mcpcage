@@ -15,7 +15,7 @@ import { cmdNpx, parseLaunch, serverIdFor, type PypiLaunch } from "../src/launch
 import { tooDeep } from "../src/manifest.js";
 import { installScripts } from "../src/npm-scripts.js";
 import { cageHome } from "../src/paths.js";
-import { broadAccessKind, fixConfigs, inspectionSandbox, pasteable, renderReport, scanConfigs, writableMounts, type Inspector } from "../src/protect.js";
+import { broadAccessKind, fixConfigs, inspectionSandbox, pasteable, pastedLine, renderReport, scanConfigs, writableMounts, type Inspector } from "../src/protect.js";
 import { PypiUnsolvable, type PypiResolver } from "../src/pypi.js";
 import { offDrive, parseMount, runArgs } from "../src/sandbox.js";
 import { uvConfigFiles, uvSettingsReason } from "../src/uv-settings.js";
@@ -1918,7 +1918,7 @@ describe("mcpcage protect", () => {
     const result = mcpcageWithEnv(machine.env, "protect", "--project", machine.project, "--offline", "--fix", "--yes", "--no-build", "--command", machine.installed);
     expect(result.stdout).toContain(
       process.platform === "win32"
-        ? "    t: one of its arguments is empty, ends with \\, or holds $, `, \", %, ! or a control character, which PowerShell or cmd would read: close Claude Code and run mcpcage protect --fix again\n"
+        ? "    t: one of its arguments is empty, ends with \\, or holds $, `, \", %, !, a line break or a character the terminal shows differently, which PowerShell, cmd or the terminal would change: close Claude Code and run mcpcage protect --fix again\n"
         : `    t: ${machine.installed} run -- uvx mcp-server-time --local-timezone '$(id)'\\''"\`x\`'\n`,
     );
     expect(result.stdout).toContain("or add the servers again with claude mcp add using the commands above");
@@ -1939,6 +1939,25 @@ describe("mcpcage protect", () => {
     const windows = ["C:\\Program Files\\nodejs\\node.exe", "C:\\npm\\cli.js", "run", "--", "npx", "-y", "@acme/x@1.0", "a&calc", "b|more", "f^g", "(h)", "i'j", "k;l", "q r", "1.0", "C:\\dir\\"];
     expect(pasteable(windows, "win32")).toBe('"C:\\Program Files\\nodejs\\node.exe" C:\\npm\\cli.js run "--" npx "-y" "@acme/x@1.0" "a&calc" "b|more" "f^g" "(h)" "i\'j" "k;l" "q r" 1.0 C:\\dir\\');
     for (const word of ["a$b", "a%b%", "a!b", 'a"b', "", "C:\\My Notes\\", "a`b", "a\u201Cb", "a\nb"]) expect(pasteable(["npx", word], "win32"), JSON.stringify(word)).toBeUndefined();
+  });
+
+  it("prints no line to paste when a word holds what the terminal would show otherwise, but says why, on every system", () => {
+    // What protect prints goes through terminalSafe: a line break, U+200B or a C1 control in a word was
+    // printed spelled out ('a\nb', "a[U+009B]b"), and the pasted line gave the server other words.
+    const POSIX = "one of its arguments holds a line break or a character the terminal shows differently: close Claude Code and run mcpcage protect --fix again";
+    const WINDOWS = "one of its arguments is empty, ends with \\, or holds $, `, \", %, !, a line break or a character the terminal shows differently, which PowerShell, cmd or the terminal would change: close Claude Code and run mcpcage protect --fix again";
+    for (const word of ["a\nb", "a\rb", "a\tb", "a\u200bb", "a\u202eb", "a\u009bb", "a\u2028b", "a\ufe0fb"]) {
+      for (const platform of ["darwin", "linux"] as const) {
+        expect(pasteable(["uvx", "x", word], platform), `${platform} ${JSON.stringify(word)}`).toBeUndefined();
+        expect(pastedLine(["uvx", "x", word], platform)).toBe(POSIX);
+      }
+      expect(pasteable(["uvx", "x", word], "win32"), JSON.stringify(word)).toBeUndefined();
+      expect(pastedLine(["uvx", "x", word], "win32")).toBe(WINDOWS);
+    }
+    // A word the terminal shows as it is: the line itself, as before.
+    expect(pastedLine(["uvx", "x", "a b\u00e9"], "linux")).toBe("uvx x 'a b\u00e9'");
+    expect(pastedLine(["uvx", "x", "a b\u00e9"], "win32")).toBe('uvx x "a b\u00e9"');
+    expect(pastedLine(["uvx", "x", "a$b"], "win32")).toBe(WINDOWS);
   });
 
   it("wrap --dry-run takes a Devin project file like a Cursor file and writes nothing", () => {
