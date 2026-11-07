@@ -34,6 +34,7 @@ Send a pull request against `main`. For a large change, open an issue first, so 
 agreed before the code is written. The [ci workflow](.github/workflows/ci.yml) runs the typecheck and
 the tests on Linux and Windows, and the lint and the Docker tests on Linux, and CodeQL analyses the
 code; all of them must pass. The maintainer reviews every pull request before it is merged.
+[GOVERNANCE.md](GOVERNANCE.md) says how decisions are made and what each role does.
 
 ## What a change needs
 

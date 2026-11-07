@@ -765,7 +765,8 @@ which the workflow cannot give.
 Bugs and feature requests: [GitHub issues](https://github.com/ale-ehp/mcpcage/issues).
 Vulnerabilities: privately, as [SECURITY.md](SECURITY.md) says. Changes: pull requests against
 `main`, each with a test that fails without it; [CONTRIBUTING.md](CONTRIBUTING.md) says how to build
-and test, and what else a change needs.
+and test, and what else a change needs. [GOVERNANCE.md](GOVERNANCE.md) says how decisions are made
+and who does what.
 
 ## Security
 
