@@ -183,6 +183,9 @@ const INSTALL_KEYS: ReadonlyMap<string, string> = new Map([
   ["dependency-metadata", "uvx installs other dependencies there than the cage builds"],
   ["no-binary", FROM_SOURCE],
   ["no-binary-package", FROM_SOURCE],
+  // As UV_INSECURE_HOST and --allow-insecure-host, which are refused: uv 0.13.7 put the host of
+  // allow-insecure-host = ["pypi.org"] in its allow_insecure_host (`uv tool run --show-settings`).
+  ["allow-insecure-host", "uvx turns off certificate checks for a host there, which only another index or a proxy needs"],
 ]);
 
 /**

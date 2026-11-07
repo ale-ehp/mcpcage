@@ -21,7 +21,7 @@ import { check, TIMEOUT } from "./fuzz.js";
 
 /** The keys that name a package index, and those that change what uvx installs (INDEX_KEYS and INSTALL_KEYS in uv-settings.ts). */
 const INDEX_KEYS = ["index", "index-url", "extra-index-url", "default-index", "find-links", "no-index", "index-strategy", "keyring-provider", "torch-backend"];
-const INSTALL_KEYS = ["resolution", "prerelease", "prerelease-package", "exclude-newer", "exclude-newer-package", "dependency-metadata", "no-binary", "no-binary-package"];
+const INSTALL_KEYS = ["resolution", "prerelease", "prerelease-package", "exclude-newer", "exclude-newer-package", "dependency-metadata", "no-binary", "no-binary-package", "allow-insecure-host"];
 
 /** A value of its type for each refused key, as uv 0.13.7 takes it. */
 const REFUSED_VALUES: Readonly<Record<string, readonly string[]>> = {
@@ -42,6 +42,7 @@ const REFUSED_VALUES: Readonly<Record<string, readonly string[]>> = {
   "dependency-metadata": ['[{ name = "idna", version = "3.10", requires-dist = ["six"] }]'],
   "no-binary": ["true"],
   "no-binary-package": ['["idna"]', '[\n  "idna",\n]'],
+  "allow-insecure-host": ['["pypi.org"]', "['files.pythonhosted.org:443']"],
 };
 
 /** The refused keys uv also reads as a table of their own, with a body of their type. */

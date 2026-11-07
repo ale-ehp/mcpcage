@@ -97,6 +97,9 @@ describe("the scan of a uv.toml for what else uvx installs otherwise", () => {
       // uv 0.13.7 installed httpx 1.0.dev6 with it too, for that package alone.
       ['prerelease-package = { httpx = "allow" }', versions("prerelease-package")],
       ['prerelease-package.httpx = "allow"', versions("prerelease-package")],
+      // As UV_INSECURE_HOST and --allow-insecure-host: uv 0.13.7 put the host in its allow_insecure_host.
+      ['allow-insecure-host = ["pypi.org"]', "set allow-insecure-host: uvx turns off certificate checks for a host there, which only another index or a proxy needs"],
+      ['[tool.uv]\nallow-insecure-host = ["pypi.org"]', "set allow-insecure-host: uvx turns off certificate checks for a host there, which only another index or a proxy needs"],
       ['[[dependency-metadata]]\nname = "idna"\nversion = "3.10"\nrequires-dist = ["six"]', "set dependency-metadata: uvx installs other dependencies there than the cage builds"],
       ['dependency-metadata = [{ name = "idna", version = "3.10", requires-dist = ["six"] }]', "set dependency-metadata: uvx installs other dependencies there than the cage builds"],
       ["no-binary = true", source("no-binary")],
