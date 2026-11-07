@@ -787,6 +787,40 @@ and who does what. Everyone who takes part follows the [Code of Conduct](CODE_OF
 
 Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
+### Verifying a release
+
+Releases are signed with Sigstore keyless signing by the
+[release workflow](.github/workflows/release.yml): the job proves its identity with GitHub's OIDC
+token and gets a short-lived certificate for it, so there is no long-lived signing key to keep or
+to leak. npm and `gh` fetch Sigstore's public trust root themselves.
+
+Every version on npm, from 0.2.0 on, carries npm provenance. After installing, in the project that
+installed mcpcage:
+
+```bash
+npm audit signatures
+```
+
+It checks npm's registry signature of each installed package and its provenance attestation. In a
+project with mcpcage alone it prints `1 package has a verified registry signature` and
+`1 package has a verified attestation`.
+
+Every GitHub release, from 0.6.1 on, attaches the package, its signed provenance as
+`mcpcage-<version>.tgz.sigstore.json` and the SLSA provenance statement itself as
+`mcpcage-<version>.intoto.jsonl`. To check the package of a release:
+
+```bash
+gh release download v<version> -R ale-ehp/mcpcage -p 'mcpcage-<version>.tgz*'
+gh attestation verify mcpcage-<version>.tgz --repo ale-ehp/mcpcage
+```
+
+This looks the attestation up in GitHub's attestation store. Add
+`--bundle mcpcage-<version>.tgz.sigstore.json` to check it against the file attached to the release
+instead. Either way it succeeds only for a package whose provenance was signed by a GitHub Actions
+workflow of ale-ehp/mcpcage, and it names the workflow and tag that built it:
+`.github/workflows/release.yml@refs/tags/v<version>`. Add
+`--signer-workflow ale-ehp/mcpcage/.github/workflows/release.yml` to require that workflow.
+
 ## License
 
 [Apache-2.0](LICENSE)
