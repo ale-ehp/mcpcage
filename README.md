@@ -814,9 +814,9 @@ gh release download v<version> -R ale-ehp/mcpcage -p 'mcpcage-<version>.tgz*'
 gh attestation verify mcpcage-<version>.tgz --repo ale-ehp/mcpcage
 ```
 
-This looks the attestation up in GitHub's attestation store. Add
+This looks the attestation up in GitHub's attestation store. From 0.6.2 on, add
 `--bundle mcpcage-<version>.tgz.sigstore.json` to check it against the file attached to the release
-instead. Either way it succeeds only for a package whose provenance was signed by a GitHub Actions
+instead (0.6.1's file is npm's provenance bundle, which `npm audit signatures` checks). Either way it succeeds only for a package whose provenance was signed by a GitHub Actions
 workflow of ale-ehp/mcpcage, and it names the workflow and tag that built it:
 `.github/workflows/release.yml@refs/tags/v<version>`. Add
 `--signer-workflow ale-ehp/mcpcage/.github/workflows/release.yml` to require that workflow.
