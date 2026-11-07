@@ -265,3 +265,128 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   left for the user to edit by hand, and `~/.claude.json` is left alone while Claude Code is
   running, because Claude Code rewrites it while it runs. `protect` prints the exact command to
   put in the file instead.
+
+## Assurance case
+
+Why mcpcage meets its security requirements, in four parts: the threat model ([Assets](#assets) and
+[Adversaries in scope](#adversaries-in-scope)), the [trust boundaries](#trust-boundaries), and the
+two sections below, on how the code applies secure design principles and how it counters common
+implementation weaknesses. What it does not defend against is in
+[Out of scope, and residual risks](#out-of-scope-and-residual-risks). Each pointer names the file
+and the function that does the work; the tests for it are in `test/`, and the property-based tests
+(`test/*.fuzz.test.ts`) throw generated input at the parts that read untrusted data.
+
+### Secure design principles
+
+The principles of Saltzer and Schroeder, and defense in depth.
+
+- **Least privilege.** A server gets only what it is given: no network, a read-only root, no
+  capabilities, no new privileges, user 65532, 128 processes, 512 MB of memory and 1 CPU by
+  default, and only `HOME=/tmp` and the variables named with `--env` (`runArgs` in
+  [src/sandbox.ts](src/sandbox.ts)). The images it runs have no shell and no package manager
+  (`dockerfile` in src/sandbox.ts, `pypiDockerfile` in [src/pypi.ts](src/pypi.ts)). The docker and
+  npm that mcpcage starts on the host get an environment built from names known to be safe, not a
+  copy of mcpcage's own (`trustedEnv` in src/sandbox.ts). mcpcage's store is readable by the user
+  only: directories 0700, files 0600 (`writeJson` in [src/pinstore.ts](src/pinstore.ts), `AuditLog`
+  in [src/audit.ts](src/audit.ts)).
+- **Fail-safe defaults.** What is not allowed explicitly is refused. The network is off unless
+  `--allow-net` (`runArgs`). A mount is read-only unless it ends in `:rw` (`mountPath` in
+  src/sandbox.ts), and a sensitive one is refused unless `--allow-sensitive-mount` (`parseRun` in
+  [src/cli.ts](src/cli.ts), `sensitivePath` in [src/sensitive.ts](src/sensitive.ts)). Without Docker
+  the server does not start, rather than run on the host (`prepareSandbox` in src/sandbox.ts). A
+  request from the server other than `ping` and `roots/list` gets an error unless
+  `--allow-server-requests` (`serverRequest` in `runProxy`, [src/proxy.ts](src/proxy.ts)). A new or
+  changed tool blocks the listing and locks the session (`blockChanged` in `runProxy`). Where a
+  check cannot be made, the answer is no: `protect` exits 1 for a configuration file it could not
+  check, and uv settings that cannot be read count as settings that name another index
+  ([Adversaries in scope](#adversaries-in-scope)).
+- **Complete mediation.** Every message between client and server passes through the proxy, which
+  decides on each one (`runProxy`). Every `tools/call`, a call sent as a notification included, is
+  checked against the approved manifest under its exact name (`own` in
+  [src/manifest.ts](src/manifest.ts)); every page of `tools/list` is compared with the pin; every
+  line from the server is kept only if it is JSON-RPC that answers a request the client is waiting
+  for, a notification or an allowed request (`fromServerLine` and `fromServer` in `runProxy`). The
+  checks on mounts and uv settings run at every start, not only when an entry is written
+  (`parseRun`, `withSettingsReadOnly` and `prepareSandbox`).
+- **Economy of mechanism.** No runtime dependencies: package.json has no `dependencies`. A change to
+  a tool is found by one comparison, of the SHA-256 of the canonical JSON of everything the model
+  reads about it (`toolFingerprint` in src/manifest.ts, `canonicalJson` in
+  [src/canonical.ts](src/canonical.ts)). The block comes from that comparison, not from the rules.
+- **Open design.** Nothing depends on a secret. The source is public, the rules are fixed and
+  published ([README.md](README.md#how-it-works), [src/suspicious.ts](src/suspicious.ts)), and the
+  audit chain uses plain SHA-256 without a key (`AuditLog`), whose limit is stated under
+  "Deleting the audit log" above.
+- **Separation of privilege.** A new or changed tool takes two steps: the proxy saves it as pending,
+  and only a person running `mcpcage approve` adds it to the pin, after a confirmation unless
+  `--yes` (`savePending` and `approvePending` in src/pinstore.ts, `approve` in src/cli.ts).
+  `protect --fix` asks for the word `yes` before it writes (`protect` in src/cli.ts). A release
+  takes two steps too: the workflow stages it on npm, and npm serves it only once the maintainer
+  approves it with two-factor authentication ([CONTRIBUTING.md](CONTRIBUTING.md#releasing)).
+- **Least common mechanism.** Each session of a server runs in its own container, with a random
+  name, removed on exit (`--rm` and `--name` in `runArgs`). Each server has its own directories for
+  pins and audit logs (`serverDir` and `auditDir` in [src/paths.ts](src/paths.ts)), and no cage gets
+  mcpcage's store (`sensitivePath`).
+- **Psychological acceptability.** One command finds and cages the servers of every client
+  (`protect --fix`), with the plan printed first. What a server wrote is shown with every invisible
+  character spelled out, so the reviewer reads what the model reads (`terminalSafe` in
+  [src/terminal.ts](src/terminal.ts)), and each sign of hidden instructions comes with one sentence
+  for a non-expert (src/suspicious.ts).
+- **Defense in depth.** The cage limits what a server reaches, the pin blocks changed definitions,
+  the rules point at signs of hidden instructions, and the audit log records what happened. One
+  failing does not leave the user open: a package malicious from the start passes the pin, which
+  trusts its first listing, but not the cage. Single checks are doubled where a mistake would be
+  costly: a server id must be a plain name (`checkServerId`) and the directory it leads to is
+  checked again to be inside the store (`inStore`, both in src/paths.ts); a configuration file's
+  type is checked before it is opened and again, with its size, on what was opened (`readConfigFile`
+  in [src/clients.ts](src/clients.ts)).
+
+### Common weaknesses
+
+The [2024 CWE Top 25](https://cwe.mitre.org/top25/archive/2024/2024_top25_list.html), each with what
+mcpcage does against it, or why it does not apply. mcpcage is a TypeScript program for Node.js with
+no native code, no web interface, no database and no network listener. CodeQL with the
+`security-extended` queries analyses every push to `main`, every pull request and the code once a
+week ([codeql workflow](.github/workflows/codeql.yml)).
+
+| Rank | Weakness | Applies | What mcpcage does |
+|---|---|---|---|
+| 1 | CWE-79 Cross-site scripting | No | mcpcage makes no web pages. The terminal's equivalent, a server's text with escape sequences that rewrite what the user reads, is countered: everything a server wrote is printed through `terminalSafe` (src/terminal.ts), which spells out control, format and invisible characters. |
+| 2 | CWE-787 Out-of-bounds write | No | JavaScript on Node.js is memory-safe, and mcpcage has no native addons and no runtime dependencies that could bring one. |
+| 3 | CWE-89 SQL injection | No | There is no database: pins, pending changes and audit logs are JSON files. |
+| 4 | CWE-352 Cross-site request forgery | No | mcpcage serves no HTTP and listens on no port; the client talks to it over stdio. |
+| 5 | CWE-22 Path traversal | Yes | A server id names a directory of the store: it must be a plain name (`checkServerId`), and the directory is checked again to be inside the store (`inStore`, src/paths.ts), so `--id ../../x` is refused. A mount is resolved as Docker resolves it, `..` included, before it is checked (`hostMount`, src/sandbox.ts), and `sensitivePath` (src/sensitive.ts) resolves `~`, `..` and symlinks before it decides whether a path would undo the cage. See "What you mount or allow" and "Hard links" under [Out of scope, and residual risks](#out-of-scope-and-residual-risks). |
+| 6 | CWE-125 Out-of-bounds read | No | As CWE-787. |
+| 7 | CWE-78 OS command injection | Yes | Every program mcpcage starts is spawned with an array of arguments and no shell (`runProxy` in src/proxy.ts, `docker` in src/sandbox.ts, `runNpm` in [src/npm-scripts.ts](src/npm-scripts.ts), `listTools` in [src/inspect.ts](src/inspect.ts)). On Windows, where a batch file starts only through `cmd.exe`, one is refused as the host command (`onHost`, src/cli.ts), and npm and npx run as the node that runs mcpcage with npm's own scripts (`npmProgram`, `npxProgram` in src/sandbox.ts). An entry whose arguments `cmd.exe` would read again is reported (`cmdWouldRead` in [src/launch.ts](src/launch.ts)); see "A `.cmd`/`.bat` mcpcage entry whose arguments cmd re-reads" above. In the Dockerfiles mcpcage writes, the npm package is shell-quoted (`shellQuote` in `prepareNpmImage`, src/sandbox.ts) and every `RUN` of a PyPI image is in exec form (`pypiDockerfile`). A command line printed for the user to paste is quoted for the shell, or not offered (`pasteable` in [src/protect.ts](src/protect.ts)). |
+| 8 | CWE-416 Use after free | No | As CWE-787. |
+| 9 | CWE-862 Missing authorization | Yes | A tool call reaches the server only if the tool is in the approved manifest; before anything is approved, every call is refused (`runProxy`). A request from the server to run the model or to question the user needs `--allow-server-requests` (`serverRequest`). |
+| 10 | CWE-434 Unrestricted upload of a dangerous file | No | mcpcage takes no uploads. A server writes on the host only in a mount given as writable: see "Writable mounts" above. |
+| 11 | CWE-94 Code injection | Yes | Nothing a server or a configuration sends is evaluated: there is no `eval`, `new Function` or `vm` on input. Install scripts never run (`--ignore-scripts` in `prepareNpmImage`); a PyPI package is installed from wheels only, and Python runs in the build only as `python -I -S`, so no `.pth` file runs (`pypiDockerfile`). `wrap` and `protect --fix` move the variables that would make mcpcage, node, docker or npm load code on the host (`NODE_OPTIONS`, `LD_PRELOAD`, `BASH_ENV`...) into the cage (`hostVariable` in [src/config.ts](src/config.ts)), and docker and npm get an environment of safe names only (`trustedEnv`); see the rows on `env` in [Adversaries in scope](#adversaries-in-scope). |
+| 12 | CWE-20 Improper input validation | Yes | What a server sends is checked by its shape before it is used: JSON-RPC (`parseValues` and `isJsonRpc` in src/proxy.ts), a tool list (`isToolList` in src/manifest.ts), and the lock uv writes, where only pins with their hashes pass (`checkLock` in src/pypi.ts). Options are parsed strictly (`parseArgs` with `strict: true` in `parseRun`), and `--memory` and `--cpus` must be positive. The property-based tests throw generated input at these readers. |
+| 13 | CWE-77 Command injection | Yes | Besides CWE-78: the arguments of `docker run` are separate items of an array, and a mount path with a comma, which would add options to Docker's `--mount` value, is refused (`hostMount`). npx and uvx flags that mcpcage does not know are refused, not passed on (`parseLaunch` and `parseUvx` in src/launch.ts). |
+| 14 | CWE-287 Improper authentication | No | mcpcage has no accounts or logins: it runs as the user who started it ([trust boundary](#trust-boundaries) 1). Releases are published without a stored npm token, through the release job's OIDC token, and each version needs the maintainer's two-factor approval. |
+| 15 | CWE-269 Improper privilege management | Yes | The server runs as user 65532 with every capability dropped and `no-new-privileges` (`runArgs`); the images mcpcage builds set that user themselves (`dockerfile`, `pypiDockerfile`). mcpcage needs no privilege beyond the user's access to Docker. |
+| 16 | CWE-502 Deserialization of untrusted data | Yes | Untrusted data is read only with `JSON.parse`, into plain values. Keys a server chooses are stored in objects without a prototype (`sortKeys` in src/canonical.ts, `pinTools` in src/manifest.ts) and looked up as own properties only (`own`), so a tool or key named `__proto__` or `constructor` neither changes a prototype (CWE-1321) nor matches an inherited property. |
+| 17 | CWE-200 Exposure of sensitive information | Yes | The audit log records a call's tool, the SHA-256 of its arguments and their keys, never their values, and of a result only success and size (`runProxy`, `AuditLog`). `protect` names the secrets it finds in configurations and never prints their values (`secretNames` and `looksLikeSecret` in src/protect.ts). A server gets none of the host's environment except the variables named for it (`runArgs`). |
+| 18 | CWE-863 Incorrect authorization | Yes | A call passes only for a tool approved under that very name, which must be a string and is looked up as an own property (`own`), and only while the session is not locked (`runProxy`). Trust on first use covers the first listing only: a later page, or a page for a cursor the server did not issue in that listing, is compared with the pin, and no page replaces an approved definition (`checkFirstListing` and `checkTools` in src/manifest.ts). |
+| 19 | CWE-918 Server-side request forgery | Partly | mcpcage fetches nothing from an address a server chooses: it reaches the npm registry and PyPI only, through npm, uv and docker, to build images and look up install scripts, and a caged server has no network unless `--allow-net`. The nearest risk is a path in a configuration that names another machine, which on Windows hands that host the user's NTLM response when looked at: such a path is told by its text and never opened (`networkPath` in [src/network-path.ts](src/network-path.ts)); see the row on paths on another machine in [Adversaries in scope](#adversaries-in-scope). |
+| 20 | CWE-119 Memory buffer bounds | No | As CWE-787. |
+| 21 | CWE-476 NULL pointer dereference | Partly | There are no pointers. Reading a property of `null` or `undefined`, the nearest error, is caught at compile time by TypeScript's `strict` and `noUncheckedIndexedAccess` ([tsconfig.json](tsconfig.json)), and input from a server is checked by its shape first (CWE-20). |
+| 22 | CWE-798 Hard-coded credentials | No | The code holds no credentials, and the [release workflow](.github/workflows/release.yml) publishes with npm trusted publishing, without a stored token. |
+| 23 | CWE-190 Integer overflow | No | JavaScript numbers are exact up to 2^53, and the sizes mcpcage counts (bytes of a line, tools, levels of nesting) stay far below that. |
+| 24 | CWE-400 Uncontrolled resource consumption | Yes | A line from a server is never held past 16 MiB (`LineSplitter` and `MAX_LINE_BYTES` in [src/lines.ts](src/lines.ts)). A listing of more than 10,000 tools, or nested more than 256 levels deep, is refused before anything walks it (`MAX_TOOLS`, `MAX_DEPTH` and `nestedDeeperThan` in src/manifest.ts). The rules stop after 20,000 strings or 32 Mi characters (`scanWithinBudget` in src/suspicious.ts). mcpcage stops reading the server while the client is behind (`toClient` in `runProxy`), queues at most 1 MiB of log lines (`boundedLog` in src/terminal.ts) and reads configuration files of up to 16 MiB (`readConfigFile`). The container has memory, CPU and process limits (`runArgs`). The audit log has no rate limit: see "The rate of log entries" above. |
+| 25 | CWE-306 Missing authentication for a critical function | No | mcpcage offers no function over a network: the client that started it is the only party on its stdin, and the user at the terminal approves changes ([trust boundary](#trust-boundaries) 1). |
+
+Three weaknesses outside the Top 25 matter here too:
+
+- **CWE-367, time of check to time of use.** A configuration file is checked again on the opened
+  descriptor (`readConfigFile`). A rewritten configuration is written to a new temporary file and
+  renamed over the old one, and its backup is created with a flag that fails if the name exists
+  (`replaceFile` and `createBackup` in src/config.ts). The race that remains between two cages is
+  "Two cages writing in one directory" above.
+- **CWE-117, log injection.** Each line a server writes to its stderr reaches the client's log after
+  the server's id in brackets, with control characters spelled out, so it cannot pass for a line of
+  mcpcage's (`relay` in `runProxy`).
+- **CWE-494, code downloaded without an integrity check.** An npm server is rebuilt from its
+  lockfile with `npm ci`, which checks every integrity hash (`prepareNpmImage`); a PyPI server is
+  installed with `uv pip sync --require-hashes` (`pypiDockerfile`); and every base image must be
+  pinned by digest, or mcpcage refuses to start (`readBases` in src/sandbox.ts).
