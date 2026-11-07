@@ -3,6 +3,147 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-07
+
+Python servers. A server started with `uvx` from PyPI is caged as an `npx` one is: resolved into a
+lock with every package's hash, then installed from wheels only, so no package's code runs while
+its image is built, on your machine or in Docker.
+
+### Security
+
+- Windows: mcpcage looked at paths a configuration entry names before deciding anything about it:
+  its `envFile`, its `command` (and the node and `cli.js` of a caged entry), the directories of its
+  `PATH`, its mount and argument paths, the `.git` file in a mounted folder. Windows opens a
+  `\\host\share` or `//host/share` path by connecting to that host over SMB, and authenticates with
+  the credentials of your session (NTLM). So an entry in a cloned repository's `.vscode/mcp.json`,
+  or one written by any program, handed its author's host your NTLM response as soon as
+  `mcpcage protect` read it: on a Windows 10 PC, looking at an `envFile` or a `command` on a share
+  opened TCP connections to port 445 of the machine that served it. mcpcage now tells such a path
+  by its text alone, after the variables it fills in (any path that starts with two slashes or
+  backslashes, in any mix: `\\server\share`, `//server/share`, `\\?\UNC\...`, `\\.\...`), and never
+  looks at it: the entry is not counted as caged, `wrap` and `--fix` leave it as it is ("one of its
+  args is a network path, which mcpcage does not open"), and `run` refuses such a mount. The uv
+  settings that 0.7.0 reads for uvx entries follow the same rule: an `APPDATA`, `USERPROFILE`,
+  `PROGRAMDATA`, `SYSTEMDRIVE` or `UV_CONFIG_FILE` that points at a share, or at a host without a
+  share (`\\host`), stops the cage instead of being read ("its env sets APPDATA to a network path,
+  which mcpcage does not open, ..."). Your own AppData folder, where Windows' folder redirection
+  puts it on a share, is still read, as every program of your session reads it. On macOS a path
+  under `/net/<host>` is left alone the same way: where the automounter's `-hosts` map is turned on
+  (it is not by default), looking there mounts that host over NFS. A symlink or a junction on a
+  local disk that points at a share is not seen by a test of the text. Every published version up
+  to 0.6.4 is affected. Advisory:
+  [GHSA-ghcm-rm79-6w6g](https://github.com/ale-ehp/mcpcage/security/advisories/GHSA-ghcm-rm79-6w6g).
+
+### Added
+
+- uvx servers. `run`, `prepare`, `wrap`, `protect --fix` and `protect --inspect` take a server
+  started with `uvx <package>`, `uvx --from <package> <command>`, `uv tool run` or `uv tool uvx`,
+  uvx by its full path, and on Windows a plain `cmd /c uvx ...` (kept after `--`, so that `unwrap`
+  gives the entry back as it was, as for `cmd /c npx`). The package is a name with optional extras
+  and versions; `pkg@1.2` is `pkg==1.2`, and `pkg@latest` takes the newest release. `--with`,
+  `--python` (3.10 to 3.15), `--prerelease` and `--exclude-newer` are read, and so are `UV_PYTHON`,
+  `UV_PRERELEASE` and `UV_EXCLUDE_NEWER`; flags that only tune uv's cache, output or interpreter
+  lookup on the host are ignored. A plain date given to `--exclude-newer` is the next midnight in
+  your time zone, as uv reads it on the host. A server's id leaves out its version, extras, `--with`
+  and `--python`, so an upgrade is compared with the tools you approved. `run --no-sandbox` still
+  starts a uv line on the host as written, under the id it had. See
+  [Python servers](README.md#python-servers).
+- How a uvx server is built. The resolve runs `uv pip compile --no-build` in a container of uv's
+  image, pinned by digest, hardened as the cage is but with the network on for PyPI, with no host
+  file and none of the entry's variables. It pins the server's own release first, so that a
+  dependency without a wheel cannot move it back to an old release (`dbt-mcp` 2.10.1 became 0.2.1
+  so), then locks every package with its sha256 hashes. The image is built from that lock with
+  `uv pip sync --require-hashes --no-build` on a distroless base, with no shell and no pip, and runs
+  as 65532. Python is 3.13 unless the line asks for another, raised to 3.14 or 3.15 when the newest
+  release needs it, with a line saying so ("Python 3.14 for windows-mcp 0.8.8, which needs it (on
+  Python 3.13 it would be 0.8.5)"). The lock is reused until `--rebuild`, or a change in what
+  decides the install, so `@latest` stays at the release of the first build; a lock kept in the
+  store is checked again before each build as a fresh one is.
+- What is refused, with the reason, naming a flag or a variable and never its value: a server
+  whose packages are not all on PyPI as wheels ("dbt-mcp cannot be installed from PyPI wheels on
+  Python 3.13 for Linux on ARM (linux/arm64), and the cage never builds a package from source:" and
+  uv's reason); a git, URL or path source, `--with-editable`, `--with-requirements`; another index
+  (`--index-url`, `UV_INDEX_URL`...); a file on your machine (`--constraints`, `--env-file`, an
+  entry's `UV_CONFIG_FILE`...); a build from source or for another platform (`--no-binary`,
+  `--python-platform`...); a package that uvx reads as a Python interpreter to start (`python3.13`,
+  `pypy`, `pyodide`); and uv settings, yours, the system's or those an entry's variables point uvx
+  to (`uv.toml` under `~/.config/uv`, `/etc/xdg/uv`, `/etc/uv`, `%APPDATA%\uv`, `%PROGRAMDATA%\uv`,
+  or the file `UV_CONFIG_FILE` names), that name an index or change what uvx installs
+  (`resolution`, `prerelease`, `exclude-newer`, `dependency-metadata`, `no-binary`,
+  `allow-insecure-host`...): "your uv settings (~/.config/uv/uv.toml) name a package index, and the
+  cage builds from PyPI only".
+- `wrap` and `protect --fix` resolve each uvx server before they write its entry. One that uv finds
+  no solution for is left as it is, with uv's reason; one whose resolve fails for another reason
+  (Docker stopped, no network) is written with a note, and resolved at its first start. Nothing is
+  kept in mcpcage's store until you answer yes, and the image is built from the lock the plan made.
+  `--no-build` skips the resolve and says so.
+- `protect --inspect` starts uvx servers in the cage, and names a package that ships no wheel
+  ("builds from source: uuid 1.30 ships no wheel (uvx runs its build code with your permissions when
+  it installs it); mcpcage installs wheels only"), counted in its own summary line.
+- `prepare` prints the Python and the wheels' platform ("python 3.13.18, wheels for
+  aarch64-manylinux_2_40"), and `run` writes the package, its version, the Python, the platform and
+  the uv release into the audit log's sandbox entry.
+- `doctor` prints the four PyPI base images with their digests, after the npm ones.
+- The first resolve on a machine says that it is pulling uv's image, once, instead of waiting
+  without a word.
+- [Compatibility](docs/compatibility.md): the 39 Python MCP servers started with `uvx` that PyPI
+  counts the most downloads for, run through the cage on macOS and Linux, 9 of them on Windows. On
+  the Mac 26 work with the defaults, 3 need `--allow-net`, 6 fail (outside mcpcage too, or because
+  they check dummy keys against their service), and 4 are refused for a package without a wheel;
+  on Linux, 27 work, since one of the 4 has its wheel for x86_64 only. `npm run compat -- --runner
+  uvx` runs them, and the weekly workflow runs all 63 servers.
+- Property-based tests of the uvx line reader, the uv settings scan, the lock check, network paths
+  on Windows, the lines to paste into `claude mcp add` (run through `/bin/sh`) and the build output.
+  Mutation scores of the files 0.7 added or changed the most: `pypi.ts` 92.5%, `uv-settings.ts`
+  92.6%, `network-path.ts` 100%, `windows-places.ts` 87.0%, `terminal.ts` 85.9%, and 71% for the
+  uvx parts of `protect.ts`, whose report wording the CLI tests check from a process Stryker cannot
+  see.
+
+### Changed
+
+- `protect` reports a uvx entry (`uvx`, `uv tool run`, `uv tool uvx`, `cmd /c uvx`) as NOT CAGED,
+  with what it asks PyPI for ("asks PyPI for: mcp-server-time") or why it cannot be caged, and
+  `--fix` cages it. 0.6 said "uvx, not supported yet" and counted it with the remote and
+  containerized servers. So the exit code counts uvx entries: `protect` exits 1 on a machine with
+  an uncaged uvx server, where 0.6 exited 0, and `protect --fix` exits 1 when one it could not cage
+  is left. A script that gates on `protect` may change result.
+- Any other program is reported as "<program>, not npx or uvx: cannot be caged yet".
+
+### Fixed
+
+- `protect` called caged an entry whose line after `--` `mcpcage run` refuses at every start: a
+  program that is neither npx nor uvx (`run -- node server.js`), `run -- npx -p x y`, a bare
+  `mcpcage run`. Such an entry is now "cannot start:" with run's reason, is not counted as caged,
+  the summary counts it ("N cannot start: mcpcage run refuses its command line, for the reason
+  shown above."), and `--fix` leaves it with the reason.
+- macOS: an entry that starts `NPX` (or `UVX`) in another case was "another command", so
+  `protect` exited 0 and `--fix` had nothing to change, though APFS finds `npx` by that name and
+  the server ran on the host. npx and uvx are now compared without case on macOS, as on Windows.
+- The lines `protect --fix` prints to paste into `claude mcp add`, while Claude Code is running,
+  were the report's command column: an argument holding `$(id)` and backquotes was printed as it is,
+  and pasted into a shell it ran `id`. Each word is now quoted for the shell (POSIX single quotes on
+  macOS and Linux; double quotes on Windows, for PowerShell and cmd). A server with a word that no
+  quoting gives back unchanged, or that the terminal would show otherwise (a line break, an
+  invisible or bidi character), gets "close Claude Code and run mcpcage protect --fix again" in
+  place of a line.
+- What `docker build` and `docker pull` printed went straight to the terminal: the classic builder
+  wraps a step's stderr in color codes, and a package's own messages (npm's deprecation notes quote
+  the package's author) could move the cursor, clear the screen or retitle the window. The output
+  now goes through mcpcage a line at a time, color codes taken out and control characters spelled
+  out, while the build runs.
+- With Docker's classic builder (Colima), a build whose step failed left that step's container, and
+  the images it holds. Both builds now pass `--force-rm`.
+- A writable mount of uv's or pipx's directories was allowed, for npx servers too: a caged server
+  could replace what uvx or pipx then runs on the host, or name the index uvx installs from. They
+  are now among the places never mounted without `--allow-sensitive-mount`: uv's cache, tools,
+  Pythons and settings (`~/.cache/uv`, `~/.local/share/uv`, `~/.config/uv`, on macOS also
+  `~/Library/Caches/uv` and `~/Library/Application Support/uv`, on Windows `%LOCALAPPDATA%\uv` and
+  `%APPDATA%\uv`), the directory of the programs uv installs, pipx's home, cache, programs and
+  shell completions, `/opt/pipx`, and wherever `UV_*`, `PIPX_*` and `XDG_*` variables move them.
+- A credential in an address of a uv variable (`UV_INDEX_URL=https://user:<password>@...`) was not
+  counted as a secret in clear text, while the same address given as an argument was. It is now,
+  in an entry's `env` and in a caged entry's `--env NAME=value`.
+
 ## [0.6.4] - 2026-11-05
 
 ### Security
