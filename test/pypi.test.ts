@@ -488,14 +488,14 @@ describe("comparePypiVersions", () => {
   it("sorts every spelling of the parts of a version as PEP 440 does", () => {
     // Each newer than the one before it.
     const sorted = [
-      "1.0.dev0", "1.0.dev2", "1.0a0.dev1", "1.0a", "1.0a1", "1.0alpha2", "1.0b0", "1.0beta1", "1.0c1", "1.0rc2", "1.0pre3", "1.0preview4",
-      "1.0", "1.0.post0.dev1", "1.0.post", "1.0-1", "1.0.post2", "1.0.rev3", "1.0r4", "1.0.0.1", "1.0.1", "1.10", "1!0.1",
+      "1.0.dev0", "1.0.dev2", "1.0.dev12", "1.0a0.dev1", "1.0a", "1.0a1", "1.0alpha2", "1.0b0", "1.0beta1", "1.0c1", "1.0rc2", "1.0pre3", "1.0preview4",
+      "1.0", "1.0.post0.dev1", "1.0.post", "1.0-1", "1.0.post2", "1.0.rev3", "1.0r4", "1.0-12", "1.0.0.1", "1.0.1", "1.10", "1!0.1", "9!2.0", "10!1.0",
     ];
     for (let index = 1; index < sorted.length; index++) {
       expect(comparePypiVersions(sorted[index]!, sorted[index - 1]!), `${sorted[index]} > ${sorted[index - 1]}`).toBeGreaterThan(0);
       expect(comparePypiVersions(sorted[index - 1]!, sorted[index]!), `${sorted[index - 1]} < ${sorted[index]}`).toBeLessThan(0);
     }
-    for (const [left, right] of [["1.0-post1", "1.0.post1"], ["1.0post1", "1.0_post_1"], ["1.0RC1", "1.0rc1"], ["1.0-dev1", "1.0.dev1"], ["1.0+abc.1", "1.0"], ["0!1.0", "1.0"], ["1.0a", "1.0a0"], ["1.0.post", "1.0.post0"]]) {
+    for (const [left, right] of [["1.0-post1", "1.0.post1"], ["1.0post1", "1.0_post_1"], ["1.0RC1", "1.0rc1"], ["1.0-dev1", "1.0.dev1"], ["1.0+abc.1", "1.0"], ["0!1.0", "1.0"], ["1.0a", "1.0a0"], ["1.0.post", "1.0.post0"], ["1.0dev12", "1.0.dev12"], ["1.0+abc.de.f-9", "1.0"]]) {
       expect(comparePypiVersions(left!, right!), `${left} = ${right}`).toBe(0);
     }
   });
