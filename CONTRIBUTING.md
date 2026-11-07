@@ -21,6 +21,7 @@ npm run build && npm link   # `mcpcage` on your PATH is now this clone's
 npm run typecheck
 npm run lint           # Biome's bug-finding rules, configured in biome.jsonc
 npm test               # unit and integration tests, no Docker needed
+npm run test:coverage  # the same tests, with the coverage report CI checks
 npm run test:docker    # the cage and `protect --inspect` against a real Docker daemon
 ```
 
@@ -42,6 +43,8 @@ code; all of them must pass. The maintainer reviews every pull request before it
   `test/*.fuzz.test.ts`.
 - `npm run typecheck` and `npm test` passing on Linux and on Windows, as CI runs them, and
   `npm run test:docker` when the change touches the cage.
+- Coverage kept at 80% of the statements in `src/` or more: CI runs `npm run test:coverage` on
+  Linux, which fails under the thresholds in vitest.config.ts.
 - `npm run lint` passing: CI runs Biome on Linux, and a warning fails it as an error does. A rule
   that is wrong for one line is silenced on that line with a `biome-ignore` comment that says why.
 - No runtime dependencies. mcpcage stands between a client and code it does not trust, and whatever

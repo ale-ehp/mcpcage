@@ -11,5 +11,16 @@ export default defineConfig({
     exclude: [...configDefaults.exclude, ".stryker-tmp/**"],
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    // Read only with --coverage (npm run test:coverage, which CI runs on Linux). Code that a test
+    // runs through dist/cli.js in a child process is not counted (cli.ts reads 0%), so the numbers
+    // are a floor. Statements must stay at 80% or more; the other thresholds sit a few points under
+    // the measure (88.65% statements, 85.39% branches, 92.1% functions, 89.8% lines in November
+    // 2026) to leave room for branches taken only on another platform.
+    coverage: {
+      provider: "v8",
+      include: ["src/**"],
+      reporter: ["text", "text-summary"],
+      thresholds: { statements: 80, branches: 80, functions: 85, lines: 85 },
+    },
   },
 });
