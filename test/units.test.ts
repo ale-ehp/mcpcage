@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";

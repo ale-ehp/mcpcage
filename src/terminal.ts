@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { writeSync } from "node:fs";
 import type { Writable } from "node:stream";
 import { MessageChannel, receiveMessageOnPort, Worker } from "node:worker_threads";

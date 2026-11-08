@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import fc from "fast-check";

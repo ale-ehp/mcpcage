@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { defineConfig, mergeConfig } from "vitest/config";
 import base from "./vitest.config.ts";
 

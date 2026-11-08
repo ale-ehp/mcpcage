@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 // A bare JSON-RPC server, no SDK, to check what mcpcage's own MCP client does (src/inspect.ts):
 // it prints a log line first, asks the client for a ping, and serves tools/list in two pages.
 // Any step out of order is answered with an error, so the test sees it. RAW_MODE=error breaks tools/list.

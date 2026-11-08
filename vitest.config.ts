@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { configDefaults, defineConfig } from "vitest/config";
 
 // Most tests start the CLI as a process, and some build and start containers. On a busy machine a

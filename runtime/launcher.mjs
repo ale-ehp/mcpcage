@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 // Entry point of every image mcpcage builds for an npm package. It starts the package's bin the
 // way `npx <package>` would, but from the copy installed (with install scripts disabled) at build
 // time, so nothing is downloaded or executed from the registry when the server runs.

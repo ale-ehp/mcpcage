@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { createHash } from "node:crypto";
 
 /** JSON with object keys sorted recursively, so equal values always serialize (and hash) the same. */

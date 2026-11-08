@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { win32 } from "node:path";
 import { canonicalJson, sha256 } from "./canonical.js";
 import { isJsonObject } from "./jsonc.js";

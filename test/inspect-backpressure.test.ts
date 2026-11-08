@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { describe, expect, it, vi } from "vitest";
 import { listTools } from "../src/inspect.js";
 import { MAX_LINE_BYTES } from "../src/lines.js";

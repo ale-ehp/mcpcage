@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 const LF = 0x0a;
 const CR = 0x0d;
 const NOTHING = Buffer.alloc(0);
