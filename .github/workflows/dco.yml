@@ -1,0 +1,36 @@
+name: dco
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sign-off:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Every commit of the pull request certifies the Developer Certificate of Origin with a
+      # Signed-off-by line for its author's email (`git commit -s`), as CONTRIBUTING.md asks. Only the
+      # short hash is printed: the subject is the contributor's text.
+      - name: Check that every commit is signed off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          for commit in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            email=$(git log -1 --format=%ae "$commit")
+            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$commit" | grep -qiF "<$email>"; then
+              echo "::error::commit $(git rev-parse --short "$commit") has no Signed-off-by line for its author"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Sign off each commit with git commit -s, or all of them with git rebase --signoff origin/main."
+            exit 1
+          fi
