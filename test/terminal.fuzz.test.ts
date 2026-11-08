@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { streamLine, streamLines, UNPRINTABLE } from "../src/terminal.js";

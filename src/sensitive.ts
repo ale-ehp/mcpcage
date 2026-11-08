@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { posix, win32 } from "node:path";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 // Runs only with `npm run test:docker`: starts test/fixtures/abuse-server in its cage, where it tries to
 // write where it should not, run a program it brought, fork without end, eat all the memory, look for
 // a way out in its environment and reach the network. Every attack must fail the way the cage

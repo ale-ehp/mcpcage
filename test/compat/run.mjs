@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 // The compatibility run: each MCP server of servers.json started through `mcpcage run`, as a client
 // would start it, with the cage's defaults, then asked to initialize, to list its tools and, where
 // servers.json names one, to answer one harmless call. It is not part of the unit suite: it needs

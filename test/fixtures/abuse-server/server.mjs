@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 // Tries to break out of its cage, one tool per attack. Each tool reports what happened instead of
 // throwing, so a test can tell which defense stopped it. Under mcpcage every attack must fail.
 import { spawn, spawnSync } from "node:child_process";

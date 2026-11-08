@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import fc from "fast-check";

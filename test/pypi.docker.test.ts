@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 // Runs only with `npm run test:docker`: needs a working Docker daemon and the network, for PyPI and
 // for the managed Python.
 import { createHash } from "node:crypto";

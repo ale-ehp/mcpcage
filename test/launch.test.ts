@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { describe, expect, it } from "vitest";
 import { serverType } from "../src/config.js";
 import { cmdNpx, cmdRunner, imageRepository, isLocalPath, npxArgv, parseLaunch, pypiRequirement, serverIdFor, splitPackageSpec, startsUv, toolRunArgs, type LaunchSpec, type PypiLaunch } from "../src/launch.js";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { readdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { afterAll } from "vitest";

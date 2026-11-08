@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { PassThrough, Writable } from "node:stream";

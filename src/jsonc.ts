@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 /*
  * JSON with comments, as VS Code writes its mcp.json files: `//` and `/* *\/` comments and trailing
  * commas are allowed. A small scanner rather than regular expressions, because a comment marker

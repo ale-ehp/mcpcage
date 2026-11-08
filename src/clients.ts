@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { isJsonObject, parseJsonc } from "./jsonc.js";

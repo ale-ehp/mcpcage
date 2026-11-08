@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import type * as Fs from "node:fs";
 import type * as Path from "node:path";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";

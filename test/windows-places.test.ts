@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import type * as ChildProcess from "node:child_process";
 import type * as Fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 // Reports what a server can reach from where it runs. Under mcpcage every answer should be "no".
 import { randomBytes } from "node:crypto";
 import { existsSync, rmSync, writeFileSync } from "node:fs";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 /*
  * The banner at the start of the commands a person runs at a terminal and reads: mcpcage alone,
  * help, doctor and protect. Never anywhere else: the stdout of `run` is the MCP channel, on which

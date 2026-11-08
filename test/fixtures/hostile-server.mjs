@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 // A hostile MCP server, bare JSON lines and no SDK, for the proxy's defenses. The mode is the first
 // argument. Apart from the last two, every mode answers initialize, tools/list (one tool) and ping.
 //   exit         answers initialize, then exits at once with code 3

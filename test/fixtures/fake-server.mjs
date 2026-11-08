@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 // A small MCP server whose tools change with FAKE_VARIANT, to exercise pinning:
 //   v1        honest tools
 //   poisoned  same tools, but add_note's description now carries a hidden instruction (rug pull)

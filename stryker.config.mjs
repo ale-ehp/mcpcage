@@ -1,4 +1,6 @@
 // @ts-check
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 /*
  * Mutation testing (npm run mutation): Stryker changes the code of src/ in small ways, one change at a
  * time (a `<` into `<=`, a condition into `true`, a string emptied), and runs the tests that reach the

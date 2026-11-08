@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { canonicalJson } from "./canonical.js";
 import { describeViolation, MAX_DEPTH, nestedDeeperThan, type ToolDefinition, type Violation } from "./manifest.js";
 import { printable, UNPRINTABLE } from "./terminal.js";

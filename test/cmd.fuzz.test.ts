@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 import { spawn } from "node:child_process";
 import { copyFileSync, linkSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

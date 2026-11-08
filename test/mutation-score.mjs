@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Alessandro Veneziano
 // The mutation score of each file in Stryker's JSON report (npm run mutation), as a Markdown table:
 // the job summary of the mutation workflow, and the numbers in the README.
 //
