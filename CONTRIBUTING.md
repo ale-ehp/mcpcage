@@ -32,8 +32,9 @@ property-based tests with more cases, and mutation testing.
 
 Send a pull request against `main`. For a large change, open an issue first, so that the approach is
 agreed before the code is written. The [ci workflow](.github/workflows/ci.yml) runs the typecheck and
-the tests on Linux and Windows, and the lint and the Docker tests on Linux, and CodeQL analyses the
-code; all of them must pass. The maintainer reviews every pull request before it is merged.
+the tests on Linux and Windows, and the lint and the Docker tests on Linux, the
+[dco workflow](.github/workflows/dco.yml) checks that every commit is signed off, and CodeQL analyses
+the code; all of them must pass. The maintainer reviews every pull request before it is merged.
 [GOVERNANCE.md](GOVERNANCE.md) says how decisions are made and what each role does.
 
 ## What a change needs
@@ -53,10 +54,19 @@ code; all of them must pass. The maintainer reviews every pull request before it
   keeps none.
 - One change per commit. The subject says what the commit does; the body says what was seen, its
   cause, the fix, and how it was checked.
+- Every commit signed off, as the next section says.
 - README.md and THREAT-MODEL.md updated where behaviour changes, and a line in CHANGELOG.md for
   anything users will notice.
 
-Contributions are licensed under the [Apache License 2.0](LICENSE), like the rest of mcpcage.
+## Developer Certificate of Origin
+
+Contributions are licensed under the [Apache License 2.0](LICENSE), like the rest of mcpcage. Every
+commit carries a `Signed-off-by: Your Name <your@email>` line, with the email the commit is authored
+with. By adding it you certify the [Developer Certificate of Origin 1.1](https://developercertificate.org/):
+that you wrote the change, or otherwise have the right to submit it under the project's license.
+`git commit -s` adds the line; `git rebase --signoff origin/main` adds it to every commit of a branch
+that lacks it. The maintainer's commits are signed off the same way. A pull request with a commit
+that is not signed off is not merged.
 
 ## Code of conduct
 
