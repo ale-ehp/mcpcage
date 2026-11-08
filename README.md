@@ -824,3 +824,12 @@ workflow of ale-ehp/mcpcage, and it names the workflow and tag that built it:
 ## License
 
 [Apache-2.0](LICENSE)
+
+### No warranty
+
+mcpcage is a personal project, written and maintained in the author's spare time. It is not a
+commercial product or service. It lowers the risk of running an MCP server and does not remove it:
+no sandbox is escape-proof, and [THREAT-MODEL.md](THREAT-MODEL.md) lists what this one does not stop.
+It is provided "as is", without warranty of any kind. To the fullest extent the law allows, its
+author and contributors are not liable for any loss or damage that comes from using it, as sections
+7 and 8 of the license say. Use it as one layer among others, not as the only one.
