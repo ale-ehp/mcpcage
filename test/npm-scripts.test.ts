@@ -109,7 +109,7 @@ describe("the answer npm view gives, read through the runner option", () => {
   /** installScripts with npm replaced by `runner`, on a fresh cache directory. */
   const ask = (runner: NpmRunner, spec = "pkg@1", offline = false) =>
     installScripts(spec, { offline, cacheDir: mkdtempSync(join(tmpdir(), "mcpcage-npm-")), runner });
-  const answer = (stdout: string, status = 0, stderr = "") => () => ({ status, stdout, stderr });
+  const answer = (stdout: string, status: number | null = 0, stderr = "") => () => ({ status, stdout, stderr });
 
   it("says unknown when npm prints something that is not JSON", () => {
     expect(ask(answer("not json {"))).toEqual({ status: "unknown", scripts: [], detail: "npm view printed something that is not JSON" });
