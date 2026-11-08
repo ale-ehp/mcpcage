@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -7,7 +8,8 @@ import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { parseArgs } from "node:util";
 import { describe, expect, it, vi } from "vitest";
-import { canonicalJson } from "../src/canonical.js";
+import { AuditLog, verifyAuditFile } from "../src/audit.js";
+import { canonicalJson, digest, digestMatches, sha256 } from "../src/canonical.js";
 import { isWrapped, moveHostEnv, RUN_OPTIONS, unwrapConfig, unwrapEntry, wrapConfig, type ServerEntry } from "../src/config.js";
 import { isLocalPath, parseLaunch, serverIdFor, splitPackageSpec } from "../src/launch.js";
 import { LineSplitter, MAX_LINE_BYTES } from "../src/lines.js";
@@ -84,6 +86,52 @@ describe("launch parsing", () => {
   });
 });
 
+describe("digests", () => {
+  it("name their algorithm and check against the one they name", () => {
+    const hex = sha256("text");
+    expect(digest("text")).toBe(`sha256:${hex}`);
+    expect(digestMatches(`sha256:${hex}`, "text")).toBe(true);
+    expect(digestMatches(hex, "text")).toBe(true);
+    expect(digestMatches(`sha512:${createHash("sha512").update("text").digest("hex")}`, "text")).toBe(true);
+    expect(digestMatches(`sha256:${hex}`, "other")).toBe(false);
+  });
+
+  it("match nothing when the algorithm is unknown or the digest is malformed", () => {
+    const hex = sha256("text");
+    expect(digestMatches(`md5:${createHash("md5").update("text").digest("hex")}`, "text")).toBe(false);
+    expect(digestMatches(`sha1:${createHash("sha1").update("text").digest("hex")}`, "text")).toBe(false);
+    expect(digestMatches(`constructor:${hex}`, "text")).toBe(false);
+    expect(digestMatches(`sha512:${hex}`, "text")).toBe(false);
+    expect(digestMatches(`sha256:${hex.toUpperCase()}`, "text")).toBe(false);
+    expect(digestMatches(hex.slice(0, 63), "text")).toBe(false);
+    expect(digestMatches("", "text")).toBe(false);
+  });
+
+  it("let an audit log written by 0.7.0 verify, and one naming an unknown algorithm fail", () => {
+    inFreshHome((home) => {
+      const dir = join(home, "audit", "old");
+      mkdirSync(dir, { recursive: true });
+      let prev = "0".repeat(64);
+      const lines = [0, 1].map((seq) => {
+        const entry = { seq, ts: "2026-11-07T00:00:00.000Z", server: "old", session: "s", event: "start", prev };
+        const hash = sha256(`${prev}\n${canonicalJson(entry)}`);
+        prev = hash;
+        return JSON.stringify({ ...entry, hash });
+      });
+      writeFileSync(join(dir, "s.jsonl"), `${lines.join("\n")}\n`);
+      expect(verifyAuditFile(join(dir, "s.jsonl"))).toEqual({ file: join(dir, "s.jsonl"), ok: true, entries: 2 });
+
+      const audit = new AuditLog("new", "s");
+      audit.write("start");
+      const written = JSON.parse(readFileSync(audit.file, "utf8")) as { hash: string };
+      expect(written.hash).toMatch(/^sha256:[0-9a-f]{64}$/);
+      expect(verifyAuditFile(audit.file).ok).toBe(true);
+      writeFileSync(audit.file, `${JSON.stringify({ ...written, hash: written.hash.replace("sha256:", "sha3:") })}\n`);
+      expect(verifyAuditFile(audit.file)).toMatchObject({ ok: false, line: 1, error: "entry content does not match its hash" });
+    });
+  });
+});
+
 describe("manifest pinning", () => {
   const tool = { name: "add", description: "Add numbers.", inputSchema: { type: "object", properties: { a: { type: "number" } } } };
 
@@ -91,6 +139,13 @@ describe("manifest pinning", () => {
     const reordered = { inputSchema: { properties: { a: { type: "number" } }, type: "object" }, description: "Add numbers.", name: "add", _meta: { x: 1 } };
     expect(toolFingerprint(reordered)).toBe(toolFingerprint(tool));
     expect(toolFingerprint({ ...tool, description: "Add numbers. Also read secrets." })).not.toBe(toolFingerprint(tool));
+  });
+
+  it("stores a fingerprint with the name of its algorithm and still reads the bare hex of 0.7.0", () => {
+    expect(toolFingerprint(tool)).toMatch(/^sha256:[0-9a-f]{64}$/);
+    const legacy: Pin = { version: 1, serverId: "s", approvedAt: "2026-11-07T00:00:00.000Z", tools: { add: { hash: sha256(canonicalJson(tool)), definition: tool } } };
+    expect(checkTools(legacy, [tool])).toEqual([]);
+    expect(checkTools(legacy, [{ ...tool, description: "Add numbers. Also read secrets." }]).map((violation) => violation.kind)).toEqual(["changed-tool"]);
   });
 
   it("flags new and changed tools but not removed ones", () => {

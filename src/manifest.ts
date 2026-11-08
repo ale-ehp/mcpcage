@@ -1,4 +1,4 @@
-import { canonicalJson, sha256 } from "./canonical.js";
+import { canonicalJson, digest, digestMatches } from "./canonical.js";
 import { excerpt, printable } from "./terminal.js";
 
 /** A tool as returned by `tools/list`: name, description, inputSchema, annotations... */
@@ -29,8 +29,17 @@ export type Violation =
  * free-form metadata the model does not see, and including it would raise false alarms.
  */
 export function toolFingerprint(tool: ToolDefinition): string {
+  return digest(fingerprinted(tool));
+}
+
+/** Whether `stored`, a fingerprint saved by this or an older version, is the fingerprint of `tool`. */
+export function fingerprintMatches(stored: string, tool: ToolDefinition): boolean {
+  return digestMatches(stored, fingerprinted(tool));
+}
+
+function fingerprinted(tool: ToolDefinition): string {
   const { _meta: _ignored, ...visible } = tool;
-  return sha256(canonicalJson(visible));
+  return canonicalJson(visible);
 }
 
 /**
@@ -61,7 +70,7 @@ export function checkTools(pin: Pin, tools: ToolDefinition[]): Violation[] {
     const approved = own(pin.tools, tool.name);
     if (!approved) {
       violations.push({ kind: "new-tool", name: tool.name, after: tool });
-    } else if (approved.hash !== toolFingerprint(tool)) {
+    } else if (!fingerprintMatches(approved.hash, tool)) {
       violations.push({ kind: "changed-tool", name: tool.name, before: approved.definition, after: tool });
     }
   }
@@ -81,12 +90,11 @@ export function checkFirstListing(tools: ToolDefinition[], base?: Pin): Violatio
   const known = new Map<string, PinnedTool>(base ? Object.entries(base.tools) : []);
   const violations = new Map<string, Violation>();
   for (const tool of tools) {
-    const hash = toolFingerprint(tool);
     const before = known.get(tool.name);
     if (!before) {
-      known.set(tool.name, { hash, definition: tool });
+      known.set(tool.name, { hash: toolFingerprint(tool), definition: tool });
       violations.set(tool.name, { kind: "new-tool", name: tool.name, after: tool });
-    } else if (before.hash !== hash) {
+    } else if (!fingerprintMatches(before.hash, tool)) {
       violations.set(tool.name, { kind: "changed-tool", name: tool.name, before: before.definition, after: tool });
     }
   }

@@ -312,6 +312,9 @@ The principles of Saltzer and Schroeder, and defense in depth.
   a tool is found by one comparison, of the SHA-256 of the canonical JSON of everything the model
   reads about it (`toolFingerprint` in src/manifest.ts, `canonicalJson` in
   [src/canonical.ts](src/canonical.ts)). The block comes from that comparison, not from the rules.
+  Every stored hash names its algorithm (`sha256:<hex>`, `digest` and `digestMatches` in
+  src/canonical.ts), so moving off SHA-256 changes one constant and leaves existing pins and audit
+  logs readable; a hash naming an unknown algorithm matches nothing.
 - **Open design.** Nothing depends on a secret. The source is public, the rules are fixed and
   published ([README.md](README.md#how-it-works), [src/suspicious.ts](src/suspicious.ts)), and the
   audit chain uses plain SHA-256 without a key (`AuditLog`), whose limit is stated under

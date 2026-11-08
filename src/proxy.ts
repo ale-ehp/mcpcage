@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { AuditLog } from "./audit.js";
-import { canonicalJson, sha256 } from "./canonical.js";
+import { canonicalJson, digest } from "./canonical.js";
 import { LineSplitter, MAX_LINE_BYTES } from "./lines.js";
 import { checkFirstListing, checkTools, isToolList, MAX_DEPTH, MAX_TOOLS, nestedDeeperThan, own, pinTools, tooDeep, type Pin, type ToolDefinition, type Violation } from "./manifest.js";
 import { loadPin, pendingCount, savePending, savePin } from "./pinstore.js";
@@ -156,7 +156,7 @@ export function runProxy(options: ProxyOptions): Promise<number> {
           continue;
         }
         const args = message.params?.arguments ?? {};
-        audit.write("call", { id: message.id, tool, args: sha256(canonicalJson(args)), argKeys: Object.keys(args).sort() });
+        audit.write("call", { id: message.id, tool, args: digest(canonicalJson(args)), argKeys: Object.keys(args).sort() });
         if (id !== undefined) fromClient.set(id, { method: message.method, tool, started: Date.now() });
       } else if (id !== undefined) {
         if (message.method === "tools/list") {

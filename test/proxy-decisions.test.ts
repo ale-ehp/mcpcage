@@ -240,7 +240,7 @@ describe("what the client sends", () => {
     expect(recorded(s).slice(0, 3)).toEqual([
       { event: "start", strict: false, allowServerRequests: false, pinned: true, tools: 1 },
       { event: "client-noise", bytes: 8 },
-      { event: "call", id: 1, tool: "a", args: expect.stringMatching(/^[0-9a-f]{64}$/), argKeys: ["a", "b"] },
+      { event: "call", id: 1, tool: "a", args: expect.stringMatching(/^sha256:[0-9a-f]{64}$/), argKeys: ["a", "b"] },
     ]);
     expect(recorded(s).filter((entry) => entry.event === "call-blocked").map((entry) => [entry.id, entry.tool])).toEqual([[3, "z"], [5, "z"], [null, "z"], [undefined, "z"], [6, undefined]]);
   });

@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { canonicalJson, sha256 } from "./canonical.js";
+import { canonicalJson, digest, digestMatches } from "./canonical.js";
 import { auditDir, cageHome } from "./paths.js";
 
 const GENESIS = "0".repeat(64);
@@ -20,7 +20,8 @@ export interface AuditEntry {
  * Append-only JSONL log where every entry carries the hash of the previous one. Editing,
  * reordering or deleting an entry breaks the chain, and `verifyAuditFile` finds the first break.
  * It makes tampering evident; it cannot stop someone from deleting a whole file (see THREAT-MODEL.md).
- * Arguments and results are never written, only their hashes and sizes.
+ * Arguments and results are never written, only their hashes and sizes. Each hash names its
+ * algorithm (`sha256:<hex>`); a log written by 0.7.0 or earlier, with bare SHA-256 hex, still verifies.
  */
 export class AuditLog {
   readonly file: string;
@@ -46,7 +47,7 @@ export class AuditLog {
       ...data,
       prev: this.prev,
     };
-    const hash = sha256(`${this.prev}\n${canonicalJson(entry)}`);
+    const hash = digest(`${this.prev}\n${canonicalJson(entry)}`);
     appendFileSync(this.file, `${JSON.stringify({ ...entry, hash })}\n`, { mode: 0o600 });
     this.prev = hash;
   }
@@ -73,7 +74,7 @@ export function verifyAuditFile(file: string): VerifyResult {
     const { hash, ...body } = entry;
     if (body.seq !== index) return { file, ok: false, entries: index, line: index + 1, error: `expected seq ${index}, found ${body.seq}` };
     if (body.prev !== prev) return { file, ok: false, entries: index, line: index + 1, error: "prev does not match the hash of the previous entry" };
-    if (sha256(`${prev}\n${canonicalJson(body)}`) !== hash) return { file, ok: false, entries: index, line: index + 1, error: "entry content does not match its hash" };
+    if (typeof hash !== "string" || !digestMatches(hash, `${prev}\n${canonicalJson(body)}`)) return { file, ok: false, entries: index, line: index + 1, error: "entry content does not match its hash" };
     prev = hash;
   }
   return { file, ok: true, entries: lines.length };
