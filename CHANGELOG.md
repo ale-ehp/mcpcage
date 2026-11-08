@@ -3,6 +3,15 @@
 Notable changes to mcpcage. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Tool fingerprints in pins, audit chain hashes and the hash of a call's arguments are stored with
+  the name of their algorithm, as `sha256:<hex>`, so the algorithm can change without a new store
+  format. Pins and audit logs written by 0.7.0 and earlier, with bare SHA-256 hex, still check. A pin
+  written by this version looks changed to 0.7.0, which then asks for the tools to be approved again.
+
 ## [0.7.0] - 2026-11-07
 
 Python servers. A server started with `uvx` from PyPI is caged as an `npx` one is: resolved into a
