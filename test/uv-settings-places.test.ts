@@ -17,14 +17,14 @@ function settingsIn(root: string, relative: string[], text: string): void {
 }
 
 describe("entryUvSettingsReason", () => {
-  it.each(["XDG_CONFIG_HOME", "HOME"])("reads the uv.toml that %s leads to on Linux", (name) => {
+  it.skipIf(process.platform === "win32").each(["XDG_CONFIG_HOME", "HOME"])("reads the uv.toml that %s leads to on Linux", (name) => {
     const root = mkdtempSync(join(tmpdir(), "mcpcage-uv-places-"));
     settingsIn(root, name === "HOME" ? [".config", "uv", "uv.toml"] : ["uv", "uv.toml"], 'index-url = "https://example.invalid/simple"\n');
     const reason = entryUvSettingsReason(layer({ [name]: root }), "linux", "/home/x");
     expect(reason).toContain(`sets ${name}`);
   });
 
-  it("reads each directory of XDG_CONFIG_DIRS, and ignores one that is empty", () => {
+  it.skipIf(process.platform === "win32")("reads each directory of XDG_CONFIG_DIRS, and ignores one that is empty", () => {
     const root = mkdtempSync(join(tmpdir(), "mcpcage-uv-places-"));
     settingsIn(root, ["uv", "uv.toml"], 'index-url = "https://example.invalid/simple"\n');
     expect(entryUvSettingsReason(layer({ XDG_CONFIG_DIRS: `:${root}:` }), "linux", "/home/x")).toContain("sets XDG_CONFIG_DIRS");
