@@ -83,8 +83,10 @@ version is approved with two-factor authentication, which the workflow cannot gi
 
 1. Commit the version in package.json and package-lock.json and its CHANGELOG.md entry on `main`,
    as `mcpcage X.Y.Z`, and push.
-2. Tag that commit and push the tag: `git tag -a vX.Y.Z -m "mcpcage X.Y.Z"`, then
-   `git push origin vX.Y.Z`.
+2. Tag that commit with a signed tag and push it: `git tag -s vX.Y.Z -m "mcpcage X.Y.Z"`, then
+   `git push origin vX.Y.Z`. The tag is signed with the maintainer's SSH key (`gpg.format ssh`),
+   which is registered on GitHub as a signing key, so GitHub shows the tag as Verified. Tags up to
+   v0.7.0 are not signed; the tag ruleset keeps them from being moved, so they stay as they are.
 3. Wait for the release workflow to finish. Its summary names the staged version and its stage id.
 4. Approve the staged version: on npmjs.com, signed in, open **Staged Packages** in the account
    menu, check the version, click **Approve** and confirm with the security key. From a terminal
