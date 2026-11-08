@@ -47,7 +47,7 @@ describe("the status line of a server", () => {
     ["a plain cage", {}, "caged"],
     ["a mount run cannot start", { offDrive: "\\\\srv\\share" }, "cannot start: --mount"],
     ["a command line run refuses", { runRefuses: "bad option" }, "cannot start: bad option"],
-    ["another program with the name", { mcpcage: "other program" }, "which is not the mcpcage on your PATH"],
+    ["another program with the name", { mcpcage: "other program", command: "/opt/other/mcpcage run demo" }, "which is not the mcpcage on your PATH"],
     ["a program that was not found", { mcpcage: "not found", command: "gone run demo" }, "is not on your PATH"],
     ["a path that was not found", { mcpcage: "not found", command: "/x/gone run demo" }, "was not found"],
     ["a script run by another program", { mcpcage: "other program", script: "/x/cli.js" }, "which are not mcpcage's cli.js and your node"],
