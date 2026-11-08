@@ -28,6 +28,13 @@ npm run test:docker    # the cage and `protect --inspect` against a real Docker 
 The [Development](README.md#development) section of the README has the longer runs: the
 property-based tests with more cases, and mutation testing.
 
+## Small tasks to start with
+
+Issues that are small, well defined and need no knowledge of the whole code carry the
+[good first issue](https://github.com/ale-ehp/mcpcage/labels/good%20first%20issue) label: a missing
+test for one function, an entry for the compatibility table. Each one says which file to look at and
+what is expected. Comment on the issue before you start, so that two people do not do the same work.
+
 ## Proposing a change
 
 Send a pull request against `main`. For a large change, open an issue first, so that the approach is
