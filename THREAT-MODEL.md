@@ -177,6 +177,21 @@ mcpcage protects the person running an MCP client from the MCP servers that clie
   JSON-RPC requires. A server that answers the request with id `5` using the id `"5"` has its answer
   dropped as unsolicited, and the request goes unanswered.
 - **Prompts and resources.** Their descriptions are not pinned yet.
+- **`_meta` of a tool is not pinned.** The fingerprint covers what the MCP specification has the model
+  read (name, title, description, schemas, annotations) and leaves out `_meta`, free-form metadata
+  that a server may change without a block. A client that hands `_meta` to the model, or acts on it
+  (to open a resource it names, say), is outside what the pin protects. This was found in the
+  [security review](SECURITY-REVIEW.md) of November 2026.
+- **Notifications from the server are passed on unread.** A notification is not a request and needs no
+  answer, so the proxy passes it as it is, only after the checks on its shape and size. The rules
+  that read tool results do not read it: a client that shows a logging notification
+  (`notifications/message`) to the model or to the user shows what the server wrote. The
+  [security review](SECURITY-REVIEW.md) found this too.
+- **Where npm takes a package from.** For an `npx` entry mcpcage hands the package name and range to
+  `npm install` in the build, with install scripts disabled, as it does for a registry package. It
+  does not restrict that name to the registry: npm also takes a git URL or a GitHub shorthand in its
+  place. The cage and the pin apply as for any package; the guarantees about the registry's
+  integrity hashes do not carry over to another source.
 - **Remote MCP servers.** Nothing runs locally to cage; they are out of scope. `protect` lists
   them and reports credentials written in clear text in their headers.
 - **Servers not started with `npx` or `uvx`.** `uv run`, `pipx run`, `node`, `bun` or a binary run
