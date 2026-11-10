@@ -1,6 +1,6 @@
 # Base images mcpcage builds caged servers from, pinned by digest. mcpcage reads the FROM lines
 # below at build time; keeping them in a Dockerfile lets Dependabot propose digest updates.
-FROM node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS install
+FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d AS install
 FROM gcr.io/distroless/nodejs22-debian12:nonroot@sha256:13593b7570658e8477de39e2f4a1dd25db2f836d68a0ba771251572d23bb4f8e AS runtime
 # PyPI servers (uvx). The resolve image runs `uv pip compile` (it needs an interpreter to query, which
 # the distroless uv image cannot even look for); the uv image gives the install stage its uv binary,
