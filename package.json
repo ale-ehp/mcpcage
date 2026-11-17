@@ -43,7 +43,7 @@
     "supply-chain"
   ],
   "devDependencies": {
-    "@biomejs/biome": "2.6.6",
+    "@biomejs/biome": "2.6.7",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@stryker-mutator/core": "10.1.1",
     "@stryker-mutator/vitest-runner": "10.1.1",
